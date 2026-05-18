@@ -1,0 +1,21 @@
+- name: instance_create
+  description: "创建 Lab4AI 云实例 (CPU 或 GPU)，返回 serverId 和 SSH 连接信息"
+  entry_point: "scripts/create.py:create_instance"
+  parameters:
+    type: object
+    properties:
+      intent_str:
+        type: string
+        description: "实例规格描述，如 'CPU 2核' 或 '1张GPU' 或 'GPU 1张 image=my-tag'"
+    required: ["intent_str"]
+
+- name: instance_stop
+  description: "关闭并释放 Lab4AI 云实例，传入 serverId"
+  entry_point: "scripts/stop.py:stop_instance"
+  parameters:
+    type: object
+    properties:
+      server_id:
+        type: string
+        description: "要关闭的实例 serverId"
+    required: ["server_id"]

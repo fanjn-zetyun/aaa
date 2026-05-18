@@ -1,0 +1,14 @@
+{
+  "name": "lab4ai-image-manage",
+  "version": "1.0.0",
+  "description": "Lab4AI 镜像：拉取 imageTag 列表，结合项目 README/依赖启发式推荐镜像标签。",
+  "trigger": [
+    "镜像列表",
+    "imageTag",
+    "Lab4AI 镜像",
+    "推荐镜像",
+    "show_image",
+    "image_choose"
+  ],
+  "author": "lab4ai"
+}

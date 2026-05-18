@@ -1,0 +1,10 @@
+- name: repo_audit
+  description: "对 GitHub 项目进行复现可行性审计，输出 0-100 评分和详细审计报告"
+  entry_point: "scripts/main.py:audit_repo"
+  parameters:
+    type: object
+    properties:
+      repo_url:
+        type: string
+        description: "GitHub 仓库 HTTPS URL"
+    required: ["repo_url"]

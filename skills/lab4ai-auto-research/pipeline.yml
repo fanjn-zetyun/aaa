@@ -1,0 +1,431 @@
+# Autoresearch pipeline — integrates step markdown files under lab4ai-auto-research/scripts/
+# Human/agent details live in scripts/*.md; on conflict, markdown wins.
+name: autoresearch_pipeline
+version: "2.0"
+root: lab4ai-auto-research
+source_documents:
+  policies: scripts/skill_02policies.md
+  readme: README.md
+  driver_skill: SKILL.md
+description: >
+  Structured pipeline for autonomous training experimentation.
+  技能流程与管线 stages 顺序一致（skill_01→skill_08）: skill_01lab_instance.md, skill_02policies.md, skill_03setup.md,
+  skill_04environment.md, skill_05experiment_logging.md, skill_06loop.md, skill_07report.md, skill_08stop_instance.md.
+  各分步 Markdown 第一行标题为 Step 1…Step 8（数字与文件名 skill_0N 一致）；Gate log 中的 Step 1/2/2.5/… 仍以 skill_02policies.md 为准。
+  Lab=yes 时先建机（skill_01）再补全 Gate 与全局规则（skill_02），再做项目 Setup（skill_03）；Gate log 中 Step 1/2 允许非时间序达标，但进入 Step 2.5 前须均为 yes。
+  instance_teardown 仍随 Gate log 中 Step 2 是否执行。
+  Each stage references one skill file; see skill_documents below.
+
+skill_documents:
+  - stage_id: instance_provision
+    skill_file: scripts/skill_01lab_instance.md
+    title: "Step 1: Lab instance (skill_01 heading; Gate Step 2 when Lab=yes)"
+  - stage_id: policies
+    skill_file: scripts/skill_02policies.md
+    title: "Step 2: Policies — gates and global rules (skill_02 heading)"
+  - stage_id: setup
+    skill_file: scripts/skill_03setup.md
+    title: "Step 3: Project setup (skill_03 heading; Gate Step 1)"
+  - stage_id: environments
+    skill_file: scripts/skill_04environment.md
+    title: "Step 4: Environments (skill_04 heading; Gate Step 2.5)"
+  - stage_id: experimentation
+    skill_file: scripts/skill_05experiment_logging.md
+    title: "Step 5: Experimentation (skill_05 heading; Gate Steps 3–4)"
+  - stage_id: output_and_logging
+    skill_file: scripts/skill_05experiment_logging.md
+    title: "Step 5: Logging results (same skill_05 file as experimentation)"
+  - stage_id: experiment_loop
+    skill_file: scripts/skill_06loop.md
+    title: "Step 6: Experiment loop (skill_06 heading; Gate Step 5)"
+  - stage_id: final_report
+    skill_file: scripts/skill_07report.md
+    title: "Step 7: Final report (skill_07 heading; Gate Step 6)"
+  - stage_id: instance_teardown
+    skill_file: scripts/skill_08stop_instance.md
+    title: "Step 8: Stop instance (skill_08 heading; Gate Step 7 when Gate Step 2 ran)"
+
+global_policies:
+  policies_skill: scripts/skill_02policies.md
+  response_language_default: zh-CN
+  final_deliverable_required: true
+  final_report_file_default: autoresearch_report.md
+  require_prewrite_confirm: true
+  must_display_commands_before_execution: true
+  execution_order:
+    document_section: 'scripts/skill_02policies.md — heading: Execution order（强制按序，禁止跳步）'
+    rule: >
+      Each scripts/skill_0N…md document’s first heading line is Step N (N = 1…8, matching the filename).
+      Runtime order follows stages: instance_provision → policies → setup → environments → experimentation → output_and_logging → experiment_loop → final_report → instance_teardown.
+      Gate log rows (Step 1, Step 2, Step 2.5, Step 5, Step 6, Step 7, etc.) remain as defined in skill_02policies.md and are not the same numbers as the skill file Step 1…8 headings.
+      Gate log Step 1 / Step 2 may be satisfied out of chronological order but both must be yes before Step 2.5 when Lab=yes.
+      Do not enter a later phase until prior stage gates and deliverables in skill files are satisfied.
+    progress_declaration_recommended: true
+  gate_protocol:
+    mandatory: true
+    document_section: 'scripts/skill_02policies.md — heading: Gate protocol（强制执行：未做 = 未按本 skill 执行）'
+    rule: >
+      stages 顺序为 instance_provision → policies → setup → …；在 policies 阶段须按 skill_02policies.md 输出并更新 Gate log。
+      Before substantive project work (setup 及之后) and at every phase transition, keep Gate log consistent with skill_02policies.md.
+      The next action must match the first row that is still "no". Skipping gates invalidates the run.
+    forbidden_skips:
+      - id: train_before_gates
+        rule: "No training_command or Step 5 loop until Gate log shows Step 1 + Step 2 (if lab) + Step 2.5 yes and Step 5 pre-loop yes (Step 1/2 may be completed in pipeline order after instance+policies stages)."
+      - id: loop_without_user_limits
+        rule: "No LOOP FOREVER until user explicitly confirms stop conditions and per-run limits."
+      - id: proceed_without_stop_conditions_confirmation
+        rule: >
+          No progress into training execution stages (training_command, Step 5 loop, and downstream loop-driven runs)
+          until stop conditions are explicitly asked and user-confirmed in Step 5 pre-loop gates.
+      - id: report_before_loop_end
+        rule: "No Step 6 final report marked complete until loop ended or user interrupt with no new rounds."
+      - id: stop_instance_before_report
+        rule: "If Step 2 (lab instance) ran, no instance_stop before Step 6 artifact exists."
+      - id: stop_instance_without_prompt_or_timeout
+        rule: >
+          For Step 7 teardown (when Step 2 ran), first ask user whether to stop instance now.
+          User yes => stop immediately; user no => keep pending by user choice; no reply for 10 minutes => timeout auto-stop.
+          Do not execute instance_stop without satisfying one of these branches.
+      - id: stop_instance_auto_skipped_when_step2_ran
+        rule: >
+          If Step 2 ran, Step 7 cannot be marked skipped/not_applicable by default.
+          Must ask user whether to stop instance, then resolve by yes/no/10-minute-timeout branch.
+      - id: multi_dataset_without_user_choice
+        rule: >
+          If the project documents more than one distinct dataset to download or choose from, list options and ask
+          which dataset(s) the user wants before any bulk download; do not default to all or pick one arbitrarily
+          (see scripts/skill_03setup.md Step 1 item 8 and skill_02policies.md forbidden table).
+      - id: default_lab_no_without_explicit_confirmation
+        rule: >
+          instance_provision cannot be auto-skipped by assuming Lab=no.
+          Before deciding yes/no, the agent must explicitly ask "是否创建实验室实例（Lab instance flow）" and record
+          the user's exact choice in Gate log; if unanswered/unclear, block at Step 2 and do not proceed to later stages.
+  confirmation_policy:
+    strict: true
+    rule: "Any step marked confirm_required or any material choice must be user-confirmed before proceeding."
+    response_language_rule: "User-facing narrative responses default to Simplified Chinese unless user explicitly requests another language."
+    exception:
+      applies_to: loop_iterations_only
+      requires: pre_loop_gates_confirmed
+
+placeholders:
+  project_root: "<project_root>"
+  git_url: "<git_url>"
+  base_branch: "<base_branch>"
+  run_tag: "<tag>"
+  env_name: "<env_name>"
+  training_command: "<training_command>"
+  primary_metric: "<primary_metric>"
+  round_start_sha: "<round_start_sha>"
+
+stages:
+  - id: instance_provision
+    title: "Step 1: Provision compute instance (when Lab=yes; skill_01)"
+    skill_file: scripts/skill_01lab_instance.md
+    confirm_required: true
+    gates:
+      - lab_instance_flow_choice_confirmed_before_create
+      - invoke_tool_instance_create_returns_code_zero
+      - ssh_login_using_response_fields_before_step3
+    tasks:
+      - id: ask_user_whether_create_instance
+        confirm_required: true
+        description: "Explicitly ask user yes/no for Lab instance flow before any instance_create call; unanswered is unresolved (must block). Only explicit user no can mark Step 2 skipped."
+      - id: python_invoke_instance_create
+        description: "from utils.InvokeTool import invoke_tool; invoke_tool('instance_create', paras)"
+      - id: parse_ssh_fields_from_data
+        description: "sshHost, sshPort, sshUser, sshPwd from out['data']"
+      - id: ssh_interactive_or_sshpass
+        description: "Interactive ssh -p <port> <user>@<host>; or sshpass -e if allowed"
+      - id: step2_env_on_lab_host_after_ssh
+        description: "After SSH, run Step 2.5 (skill_04environment.md) on the lab host for env selection/build/activate; Step 2.5 is not done before Step 2 (lab) when Lab=yes."
+    command_templates:
+      ssh_interactive:
+        - ssh -p "<sshPort>" "<sshUser>@<sshHost>"
+      ssh_noninteractive_example:
+        - export SSHPASS='<from_response_only>'
+        - sshpass -e ssh -o StrictHostKeyChecking=accept-new -p "<sshPort>" "<sshUser>@<sshHost>"
+        - unset SSHPASS
+
+  - id: policies
+    title: "Step 2: Policies — gates and global rules (skill_02)"
+    skill_file: scripts/skill_02policies.md
+    confirm_required: true
+    gates:
+      - gate_log_output_per_skill_02policies
+      - lab_instance_flow_choice_recorded_in_gate_log
+    tasks:
+      - id: apply_gate_protocol_after_instance_stage
+        confirm_required: true
+        description: "Follow scripts/skill_02policies.md; refresh Gate log (Step 2 row if Lab=yes) before project setup."
+
+  - id: setup
+    title: "Step 3: Project setup (skill_03; Gate Step 1)"
+    skill_file: scripts/skill_03setup.md
+    confirm_required: true
+    gates:
+      - code_source_selected
+      - project_root_confirmed
+      - entrypoint_selected_if_multiple
+      - detection_summary_confirmed
+      - pre_loop_conditions_confirmed_later
+    tasks:
+      - id: confirm_code_source
+        confirm_required: true
+        options: [local_path, git_url]
+      - id: confirm_project_root
+        confirm_required: true
+      - id: choose_run_tag
+        confirm_required: false
+      - id: create_experiment_branch
+        confirm_required: false
+      - id: read_project_docs
+        confirm_required: false
+        extract:
+          - env_install_method
+          - training_launch_command
+          - data_preparation
+          - allowed_files
+          - primary_metric_and_direction
+      - id: detect_training_entrypoint
+        confirm_required: true
+        rule_if_multiple: "List all candidates and require user to pick exactly one."
+      - id: detect_hparam_config
+        confirm_required: false
+      - id: confirm_detection_summary
+        confirm_required: true
+        include:
+          - selected_entrypoint_and_launch_command
+          - config_path_or_code_based_config
+          - config_passing_method
+      - id: check_data_availability
+        confirm_required: true
+      - id: init_results_tsv
+        confirm_required: false
+    command_templates:
+      local_path:
+        - cd "<project_root>"
+      git_url:
+        - git clone "<git_url>" "<project_root>"
+        - cd "<project_root>"
+      branch_and_header:
+        - git status
+        - git fetch origin
+        - git checkout <base_branch>   # use project default branch; no explicit user confirmation required
+        - git pull --ff-only
+        - git checkout -b "autoresearch/<tag>"
+        - printf 'commit\t<primary_metric>\tmemory_gb\tstatus\tdescription\n' > results.tsv
+
+  - id: environments
+    title: "Step 4: Environments (skill_04; Gate Step 2.5)"
+    skill_file: scripts/skill_04environment.md
+    confirm_required: true
+    gates:
+      - explicit_existing_env_question_asked
+      - image_availability_resolved_before_env_create
+      - reuse_existing_env_or_image_confirmed
+      - environment_plan_confirmed
+    delegated_skill:
+      when: "no_usable_virtual_environment"
+      file: scripts/create_env.md
+    tasks:
+      - id: ask_user_existing_env_explicitly
+        confirm_required: true
+      - id: confirm_existing_env
+        confirm_required: true
+      - id: check_workspace_envs_for_user_env
+        confirm_required: true
+      - id: resolve_image_availability_before_new_env
+        confirm_required: true
+      - id: confirm_env_image_template
+        confirm_required: true
+      - id: record_image_check_conclusion
+        description: "Record one of: image_available | image_unavailable | user_declined_image"
+        confirm_required: true
+      - id: build_or_activate_env
+        confirm_required: true
+      - id: verify_interpreter
+        confirm_required: false
+    command_templates:
+      check_image_availability_example:
+        - "# Ask user whether reusable env image/template exists"
+        - "# Record conclusion: image_available | image_unavailable | user_declined_image"
+      check_workspace_envs:
+        - ls -la /workspace/envs
+        - ls -la "/workspace/envs/<user_env_name>"
+      conda_with_environment_yml:
+        - conda env create -f environment.yml -n <env_name>
+        - conda run -n <env_name> python -c "import sys; print(sys.executable)"
+      conda_with_requirements:
+        - conda create -n <env_name> python=3.10 -y
+        - conda run -n <env_name> pip install -r requirements.txt
+      uv_example:
+        - export UV_HTTP_TIMEOUT=3600
+        - export UV_HTTP_CONNECT_TIMEOUT=3600
+        - export UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+        - uv cache clean
+        - uv sync --reinstall
+        - uv sync
+        - uv pip install flash-attn --no-build-isolation
+      verify:
+        - conda run -n <env_name> python -c "import sys; print(sys.executable)"
+    rules:
+      - "Never install into system/global Python."
+      - "Resolve and record image availability (image_available / image_unavailable / user_declined_image) before any new env creation."
+      - "Prefer existing user-specified env under /workspace/envs; do not recreate when usable."
+      - "If image_available, prefer image/template reuse instead of direct new env creation."
+      - "Only install in user-confirmed virtual environment."
+      - "Respect README-mandated toolchain."
+
+  - id: experimentation
+    title: "Step 5: Experimentation (skill_05; Gate Step 3)"
+    skill_file: scripts/skill_05experiment_logging.md
+    confirm_required: false
+    tasks:
+      - id: define_hypothesis
+      - id: keep_modification_scope_safe
+    constraints:
+      allowed:
+        - training_entrypoint_related_code
+        - model_optimizer_hparam_configs
+      forbidden:
+        - files_forbidden_by_readme
+        - evaluation_protocol_changes
+        - environment_definition_files
+
+  - id: output_and_logging
+    title: "Step 5: Logging results (skill_05; Gate Step 4)"
+    skill_file: scripts/skill_05experiment_logging.md
+    confirm_required: false
+    tasks:
+      - id: parse_metrics_from_run_log
+      - id: append_results_tsv
+    command_templates:
+      metric_extract:
+        - grep -E "val_|acc|bleu|mAP|loss|peak_vram_mb|max_memory" run.log
+      append_row:
+        - printf '%s\t%s\t%s\t%s\t%s\n' "<short_commit>" "<metric_value>" "<memory_gb>" "keep|discard|crash" "one-line description" >> results.tsv
+
+  - id: experiment_loop
+    title: "Step 6: The experiment loop (skill_06; Gate Step 5)"
+    skill_file: scripts/skill_06loop.md
+    confirm_required: true
+    pre_loop_gates:
+      - stop_conditions_confirmed
+      - per_run_limit_confirmed
+      - step1_confirmed
+      - step2_instance_create_and_ssh_ready
+      - step2_5_environment_confirmed
+    stop_conditions:
+      options:
+        - max_iterations
+        - total_duration
+        - wall_clock_stop_time
+        - manual_stop_only
+        - per_run_wall_clock_limit
+      fallback:
+        infer_from:
+          - readme
+          - training_budget
+          - prior_run_log
+        require_user_confirmation: true
+    timeout_derivation_priority:
+      - user_confirmed_per_run_limit
+      - readme_or_config_limit
+      - baseline_time_multiple_1_5x_to_2x_plus_buffer
+      - conservative_first_run_cap_then_refresh
+    loop:
+      mode: autonomous_after_preloop_confirmation
+      steps:
+        - check_git_state
+        - edit_for_single_hypothesis
+        - commit
+        - activate_and_verify_conda
+        - run_training_to_log
+        - extract_metrics
+        - if_empty_then_crash_debug
+        - append_results
+        - keep_if_improved_else_revert
+    user_interrupt:
+      allowed_anytime: true
+      on_interrupt:
+        - stop_starting_new_rounds
+        - terminate_inflight_if_safe
+        - ensure_repo_consistency
+        - continue_to_final_report
+    command_templates:
+      one_iteration:
+        - cd "<project_root>"
+        - python -c "import sys; print(sys.executable)"
+        - git status
+        - git rev-parse HEAD
+        - git add -A
+        - git commit -m "autoresearch: <short hypothesis>"
+        - (<training_command>) > run.log 2>&1
+        - grep -E "val_|acc|bleu|mAP|loss|peak_vram_mb|max_memory|val_bpb" run.log | tail -n 20
+        - "# If empty: tail -n 50 run.log"
+        - "# On discard: git reset --hard <round_start_sha>"
+
+  - id: final_report
+    title: "Step 7: Final automation experiment report (skill_07; Gate Step 6)"
+    skill_file: scripts/skill_07report.md
+    mandatory: true
+    confirm_required: false
+    artifact:
+      path_default: "<project_root>/autoresearch_report.md"
+      overwrite: true
+    required_sections:
+      - metadata
+      - summary_of_outcomes
+      - results_table_or_excerpt
+      - status_counts
+      - notable_failures
+      - next_steps
+    edge_cases:
+      results_missing_or_empty:
+        - clearly_state_missing_data
+        - list_attempts
+        - reference_partial_logs
+    command_templates:
+      shell_example:
+        - cd "<project_root>"
+        - ls -la autoresearch_report.md
+    handoff_to_instance_teardown:
+      required_when: instance_provision_ran
+      rule: >
+        After report artifact exists, enter Step 8 with explicit stop-instance question.
+        If no reply for 10 minutes, proceed with timeout auto-stop and record the reason.
+
+  - id: instance_teardown
+    title: "Step 8: Stop lab instance (skill_08; Gate Step 7 after Gate Step 6 if Gate Step 2 ran)"
+    skill_file: scripts/skill_08stop_instance.md
+    mandatory_when: instance_provision_ran
+    confirm_required: false
+    decision_policy:
+      ask_user_before_stop: true
+      no_reply_timeout_minutes: 10
+      on_user_yes: stop_immediately
+      on_user_no: keep_pending_by_user_choice
+      on_no_reply_timeout: timeout_auto_stop
+    gates:
+      - stop_decision_resolved_by_user_or_timeout
+      - server_id_from_instance_create_persisted
+      - instance_stop_code_zero_or_documented_failure
+    tasks:
+      - id: ask_user_stop_now
+        description: "Ask user whether to stop instance now; record yes/no/no-reply."
+      - id: wait_for_user_reply_with_timeout
+        description: "If no reply for 10 minutes, resolve by timeout_auto_stop."
+      - id: python_invoke_instance_stop
+        description: "from script.utils.InvokeTool import invoke_tool; invoke_tool('instance_stop', paras with serverId)"
+      - id: verify_stop_response
+        description: "Check out['code']; surface message on failure"
+      - id: annotate_stop_reason
+        description: "Record stop branch: user_yes | user_no_pending | timeout_auto_stop."
+
+completion_criteria:
+  - all required confirmations collected at gates
+  - loop stopped by confirmed conditions or user interrupt
+  - final report artifact written
+  - no completion without final report
+  - if lab instance was created in Step 2, instance_stop attempted after Step 6 with saved serverId

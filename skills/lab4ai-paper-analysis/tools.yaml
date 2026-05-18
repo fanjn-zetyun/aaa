@@ -1,0 +1,16 @@
+- name: paper_analyze
+  description: "解析论文 PDF，提取研究背景、创新点、Baseline 指标、超参数和数据集信息"
+  entry_point: "scripts/analyze_paper.py:analyze_paper_tool"
+  parameters:
+    type: object
+    properties:
+      github_url:
+        type: string
+        description: "GitHub 项目 URL（从 README 提取论文链接）"
+      paper_url:
+        type: string
+        description: "论文 PDF 的直接 URL（arXiv 等）"
+      output_dir:
+        type: string
+        description: "输出目录路径"
+    required: []

@@ -1,0 +1,13 @@
+# Autoresearch 管线元数据（对齐 lab4ai-skills-master 中各 skill 的 manifest.yaml 角色）
+# 本仓库仍以 pipeline.yml 为机器可读编排真源；本文件供 Agent / 市场索引「入口与版本」。
+
+name: autoresearch_pipeline
+version: "2.0.0"
+description: >
+  自动化训练实验编排：策略与门禁、项目设置、Lab 实例（可选）、环境、
+  实验记录与循环、终稿报告、实例释放。驱动文档为 SKILL.md，结构定义见 pipeline.yml。
+
+orchestrator: pipeline.yml
+driver_skill: SKILL.md
+policies_document: scripts/skill_02policies.md
+language: zh-CN

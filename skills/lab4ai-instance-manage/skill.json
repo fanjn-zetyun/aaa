@@ -1,0 +1,14 @@
+{
+  "name": "lab4ai-instance-manage",
+  "version": "1.0.0",
+  "description": "Lab4AI 云实例创建与关闭：REST API 返回 SSH 信息，按 serverId 释放实例。create.py/stop.py 使用 httpx；若未安装会在首次运行时自动 pip install httpx。",
+  "trigger": [
+    "创建 Lab4AI 实例",
+    "关闭 Lab4AI 实例",
+    "instance_create",
+    "instance_stop",
+    "lab4ai 实例",
+    "释放 GPU 实例"
+  ],
+  "author": "lab4ai"
+}
