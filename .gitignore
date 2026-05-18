@@ -24,6 +24,9 @@ runtime/
 .DS_Store
 Thumbs.db
 
+# Claude Code
+.claude/
+
 # Env / secrets
 .env
 .env.local

@@ -1,0 +1,115 @@
+import { FormEvent, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { apiPost } from "../lib/api";
+
+interface WelcomePageProps {
+  title: string;
+  placeholder: string;
+  suggestions: string[];
+  requireGithubUrl?: boolean;
+}
+
+export default function WelcomePage({ title, placeholder, suggestions, requireGithubUrl = true }: WelcomePageProps) {
+  const [input, setInput] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const navigate = useNavigate();
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!input.trim()) return;
+    setError("");
+    setSubmitting(true);
+
+    const urlMatch = input.match(/(https?:\/\/github\.com\/[^\s]+)/);
+    const githubUrl = urlMatch ? urlMatch[1] : "";
+    const paperMatch = input.match(/(https?:\/\/arxiv\.org\/[^\s]+)/);
+    const paperUrl = paperMatch ? paperMatch[1] : "";
+    const userPrompt = input
+      .replace(urlMatch?.[0] || "", "")
+      .replace(paperMatch?.[0] || "", "")
+      .trim();
+
+    if (requireGithubUrl && !githubUrl) {
+      setError("请在消息中包含一个 GitHub URL");
+      setSubmitting(false);
+      return;
+    }
+
+    try {
+      const inst = await apiPost<{ id: number }>("/api/claw-instances", {
+        github_url: githubUrl || null,
+        paper_url: paperUrl || null,
+        user_prompt: userPrompt || null,
+      });
+      navigate(`/reproduce/task/${inst.id}`);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "创建失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e as unknown as FormEvent);
+    }
+  }
+
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center px-8 py-8">
+      <h1 className="text-[2.2rem] font-serif text-[#333] tracking-wide mb-8">
+        {title}
+      </h1>
+
+      <div className="w-full max-w-3xl">
+        <form onSubmit={handleSubmit}>
+          <div className="w-full flex flex-col rounded-2xl border border-slate-200 bg-white shadow-[0_12px_40px_-12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.02)] focus-within:border-slate-300 transition-colors">
+            <div className="px-5 py-4">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={placeholder}
+                rows={4}
+                className="w-full text-[14px] text-slate-700 placeholder-slate-300 bg-transparent resize-none leading-relaxed"
+              />
+            </div>
+
+            <div className="px-5 pb-4 pt-1 flex justify-between items-center border-t border-slate-100">
+              <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                <span>支持 GitHub URL + 自然语言指令</span>
+              </div>
+              <button
+                type="submit"
+                disabled={submitting || !input.trim()}
+                className="w-[32px] h-[32px] flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 disabled:bg-slate-300 text-white transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </form>
+
+        {error && (
+          <p className="mt-3 text-[13px] text-red-500 text-center">{error}</p>
+        )}
+
+        <div className="mt-6 flex flex-wrap gap-2 justify-center">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              onClick={() => setInput(s)}
+              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-[12px] text-slate-500 hover:text-slate-700 hover:border-slate-300 transition-colors"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

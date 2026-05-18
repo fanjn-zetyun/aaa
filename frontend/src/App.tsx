@@ -1,9 +1,13 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { getToken } from "./lib/api";
+import AppLayout from "./layouts/AppLayout";
 import LoginPage from "./pages/LoginPage";
-import DashboardPage from "./pages/DashboardPage";
-import NewTaskPage from "./pages/NewTaskPage";
-import TaskDetailPage from "./pages/TaskDetailPage";
+import ReproducePage from "./pages/ReproducePage";
+import SearchPage from "./pages/SearchPage";
+import PaperOnlyPage from "./pages/PaperOnlyPage";
+import ExperimentsPage from "./pages/ExperimentsPage";
+import PolishPage from "./pages/PolishPage";
+import ChatPage from "./pages/ChatPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   return getToken() ? <>{children}</> : <Navigate to="/login" replace />;
@@ -14,30 +18,21 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route
-        path="/dashboard"
         element={
           <PrivateRoute>
-            <DashboardPage />
+            <AppLayout />
           </PrivateRoute>
         }
-      />
-      <Route
-        path="/tasks/new"
-        element={
-          <PrivateRoute>
-            <NewTaskPage />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path="/tasks/:id"
-        element={
-          <PrivateRoute>
-            <TaskDetailPage />
-          </PrivateRoute>
-        }
-      />
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      >
+        <Route index element={<Navigate to="/reproduce" replace />} />
+        <Route path="/reproduce" element={<ReproducePage />} />
+        <Route path="/reproduce/task/:taskId" element={<ChatPage />} />
+        <Route path="/search" element={<SearchPage />} />
+        <Route path="/paper-only" element={<PaperOnlyPage />} />
+        <Route path="/experiments" element={<ExperimentsPage />} />
+        <Route path="/polish" element={<PolishPage />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/reproduce" replace />} />
     </Routes>
   );
 }

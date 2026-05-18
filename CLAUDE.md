@@ -111,7 +111,7 @@ uv run ruff check backend/ --fix
 uv run ruff format backend/
 ```
 
-### 前端（待初始化）
+### 前端
 
 ```bash
 cd frontend
@@ -177,17 +177,21 @@ npm run dev    # Vite dev server → http://localhost:5173
   - OpenClaw 集成：先 mock 后真实，按任务隔离 workspace
   - 前端工具链：Vite + React + TypeScript
   - Lab4AI 凭证：通过管理员后台页面配置
-- [ ] proposal 章节编号修正（已完成）
-- [ ] 项目目录结构初始化（backend/、frontend/、runtime/）
-- [ ] OpenClaw 安装配置指南（docs/openclaw-setup.md）
-- [ ] OpenclawRunner 接口定义 + mock 实现
-- [ ] FastAPI 后端骨架（配置、数据库、依赖注入）
-- [ ] 用户认证模块（注册/登录/JWT）
-- [ ] 实例与云实例 API + 数据模型
-- [ ] WebSocket 实时日志流
-- [ ] Lab4AI 代理层 + 管理员设置
-- [ ] React + Vite 前端骨架
-- [ ] 前端核心页面（登录、仪表盘、任务创建、任务详情/日志）
+  - 前端交互模式：对话式 AI 科研助手（产品名 LOBSTER），非传统管理后台
+- [x] 项目目录结构初始化（backend/、frontend/、runtime/）
+- [x] OpenClaw 安装配置指南（docs/openclaw-setup.md）
+- [x] OpenclawRunner 接口定义 + mock 实现
+- [x] FastAPI 后端骨架（配置、数据库、依赖注入）
+- [x] 用户认证模块（注册/登录/JWT）
+- [x] 实例与云实例 API + 数据模型
+- [x] WebSocket 实时日志流
+- [x] Lab4AI 代理层 + 管理员 API
+- [x] React + Vite 前端骨架（AppLayout + Sidebar + 路由）
+- [x] 前端核心页面：登录、复现任务输入（WelcomePage）、任务对话（ChatPage）、右侧面板
+- [ ] 前端其他任务类型页面（search / paper-only / experiments / polish）具体逻辑
+- [ ] 管理员前端页面（用户管理、云实例总览、平台设置、用量报表）
+- [ ] 冒烟测试验证通过 + 端到端联调
+- [ ] 算力限额的前端展示与拦截
 
 ---
 

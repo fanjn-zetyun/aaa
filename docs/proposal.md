@@ -334,20 +334,57 @@ UsageRecord (用量记录)
 
 ## 8. 前端页面结构
 
+### 8.1 设计理念
+
+前端采用**对话式 AI 科研助手**的交互模式（产品名：LOBSTER），而非传统管理后台。用户通过自然语言输入 + URL 粘贴的方式发起任务，任务执行过程以聊天对话 + 内嵌终端日志的形式呈现，降低使用门槛。
+
+### 8.2 布局结构
+
+```
+┌──────────┬────────────────────────────────┬──────────┐
+│          │                                │          │
+│  侧边栏   │         主内容区                 │  右侧面板  │
+│  240px   │      （路由 Outlet）              │  280px   │
+│          │                                │ (任务详情) │
+│ - 导航    │                                │          │
+│ - 历史任务 │                                │          │
+│ - 用户    │                                │          │
+└──────────┴────────────────────────────────┴──────────┘
+```
+
+- **侧边栏（Sidebar）**：功能导航 + 历史任务列表（可折叠）+ 用户信息/退出
+- **主内容区**：根据路由渲染不同页面
+- **右侧面板（RightPanel）**：仅在任务详情页显示，展示环境状态和任务元信息，可收起
+
+### 8.3 路由与页面
+
 ```
 /login                  — 登录页
-/register               — 注册页
-/dashboard              — 概览（我的 openclaw 实例 + 云实例状态 + 用量）
-/tasks/new              — 创建新任务（填 GitHub URL、可选论文 URL、可选指令）
-/tasks/:id              — 任务详情 + 实时日志终端
-/cloud-instances        — 我的 Lab4AI 云实例列表（可手动关停）
-/usage                  — 我的算力用量统计
-/admin/instances        — [管理员] 所有 openclaw 实例
-/admin/cloud-instances  — [管理员] 所有云实例
-/admin/users            — [管理员] 用户管理 + 配额设置
-/admin/settings         — [管理员] 平台设置（Lab4AI 凭证）
-/admin/usage            — [管理员] 全平台用量报表
+/reproduce              — 代码与论文复现（默认首页，WelcomePage 输入框）
+/reproduce/task/:taskId — 任务对话页（ChatPage：消息流 + 内嵌终端日志 + 停止按钮）
+/search                 — 智能论文检索（WelcomePage，待实现具体逻辑）
+/paper-only             — 纯论文(无代码)复现（WelcomePage，待实现）
+/experiments            — 自动化实验矩阵（WelcomePage，待实现）
+/polish                 — 智能论文润色（WelcomePage，待实现）
 ```
+
+### 8.4 核心交互流程
+
+1. 用户在 WelcomePage 的输入框中粘贴 GitHub URL + 自然语言指令，提交
+2. 前端自动解析 URL（GitHub / arXiv），调用 `POST /api/claw-instances` 创建任务
+3. 跳转到 `/reproduce/task/:taskId`（ChatPage），以对话气泡展示用户输入和 Agent 状态
+4. WebSocket 实时接收执行日志，内嵌在对话流中以终端样式渲染
+5. 任务完成/失败/停止后，Agent 气泡显示最终状态，用户可继续提交新任务
+
+### 8.5 管理员页面（待实现）
+
+管理员功能暂未在前端实现，后续需要补充：
+
+- 所有用户实例总览
+- 云实例管理
+- 用户管理 + 配额设置
+- 平台设置（Lab4AI 凭证）
+- 用量报表
 
 ## 9. 关键技术决策
 
@@ -358,7 +395,7 @@ UsageRecord (用量记录)
 | 进程管理 | subprocess + asyncio | 轻量，无需 Docker 依赖，本地开发零配置 |
 | 大模型调用 | 仅 openclaw 内部 | Web 后端无需 LLM，降低成本和复杂度 |
 | Skills 加载 | 全量加载，Agent 自选 | 用户无需理解 skills 体系，体验更简洁 |
-| 实时日志 | WebSocket + xterm.js | 真正的实时流式体验 |
+| 实时日志 | WebSocket + 内嵌终端样式 | 日志嵌入对话流中，轻量无依赖（未使用 xterm.js） |
 | 数据库 | SQLite（开发）→ PostgreSQL（生产） | 本地开发零配置，后续可平滑迁移 |
 | 认证 | JWT | 无状态，前后端分离友好 |
 | 云实例归属 | 后端数据库记录 serverId→user 映射 | 解决 Lab4AI API 无法区分用户的问题 |
