@@ -11,6 +11,7 @@ export default function PolishPage() {
         "优化实验描述的表达",
       ]}
       requireGithubUrl={false}
+      basePath="/polish"
     />
   );
 }

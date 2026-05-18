@@ -11,6 +11,7 @@ export default function ExperimentsPage() {
         "不同数据集上的泛化测试",
       ]}
       requireGithubUrl={false}
+      basePath="/experiments"
     />
   );
 }

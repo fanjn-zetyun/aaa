@@ -30,3 +30,10 @@ class ClawInstanceResponse(BaseModel):
     finished_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class QuotaResponse(BaseModel):
+    gpu_quota_hours: float
+    cpu_quota_hours: float
+    gpu_used_hours: float
+    cpu_used_hours: float

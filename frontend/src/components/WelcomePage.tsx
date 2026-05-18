@@ -7,9 +7,10 @@ interface WelcomePageProps {
   placeholder: string;
   suggestions: string[];
   requireGithubUrl?: boolean;
+  basePath?: string;
 }
 
-export default function WelcomePage({ title, placeholder, suggestions, requireGithubUrl = true }: WelcomePageProps) {
+export default function WelcomePage({ title, placeholder, suggestions, requireGithubUrl = true, basePath = "/reproduce" }: WelcomePageProps) {
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -42,7 +43,7 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
         paper_url: paperUrl || null,
         user_prompt: userPrompt || null,
       });
-      navigate(`/reproduce/task/${inst.id}`);
+      navigate(`${basePath}/task/${inst.id}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "创建失败");
     } finally {

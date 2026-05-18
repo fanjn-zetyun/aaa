@@ -11,6 +11,7 @@ export default function PaperOnlyPage() {
         "验证超参数敏感性分析",
       ]}
       requireGithubUrl={false}
+      basePath="/paper-only"
     />
   );
 }

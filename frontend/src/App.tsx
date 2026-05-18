@@ -28,9 +28,13 @@ export default function App() {
         <Route path="/reproduce" element={<ReproducePage />} />
         <Route path="/reproduce/task/:taskId" element={<ChatPage />} />
         <Route path="/search" element={<SearchPage />} />
+        <Route path="/search/task/:taskId" element={<ChatPage />} />
         <Route path="/paper-only" element={<PaperOnlyPage />} />
+        <Route path="/paper-only/task/:taskId" element={<ChatPage />} />
         <Route path="/experiments" element={<ExperimentsPage />} />
+        <Route path="/experiments/task/:taskId" element={<ChatPage />} />
         <Route path="/polish" element={<PolishPage />} />
+        <Route path="/polish/task/:taskId" element={<ChatPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/reproduce" replace />} />
     </Routes>

@@ -188,10 +188,21 @@ npm run dev    # Vite dev server → http://localhost:5173
 - [x] Lab4AI 代理层 + 管理员 API
 - [x] React + Vite 前端骨架（AppLayout + Sidebar + 路由）
 - [x] 前端核心页面：登录、复现任务输入（WelcomePage）、任务对话（ChatPage）、右侧面板
-- [ ] 前端其他任务类型页面（search / paper-only / experiments / polish）具体逻辑
+- [x] 前端其他任务类型页面（search / paper-only / experiments / polish）独立路由 + basePath 导航
+- [x] 算力限额后端接口（GET /api/claw-instances/quota）+ 创建任务时配额校验
+- [x] 算力限额前端展示（Sidebar 配额进度条）+ 超额拦截
+- [x] 后端单元测试（pytest，35 个用例全部通过）
+  - auth 模块：注册/登录/me/参数校验/重复用户名/禁用账号
+  - claw-instances 模块：创建/列表/查询/停止/用户隔离/配额查询
+  - services 层：workspace 创建/环境变量写入/OpenclawManager 生命周期
+- [x] 前端单元测试（Vitest + React Testing Library，12 个用例全部通过）
+  - LoginPage：登录/注册切换、错误提示
+  - WelcomePage：表单提交、URL 校验、路由导航
+  - API 层：token 管理
+- [x] 冒烟测试验证通过（注册→登录→创建任务→mock 执行完成→状态 completed）
 - [ ] 管理员前端页面（用户管理、云实例总览、平台设置、用量报表）
-- [ ] 冒烟测试验证通过 + 端到端联调
-- [ ] 算力限额的前端展示与拦截
+- [ ] RealOpenclawRunner 实现（真实 openclaw CLI 调用）
+- [ ] 前端 build 产物部署配置
 
 ---
 

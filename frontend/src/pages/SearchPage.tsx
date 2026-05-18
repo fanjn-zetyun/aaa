@@ -11,6 +11,7 @@ export default function SearchPage() {
         "图神经网络 药物发现",
       ]}
       requireGithubUrl={false}
+      basePath="/search"
     />
   );
 }

@@ -10,6 +10,13 @@ interface ClawInstance {
   created_at: string;
 }
 
+interface QuotaInfo {
+  gpu_quota_hours: number;
+  cpu_quota_hours: number;
+  gpu_used_hours: number;
+  cpu_used_hours: number;
+}
+
 const NAV_ITEMS = [
   {
     path: "/search",
@@ -68,6 +75,12 @@ export default function Sidebar() {
     queryKey: ["claw-instances"],
     queryFn: () => apiFetch<ClawInstance[]>("/api/claw-instances"),
     refetchInterval: 5000,
+  });
+
+  const { data: quota } = useQuery({
+    queryKey: ["quota"],
+    queryFn: () => apiFetch<QuotaInfo>("/api/claw-instances/quota"),
+    refetchInterval: 30000,
   });
 
   function logout() {
@@ -153,6 +166,14 @@ export default function Sidebar() {
         )}
       </div>
 
+      {/* Quota Display */}
+      {quota && (quota.gpu_quota_hours > 0 || quota.cpu_quota_hours > 0) && (
+        <div className="px-4 py-3 border-t border-slate-100">
+          <QuotaBar label="GPU" used={quota.gpu_used_hours} total={quota.gpu_quota_hours} />
+          <QuotaBar label="CPU" used={quota.cpu_used_hours} total={quota.cpu_quota_hours} />
+        </div>
+      )}
+
       {/* User Profile */}
       <div className="p-4 border-t border-slate-100">
         <div className="flex items-center justify-between px-2">
@@ -189,4 +210,24 @@ function StatusDot({ status }: { status: string }) {
     failed: "bg-red-500",
   };
   return <span className={`w-2 h-2 rounded-full shrink-0 ${colors[status] || "bg-slate-300"}`} />;
+}
+
+function QuotaBar({ label, used, total }: { label: string; used: number; total: number }) {
+  if (total <= 0) return null;
+  const pct = Math.min((used / total) * 100, 100);
+  const isExhausted = used >= total;
+  return (
+    <div className="mb-2 last:mb-0">
+      <div className="flex justify-between text-[11px] mb-1">
+        <span className={isExhausted ? "text-red-500 font-medium" : "text-slate-500"}>{label}</span>
+        <span className="text-slate-400">{used.toFixed(1)}/{total.toFixed(0)}h</span>
+      </div>
+      <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${isExhausted ? "bg-red-400" : pct > 80 ? "bg-amber-400" : "bg-blue-400"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
 }
