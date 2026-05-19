@@ -7,11 +7,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
-from sqlalchemy import select
+from starlette.websockets import WebSocketState
 
 from app.core.database import SessionLocal
 from app.core.security import decode_access_token
-from app.models import ClawInstance, ClawInstanceStatus, User
+from app.models import ClawInstance, User
 from app.services.openclaw import get_manager
 
 router = APIRouter(tags=["logs"])
@@ -70,4 +70,5 @@ async def ws_logs(websocket: WebSocket, instance_id: int) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        await websocket.close()
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.close()

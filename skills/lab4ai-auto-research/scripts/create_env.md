@@ -1,4 +1,4 @@
----
+﻿---
 name: python_venv_from_project
 description: >
   Build isolated Python environments from repository files (environment.yml, requirements.txt,
@@ -7,7 +7,7 @@ description: >
   when needed—never create a new venv/Poetry/pipenv root. Enforce unique env names; never install into system Python.
   Invoke when onboarding a repo or when the user has no usable env and must rebuild.
 metadata:
-  openclaw:
+  agent_loop:
     language: zh-CN
 ---
 
@@ -262,3 +262,4 @@ conda run -n <env_name> python -m pip install \
 5. 在**已创建的 conda 环境**内安装；自动化场景优先 `conda run -n`，减少 shell 激活差异。
 6. GPU 场景必须补做驱动与 CUDA 冒烟校验（`nvidia-smi` + `torch.cuda.is_available()` + 最小 GPU 张量计算）。
 7. 全程**不污染系统环境**，不擅自修改环境定义文件（除非用户与项目允许）。
+

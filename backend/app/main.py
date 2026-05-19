@@ -16,6 +16,8 @@ from app.api import admin as admin_router
 from app.api import auth as auth_router
 from app.api import claw_instances as claw_router
 from app.api import cloud_instances as cloud_router
+from app.api import conversations as conversations_router
+from app.api import llm_config as llm_config_router
 from app.api import logs_ws as logs_router
 from app.core.bootstrap import ensure_default_admin
 from app.core.config import get_settings
@@ -55,6 +57,8 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router.router)
     app.include_router(claw_router.router)
+    app.include_router(conversations_router.router)
+    app.include_router(llm_config_router.router)
     app.include_router(cloud_router.router)
     app.include_router(admin_router.router)
     app.include_router(logs_router.router)

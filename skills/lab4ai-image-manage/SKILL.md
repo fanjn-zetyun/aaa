@@ -1,4 +1,4 @@
----
+﻿---
 name: lab4ai-image-manage
 description: Lab4AI 镜像能力：① 拉取可用 imageTag 列表（images_list）；② 根据本地项目路径或 git 仓库 README / 常见依赖文件启发式推荐与项目说明最匹配的镜像标签，供创建实例时使用。
 ---
@@ -14,7 +14,7 @@ description: Lab4AI 镜像能力：① 拉取可用 imageTag 列表（images_lis
 
 ## 前置条件
 
-- `/root/.openclaw/.env` 中配置了 `LAB4AI_PHONE` 和 `LAB4AI_PASSWORD`（与 **`lab4ai-instance-manage`** 一致）
+- `后端管理的 Lab4AI 凭证` 中配置了 `LAB4AI_PHONE` 和 `LAB4AI_PASSWORD`（与 **`lab4ai-instance-manage`** 一致）
 - 可选安装 `httpx`；未安装时 `show_image.py` 使用标准库 `urllib`（`instance-manage` 的创建/关机脚本为 `httpx` 专用，与此不同）
 - 使用 **`git_url`** 时本机需可用 `git` 命令；默认浅克隆 `--depth 1`
 
@@ -132,3 +132,4 @@ python scripts/image_choose.py '{"git_url":"https://example.com/org/repo.git","g
 
 1. **勿将手机号、密码写入仓库**；用环境变量或运行时 `paras`。
 2. 接口或标签命名变更时，以 `scripts/show_image.py` 的 `API_URL` 及 `scripts/image_choose.py` 内解析逻辑为准，并同步更新本 **`SKILL.md`**。
+

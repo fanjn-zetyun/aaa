@@ -1,4 +1,4 @@
----
+﻿---
 name: lab4ai-auto-research
 description: >
   通过读取并遵循 lab4ai-auto-research/pipeline.yml 执行完整自动化训练实验流程：按 stages 顺序打开对应
@@ -37,14 +37,14 @@ metadata:
 ---
 
 ## 前置条件
-- `/root/.openclaw/.env` 中配置了 `LAB4AI_PHONE` 和 `LAB4AI_PASSWORD`
+- `后端管理的 Lab4AI 凭证` 中配置了 `LAB4AI_PHONE` 和 `LAB4AI_PASSWORD`
 - **`httpx`**：执行 **`lab4ai-instance-manage`** 的 `create.py` / `stop.py` 时，若未安装会在首次运行时自动 `pip install httpx`；也可事先执行：`pip install httpx`
-- **`install.sh`**：将本技能、`vendor/` 内第三方 skill（与 **`lab4ai-auto-reproduct/vendor`** 同源：`claw-shell`、`file-system`、`ssh-essentials`）及兄弟目录 `lab4ai-instance-manage` / `lab4ai-image-manage` 软链到 `OPENCLAW_SKILLS`（默认 `~/.openclaw/skills`），供 Agent 调用远程命令与读文件。
+- **`install.sh`**：将本技能、`vendor/` 内第三方 skill（与 **`lab4ai-auto-reproduct/vendor`** 同源：`claw-shell`、`file-system`、`ssh-essentials`）及兄弟目录 `lab4ai-instance-manage` / `lab4ai-image-manage` 软链到 `LOBSTER_SKILLS`（默认 `skills`），供 Agent 调用远程命令与读文件。
 - **对话语言默认中文**：除用户明确要求其他语言，或命令/日志原文必须原样展示外，面向用户的叙述默认使用简体中文。
 
 # 通过 `pipeline.yml` 驱动自动化实验（Autoresearch）
 
-本目录布局与 **`lab4ai-skills-master`** 对齐：**入口文件为 `SKILL.md`**（不再使用 `skill.md`），并补充 **`skill.json`**、**`manifest.yaml`** 便于与 OpenClaw / 技能市场一致索引；编排真源仍为 **`pipeline.yml`**（角色上对应复现仓的 `project_reproduce.yaml`，字段名刻意保留以兼容现有引用）。
+本目录布局与 **`lab4ai-skills-master`** 对齐：**入口文件为 `SKILL.md`**（不再使用 `skill.md`），并补充 **`skill.json`**、**`manifest.yaml`** 便于与 LOBSTER / 技能索引一致索引；编排真源仍为 **`pipeline.yml`**（角色上对应复现仓的 `project_reproduce.yaml`，字段名刻意保留以兼容现有引用）。
 
 本技能说明**智能体如何以 `lab4ai-auto-research/pipeline.yml` 为控制面**，结合 **各 Step Markdown**（如 `scripts/skill_03setup.md`、`scripts/skill_06loop.md`）正文，完成端到端自动化实验（含门禁、循环、终稿报告、可选实验室开关机）。
 
@@ -150,3 +150,4 @@ assert completion_criteria from pipeline.yml
 ---
 
 **提示：** 若工具链支持「只附加一个文件」，可同时附加 **`lab4ai-auto-research/pipeline.yml`** 与 **`lab4ai-auto-research/scripts/skill_02policies.md`**，并声明「后续每阶段按 pipeline 的 `stages[].skill_file` 打开对应 Step 文档」。
+

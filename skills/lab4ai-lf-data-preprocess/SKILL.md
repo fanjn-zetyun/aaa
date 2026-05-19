@@ -1,4 +1,4 @@
----
+﻿---
 name:       
 description: 帮用户将下载的开源数据集处理成可以直接用于LlamaFactory项目微调的数据。如果用户有处理LlamaFactory数据处理需求，请直接调用此技能。
 
@@ -196,7 +196,7 @@ KTO 数据集需要额外添加一个 `kto_tag` 列，包含 bool 类型的人�
 3. 读取采样结果，分析这个数据集该如何适配LlaMAFactory框架的训练。
 4. 编写数据集处理的Python脚本（`process_dataset_<dataset_name>.py`），将该数据集处理成LLaMA-Factory框架支持的结构（list of dicts）：
 	- 处理后的数据集文件名：`processed_<dataset_name>.json`
-	- 处理后的数据集文件应保存在：`~/.openclaw/workspace/private_work_files/lf_datasets`目录下
+	- 处理后的数据集文件应保存在：`~/lobster/workspace/private_work_files/lf_datasets`目录下
 	- **请注意：** 你编写的Python脚本是可以直接顺利运行的脚本，尽量使用基础的packages，只需要保证能处理当前用户需求的数据集即可。
 5. 执行数据处理的脚本
 6. 调用`lab4ai-lf-dataset-info-writter`技能，为这个数据集编写`dataset_info.json`内的信息。

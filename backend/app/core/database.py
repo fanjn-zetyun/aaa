@@ -42,6 +42,7 @@ async def init_db() -> None:
         admin_settings,
         claw_instance,
         cloud_instance,
+        conversation,
         usage_record,
         user,
     )

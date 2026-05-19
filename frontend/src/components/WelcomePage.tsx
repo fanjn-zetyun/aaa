@@ -38,7 +38,16 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
     }
 
     try {
-      const inst = await apiPost<{ id: number }>("/api/claw-instances", {
+      const inst = await apiPost<{ id: number }>("/api/conversations", {
+        task_type: basePath.includes("search")
+          ? "search"
+          : basePath.includes("paper-only")
+            ? "paper_only"
+            : basePath.includes("experiments")
+              ? "experiments"
+              : basePath.includes("polish")
+                ? "polish"
+                : "reproduce",
         github_url: githubUrl || null,
         paper_url: paperUrl || null,
         user_prompt: userPrompt || null,

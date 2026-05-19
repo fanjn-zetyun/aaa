@@ -1,4 +1,4 @@
----
+﻿---
 name: lab4ai-paper-analysis
 description: 全自动论文解析工具。接收 GitHub URL 或 PDF URL / 本地路径，自动下载论文 PDF，利用 PyMuPDF 提取全文，通过结构化搜索提取核心信息，生成结构化报告。
 ---
@@ -37,10 +37,10 @@ description: 全自动论文解析工具。接收 GitHub URL 或 PDF URL / 本�
 
 ### 方式二：直接调用脚本
 ```bash
-python ~/.openclaw/skills/paper-analysis/scripts/analyze_paper.py \
+python skills/paper-analysis/scripts/analyze_paper.py \
   --github-url "https://github.com/xxx/yyy" \
   --paper-url "https://arxiv.org/pdf/xxxx.xxxxx" \
-  --output-root /root/.openclaw/workspace
+  --output-root /root/lobster/workspace
 ```
 
 ### 方式三：Python 模块调用
@@ -50,7 +50,7 @@ from paper_analysis import analyze_paper
 result = analyze_paper(
     github_url="https://github.com/xxx/yyy",
     paper_url="https://arxiv.org/pdf/xxxx.xxxxx",
-    output_root="/root/.openclaw/workspace"
+    output_root="/root/lobster/workspace"
 )
 print(result["score"])      # 论文质量评分
 print(result["metrics"])    # 核心指标字典
@@ -142,3 +142,4 @@ arXiv ID / Venue / Authors
 - **PyMuPDF (fitz)** — PDF 文本提取
 - **Python stdlib** — 字符串搜索 / 正则提取
 - **re (re)** — 数值表格解析（备选）
+

@@ -3,10 +3,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch, clearToken } from "../lib/api";
 
-interface ClawInstance {
+interface Conversation {
   id: number;
   status: string;
-  task_config: { github_url?: string };
+  title: string;
+  metadata: { github_url?: string };
   created_at: string;
 }
 
@@ -64,6 +65,15 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+  {
+    path: "/model-settings",
+    label: "模型设置",
+    icon: (
+      <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+      </svg>
+    ),
+  },
 ];
 
 export default function Sidebar() {
@@ -71,9 +81,9 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const { data: instances } = useQuery({
-    queryKey: ["claw-instances"],
-    queryFn: () => apiFetch<ClawInstance[]>("/api/claw-instances"),
+  const { data: conversations } = useQuery({
+    queryKey: ["conversations"],
+    queryFn: () => apiFetch<Conversation[]>("/api/conversations"),
     refetchInterval: 5000,
   });
 
@@ -149,17 +159,17 @@ export default function Sidebar() {
 
         {historyOpen && (
           <div className="px-4 pb-3 max-h-[200px] overflow-y-auto space-y-0.5">
-            {instances?.map((inst) => (
+            {conversations?.map((inst) => (
               <Link
                 key={inst.id}
                 to={`/reproduce/task/${inst.id}`}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg text-[12px] text-slate-500 hover:bg-slate-50 transition-colors"
               >
                 <StatusDot status={inst.status} />
-                <span className="truncate">{extractRepoName(inst.task_config.github_url)}</span>
+                <span className="truncate">{inst.title || extractRepoName(inst.metadata.github_url)}</span>
               </Link>
             ))}
-            {(!instances || instances.length === 0) && (
+            {(!conversations || conversations.length === 0) && (
               <p className="text-[11px] text-slate-400 px-3 py-2">暂无历史任务</p>
             )}
           </div>

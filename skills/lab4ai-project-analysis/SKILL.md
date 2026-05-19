@@ -1,4 +1,4 @@
----
+﻿---
 name: lab4ai-project-analysis
 description: 项目审计与可行性评估工具。通过静态扫描和干跑测试，快速评估 GitHub 项目的难度，提前发现依赖冲突、死链、硬编码路径、Gated Model 等问题。
 ---
@@ -43,7 +43,7 @@ description: 项目审计与可行性评估工具。通过静态扫描和干跑�
 ## 使用方法
 
 ```bash
-python ~/.openclaw/skills/repo-auditor/scripts/main.py <GitHub仓库URL>
+python skills/repo-auditor/scripts/main.py <GitHub仓库URL>
 ```
 
 ## 输出报告
@@ -58,7 +58,8 @@ python ~/.openclaw/skills/repo-auditor/scripts/main.py <GitHub仓库URL>
 
 项目可行性分析报告会自动保存到以下目录:
 ```
-/root/.openclaw/workspace/{{repo_name}}/{{repo_name}}_Audit_Report.md
+/root/lobster/workspace/{{repo_name}}/{{repo_name}}_Audit_Report.md
 ```
 
 其中 `<repo_name>` 为 GitHub 仓库名称(如 `nanoGPT`)。
+

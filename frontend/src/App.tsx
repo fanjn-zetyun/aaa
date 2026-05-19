@@ -8,6 +8,7 @@ import PaperOnlyPage from "./pages/PaperOnlyPage";
 import ExperimentsPage from "./pages/ExperimentsPage";
 import PolishPage from "./pages/PolishPage";
 import ChatPage from "./pages/ChatPage";
+import ModelSettingsPage from "./pages/ModelSettingsPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   return getToken() ? <>{children}</> : <Navigate to="/login" replace />;
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="/experiments/task/:taskId" element={<ChatPage />} />
         <Route path="/polish" element={<PolishPage />} />
         <Route path="/polish/task/:taskId" element={<ChatPage />} />
+        <Route path="/model-settings" element={<ModelSettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/reproduce" replace />} />
     </Routes>

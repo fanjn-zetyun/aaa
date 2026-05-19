@@ -1,4 +1,4 @@
----
+﻿---
 name: "lab4ai-repro-report"
 description: "将复现过程中收集到的项目档案、排坑记录、超参数和对比结果，自动排版并生成工业级 Word (.docx) 学术报告。"
 triggers:
@@ -29,7 +29,7 @@ triggers:
 
 ## 📋 执行逻辑与红线
 1. **格式化要求**：所有参数中的技术名词（如 `flash-attn`, `sm_90`, `CUDA 12.1`）必须保持准确。
-2. **路径意识**：报告将自动保存至 `/root/.openclaw/workspace/{{repo_name}}/` 目录下。生成成功后，你必须将该**绝对路径**告知用户。
+2. **路径意识**：报告将自动保存至 `/root/lobster/workspace/{{repo_name}}/` 目录下。生成成功后，你必须将该**绝对路径**告知用户。
 3. **专业性**：`project_profile` 部分不仅是简介，还应包含对该算法在当前行业地位的简要评价。
 
 ## 💡 调用示例 (JSON 结构参考)

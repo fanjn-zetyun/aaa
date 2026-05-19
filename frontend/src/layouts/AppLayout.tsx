@@ -5,7 +5,7 @@ import RightPanel from "../components/RightPanel";
 
 export default function AppLayout() {
   const location = useLocation();
-  const isTaskView = /\/reproduce\/task\/\d+/.test(location.pathname);
+  const isTaskView = /\/(reproduce|search|paper-only|experiments|polish)\/task\/\d+/.test(location.pathname);
   const [panelOpen, setPanelOpen] = useState(false);
 
   useEffect(() => {

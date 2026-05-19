@@ -1,4 +1,4 @@
----
+﻿---
 name: lab4ai-lf-dataset-info-writter
 description: 根据处理完的数据集采样结果，编写LlaMAFactory项目的dataset_info.json内必须的数据集信息字典。
 ---
@@ -187,7 +187,7 @@ KTO 数据集需要额外添加一个 `kto_tag` 列，包含 bool 类型的人�
 
 ## Workflow
 
-`dataset_info.json`文件在实例里的路径：`~/.openclaw/workspace/private_work_files/lf_datasets/dataset_info.json`
+`dataset_info.json`文件在实例里的路径：`~/lobster/workspace/private_work_files/lf_datasets/dataset_info.json`
 - 若其不存在，请你创建该文件，内容是空字典：
 ```json
 {}

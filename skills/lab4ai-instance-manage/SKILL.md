@@ -1,4 +1,4 @@
----
+﻿---
 name: lab4ai-instance-manage
 description: Lab4AI 云实例全生命周期管理（创建 + 关闭）。通过 REST API 一站式创建 CPU/GPU 实例并获取 SSH 连接信息，以及按 serverId 关闭释放实例。适用于项目复现流水线中的算力申请与释放环节。
 ---
@@ -17,13 +17,13 @@ description: Lab4AI 云实例全生命周期管理（创建 + 关闭）。通过
 
 ```bash
 # 创建 CPU 实例 (2核)
-python ~/.openclaw/skills/lab4ai-instance-manage/scripts/create.py "CPU 2核"
+python skills/lab4ai-instance-manage/scripts/create.py "CPU 2核"
 
 # 创建 GPU 实例 (1张)
-python ~/.openclaw/skills/lab4ai-instance-manage/scripts/create.py "1张GPU"
+python skills/lab4ai-instance-manage/scripts/create.py "1张GPU"
 
 # 创建 GPU 实例 (自定义镜像)
-python ~/.openclaw/skills/lab4ai-instance-manage/scripts/create.py "GPU 1张 image=my-custom-tag"
+python skills/lab4ai-instance-manage/scripts/create.py "GPU 1张 image=my-custom-tag"
 ```
 
 ### API 入参
@@ -71,7 +71,7 @@ python ~/.openclaw/skills/lab4ai-instance-manage/scripts/create.py "GPU 1张 ima
 
 ```bash
 # 传入 serverId 关闭实例
-python ~/.openclaw/skills/lab4ai-instance-manage/scripts/stop.py <serverId>
+python skills/lab4ai-instance-manage/scripts/stop.py <serverId>
 ```
 
 ### 关闭输出
@@ -87,7 +87,7 @@ python ~/.openclaw/skills/lab4ai-instance-manage/scripts/stop.py <serverId>
 
 ## 三、前置条件
 
-- `/root/.openclaw/.env` 中配置了 `LAB4AI_PHONE` 和 `LAB4AI_PASSWORD`
+- `后端管理的 Lab4AI 凭证` 中配置了 `LAB4AI_PHONE` 和 `LAB4AI_PASSWORD`
 - 依赖 **`httpx`**：`create.py` / `stop.py` 在首次 `import httpx` 失败时会自动执行 `pip install httpx`（等价于 `python -m pip install httpx`）；也可事先手动安装：`pip install httpx`
 
 
@@ -98,3 +98,4 @@ python ~/.openclaw/skills/lab4ai-instance-manage/scripts/stop.py <serverId>
 3. 实例创建后需 1~3 分钟 SSHD 才就绪，建议配合 SSH 探活轮询使用
 4. 关机操作不可逆，请确认 serverId 正确
 5. 刚创建的实例如果还未完全就绪，调用关机可能返回 500，等 30 秒重试即可
+

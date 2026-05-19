@@ -1,12 +1,12 @@
-# OpenClaw 多实例管理平台
+# LOBSTER 科研助手平台
 
-多用户共享 Lab4AI 算力资源的 Web 应用，通过 OpenClaw Agent 自动化完成论文/项目复现任务。
+多用户共享 Lab4AI 算力资源的 Web 应用，通过自建 Agent Loop 自动化完成论文/项目复现任务。
 
 ## 它能做什么
 
-- 用户提交 GitHub URL，系统自动启动 OpenClaw Agent 进行项目复现
-- Agent 自动分析仓库、选择合适的 skill pipeline、创建远程 GPU/CPU 实例、执行实验
-- Web 页面实时查看 Agent 运行日志（WebSocket 流式推送）
+- 用户提交 GitHub URL，系统自动启动 Agent Loop 进行项目复现
+- Agent 自动分析仓库、选择合适的 skill、创建远程 GPU/CPU 实例、执行实验
+- Web 页面实时查看执行日志（WebSocket 流式推送）
 - 管理员统一管理 Lab4AI 账号、分配算力配额、监控所有实例
 - 异常保护：Agent 崩溃后自动清理遗留的云实例，防止空转烧钱
 
@@ -17,7 +17,7 @@
 | 后端 | Python 3.13 + FastAPI + SQLAlchemy 2.0 (async) |
 | 前端 | React + TypeScript + Vite |
 | 数据库 | SQLite（开发）/ PostgreSQL（生产） |
-| Agent | OpenClaw CLI（Node.js） |
+| Agent | 后端自建 Agent Loop |
 | 算力平台 | Lab4AI（GPU/CPU 云实例） |
 
 ## 快速开始
@@ -59,15 +59,15 @@ npm run dev
 ├── CLAUDE.md              # Claude Code 协作指引
 ├── docs/
 │   ├── proposal.md        # 完整设计方案（架构、API、数据模型）
-│   └── openclaw-setup.md  # OpenClaw 安装与对接指南
-├── skills/                # OpenClaw skills（lab4ai-* 系列）
+│   └── agent-loop-setup.md # Agent Loop 配置指南
+├── skills/                # Skills 任务模板
 ├── backend/               # FastAPI 后端
 │   ├── app/
 │   │   ├── api/           # 路由（auth、实例管理、WebSocket、管理员）
 │   │   ├── core/          # 配置、数据库、安全
 │   │   ├── models/        # ORM 模型
 │   │   ├── schemas/       # Pydantic schema
-│   │   └── services/      # 业务逻辑（OpenclawRunner、Lab4AI 代理）
+│   │   └── services/      # 业务逻辑（Agent Loop、Tool、Lab4AI 代理）
 │   └── tests/
 ├── frontend/              # React + Vite
 │   └── src/
@@ -83,16 +83,18 @@ npm run dev
 
 **两层实例模型：**
 
-1. **OpenClaw Agent 进程**（本地）— 编排 skills 工作流，通过 LLM 分析任务并自动选择执行路径
-2. **Lab4AI 云实例**（远程）— 实际跑代码的 GPU/CPU 机器，由 Agent 通过 API 创建和释放
+1. **Agent Loop**（后端）— 编排 skills、Tool 和模型调用，通过 LLM 分析任务并自动选择执行路径
+2. **Lab4AI 云实例**（远程）— 实际跑代码的 GPU/CPU 机器，由后端通过 API 创建和释放
 
 **Skills 全量加载：** 用户无需手动选择 skills，Agent 启动后自动分析仓库内容并决定使用哪些 skill。
 
-## 开发状态
+**参考实现边界：** [claude-code-analysis/](claude-code-analysis/) 只作为 Agent Loop、Tool、Skill、Memory 机制的架构参考，不作为直接底座。LOBSTER 仍以 FastAPI 后端和 React Web UI 为主。
 
-当前处于 MVP 开发阶段，OpenClaw 集成使用 mock 实现（模拟日志输出），后续接入真实 OpenClaw CLI。
+## 当前开发状态
 
-详细设计方案和待办事项见 [docs/proposal.md](docs/proposal.md)。
+当前 V2 MVP 已跑通：后端已支持 `conversations` 对话式任务、真实模型配置与 Anthropic-compatible 模型调用，前端已支持对话页、历史记录、模型设置页和 WebSocket 流式事件。Skill Loader 最小闭环已接入，复现任务会加载 `lab4ai-auto-reproduct` 及其 `project_reproduce.yaml` 并注入 Agent Loop。
+
+目前 Lab4AI 实例创建、SSH 执行、实例释放仍是 MVP 模拟工具层；下一步需要接入真实 Lab4AI API 和真实 SSH 执行。详细进度见 [docs/progress.md](docs/progress.md)，完整设计方案见 [docs/proposal.md](docs/proposal.md)。
 
 ## License
 
