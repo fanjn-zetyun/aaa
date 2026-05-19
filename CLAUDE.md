@@ -185,15 +185,16 @@ npm run dev    # Vite dev server → http://localhost:5173
 - [x] 算力限额后端接口（GET /api/claw-instances/quota）+ 创建任务时配额校验
 - [x] 算力限额前端展示（Sidebar 配额进度条）+ 超额拦截
 - [x] SkillLoader 最小闭环：扫描 `skills/*/SKILL.md`、解析 frontmatter、为 `lab4ai-auto-reproduct` 加载 `project_reproduce.yaml`，并注入 Agent Loop system prompt
-- [x] 后端单元测试（pytest，38 个用例全部通过）
+- [x] 对话 memory + HITL 闭环：结构化 memory 存入 `Conversation.metadata`，ToolRegistry 统一声明确认策略，reproduce 任务在创建资源前暂停等待用户确认，用户回复后按 approved / needs_revision / stopped 分类处理，并支持长对话摘要压缩
+- [x] 后端单元测试（pytest，46 个用例全部通过）
   - auth 模块：注册/登录/me/参数校验/重复用户名/禁用账号
   - cloud-instances 模块：创建/列表/查询/停止/用户隔离/配额查询
-  - services 层：Conversation / Agent Loop / Tool / Skill 生命周期
+  - services 层：Conversation / Agent Loop / Tool / Skill / Memory 生命周期
 - [x] 前端单元测试（Vitest + React Testing Library，12 个用例全部通过）
   - LoginPage：登录/注册切换、错误提示
   - WelcomePage：表单提交、URL 校验、路由导航
   - API 层：token 管理
-- [x] 冒烟测试验证通过（注册→登录→创建任务→mock 执行完成→状态 completed）
+- [x] 冒烟测试验证通过（注册→登录→创建任务→HITL 等待确认→用户回复→mock 执行完成→状态 completed）
 - [x] 前端 build 验证通过（`npm run build`）
 - [ ] 管理员前端页面（用户管理、云实例总览、平台设置、用量报表）
 - [ ] 前端 build 产物部署配置

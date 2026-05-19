@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiPost, getToken } from "../lib/api";
@@ -7,7 +7,7 @@ interface ConversationMessage {
   id: number;
   role: "user" | "assistant" | "tool" | "system";
   content: string;
-  message_metadata: Record<string, string>;
+  message_metadata: Record<string, unknown>;
   created_at: string;
 }
 
@@ -15,13 +15,27 @@ interface Conversation {
   id: number;
   title: string;
   status: string;
-  metadata: { github_url?: string; paper_url?: string };
+  updated_at: string;
+  metadata: {
+    github_url?: string;
+    paper_url?: string;
+    workflow_state?: string;
+    pending_user_input?: {
+      question: string;
+      options?: string[];
+      step?: string;
+      tool_name?: string;
+      tool_input?: Record<string, unknown>;
+    } | null;
+  };
   messages: ConversationMessage[];
 }
 
 interface ChatMessage {
+  id: number | string;
   role: "user" | "agent";
   content: string;
+  created_at: string;
   type?: "text" | "status";
 }
 
@@ -30,7 +44,7 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const { data: conversation } = useQuery({
@@ -46,15 +60,12 @@ export default function ChatPage() {
       conversation.messages
         .filter((msg) => msg.role !== "tool")
         .map((msg) => ({
+          id: msg.id,
           role: msg.role === "user" ? "user" : "agent",
           content: msg.content,
+          created_at: msg.created_at,
           type: msg.role === "system" ? "status" : "text",
         }))
-    );
-    setLogs(
-      conversation.messages
-        .filter((msg) => msg.role === "tool")
-        .map((msg) => `[${msg.message_metadata.tool_name || "tool"}] ${msg.content}`)
     );
   }, [conversation]);
 
@@ -72,10 +83,7 @@ export default function ChatPage() {
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === "tool") {
-          setLogs((prev) => [
-            ...prev,
-            `[${payload.tool_name}] ${payload.message?.content || ""}`,
-          ]);
+          queryClient.invalidateQueries({ queryKey: ["conversation", taskId] });
         }
         if (payload.type === "message" && payload.message) {
           const msg = payload.message as ConversationMessage;
@@ -83,15 +91,20 @@ export default function ChatPage() {
             setMessages((prev) => [
               ...prev,
               {
+                id: msg.id,
                 role: msg.role === "user" ? "user" : "agent",
                 content: msg.content,
+                created_at: msg.created_at,
                 type: msg.role === "system" ? "status" : "text",
               },
             ]);
           }
         }
+        if (payload.type === "ask_user" || payload.type === "status" || payload.type === "memory_compacted") {
+          queryClient.invalidateQueries({ queryKey: ["conversation", taskId] });
+        }
       } catch {
-        setLogs((prev) => [...prev, event.data]);
+        queryClient.invalidateQueries({ queryKey: ["conversation", taskId] });
       }
     };
     ws.onerror = () => {
@@ -105,32 +118,45 @@ export default function ChatPage() {
         ws.close(1000, "component unmounted");
       }
     };
-  }, [taskId, conversation?.status]);
+  }, [taskId, conversation?.status, conversation?.updated_at, queryClient]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, logs]);
+  }, [messages]);
 
   const stopMutation = useMutation({
     mutationFn: () => apiFetch(`/api/conversations/${taskId}/stop`, { method: "POST" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversation", taskId] }),
   });
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!input.trim() || !taskId) return;
-    const content = input.trim();
+  async function submitMessage(content: string) {
+    if (!content.trim() || !taskId) return;
+    const trimmed = content.trim();
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: `pending-${Date.now()}`, role: "user", content: trimmed, created_at: new Date().toISOString() },
+    ]);
     try {
-      await apiPost(`/api/conversations/${taskId}/messages`, { content });
+      await apiPost(`/api/conversations/${taskId}/messages`, { content: trimmed });
       queryClient.invalidateQueries({ queryKey: ["conversation", taskId] });
     } catch {
       setMessages((prev) => [
         ...prev,
-        { role: "agent", content: "发送失败，请稍后重试。", type: "status" },
+        {
+          id: `error-${Date.now()}`,
+          role: "agent",
+          content: "发送失败，请稍后重试。",
+          created_at: new Date().toISOString(),
+          type: "status",
+        },
       ]);
     }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    await submitMessage(input);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -141,37 +167,67 @@ export default function ChatPage() {
   }
 
   const isRunning = conversation?.status === "running";
+  const pendingInput = conversation?.metadata?.pending_user_input;
+  const isWaitingForUser =
+    conversation?.metadata?.workflow_state === "waiting_for_user" && !!pendingInput;
+
+  async function copyMessage(message: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => setCopiedMessageId(null), 1200);
+    } catch {
+      setCopiedMessageId(null);
+    }
+  }
 
   return (
     <div className="flex-1 flex flex-col h-full">
       <div className="flex-1 overflow-y-auto px-8 py-8">
         <div className="max-w-4xl mx-auto space-y-6">
           {messages.map((msg, i) => (
-            <MessageBubble key={`${msg.role}-${i}-${msg.content.slice(0, 12)}`} message={msg} />
+            <MessageBubble
+              key={`${msg.id}-${msg.role}-${i}`}
+              message={msg}
+              copied={copiedMessageId === msg.id}
+              onCopy={() => copyMessage(msg)}
+            />
           ))}
 
-          {logs.length > 0 && (
+          {isWaitingForUser && pendingInput && (
             <div className="flex gap-4">
               <AgentAvatar />
-              <div className="flex flex-col gap-2 w-full max-w-[85%]">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] uppercase font-bold text-slate-400">
-                    Tool Events
-                  </span>
-                  {isRunning && <PulsingDot />}
+              <div className="w-full max-w-[85%] rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <div className="text-[12px] font-bold uppercase text-amber-700">
+                  等待你确认
                 </div>
-                <div className="border border-slate-200 rounded-xl bg-slate-50 p-4 font-mono text-[12px] max-h-[300px] overflow-y-auto">
-                  {logs.map((line, i) => (
-                    <div key={`${i}-${line}`} className="text-slate-500">
-                      {line}
-                    </div>
-                  ))}
+                {pendingInput.tool_name && (
+                  <div className="mt-1 text-[11px] text-amber-600">
+                    工具：{pendingInput.tool_name}
+                  </div>
+                )}
+                <div className="mt-2 text-[14px] leading-relaxed text-slate-700">
+                  {pendingInput.question}
                 </div>
+                {pendingInput.options && pendingInput.options.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {pendingInput.options.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        onClick={() => submitMessage(option)}
+                        className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-[13px] text-slate-700 hover:bg-amber-100"
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          {isRunning && (
+          {(isRunning || isWaitingForUser) && (
             <div className="flex justify-center">
               <button
                 onClick={() => stopMutation.mutate()}
@@ -194,7 +250,13 @@ export default function ChatPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={isRunning ? "任务执行中，完成后可继续对话..." : "继续输入你的问题或调整要求..."}
+              placeholder={
+                isRunning
+                  ? "任务执行中，完成后可继续对话..."
+                  : isWaitingForUser
+                    ? "请直接回复确认，或点击上方选项..."
+                    : "继续输入你的问题或调整要求..."
+              }
               disabled={isRunning}
               rows={1}
               className="flex-1 text-[14px] text-slate-700 placeholder-slate-300 bg-transparent resize-none leading-relaxed disabled:opacity-50"
@@ -215,13 +277,22 @@ export default function ChatPage() {
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({
+  message,
+  copied,
+  onCopy,
+}: {
+  message: ChatMessage;
+  copied: boolean;
+  onCopy: () => void;
+}) {
   if (message.role === "user") {
     return (
-      <div className="flex gap-4 justify-end">
+      <div className="flex flex-col items-end gap-1.5">
         <div className="bg-slate-100 px-5 py-3.5 rounded-2xl rounded-tr-sm text-[14px] text-slate-700 max-w-[80%] whitespace-pre-wrap">
           {message.content}
         </div>
+        <MessageMeta message={message} copied={copied} onCopy={onCopy} align="right" />
       </div>
     );
   }
@@ -238,12 +309,207 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               <span>{message.content}</span>
             </div>
           ) : (
-            message.content
+            <MarkdownContent content={message.content} />
           )}
         </div>
+        <MessageMeta message={message} copied={copied} onCopy={onCopy} align="left" />
       </div>
     </div>
   );
+}
+
+function MessageMeta({
+  message,
+  copied,
+  onCopy,
+  align,
+}: {
+  message: ChatMessage;
+  copied: boolean;
+  onCopy: () => void;
+  align: "left" | "right";
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2 text-[11px] text-slate-400 ${
+        align === "right" ? "justify-end pr-1" : "justify-start pl-1"
+      }`}
+    >
+      <span>{formatMessageTime(message.created_at)}</span>
+      <button
+        type="button"
+        onClick={onCopy}
+        title={copied ? "已复制" : "复制"}
+        aria-label={copied ? "已复制" : "复制消息"}
+        className="h-5 w-5 inline-flex items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </button>
+    </div>
+  );
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  return <div className="space-y-2 whitespace-normal">{renderMarkdownBlocks(content)}</div>;
+}
+
+function renderMarkdownBlocks(content: string) {
+  const lines = content.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let paragraph: string[] = [];
+  let list: string[] = [];
+  let code: string[] | null = null;
+
+  function flushParagraph() {
+    if (paragraph.length === 0) return;
+    blocks.push(
+      <p key={`p-${blocks.length}`} className="leading-relaxed">
+        {renderInlineMarkdown(paragraph.join(" "))}
+      </p>
+    );
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (list.length === 0) return;
+    blocks.push(
+      <ul key={`ul-${blocks.length}`} className="list-disc pl-5 space-y-1">
+        {list.map((item, index) => (
+          <li key={`${index}-${item}`}>{renderInlineMarkdown(item)}</li>
+        ))}
+      </ul>
+    );
+    list = [];
+  }
+
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      flushParagraph();
+      flushList();
+      if (code === null) {
+        code = [];
+      } else {
+        blocks.push(
+          <pre
+            key={`code-${blocks.length}`}
+            className="overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-[12px] leading-relaxed text-slate-100"
+          >
+            <code>{code.join("\n")}</code>
+          </pre>
+        );
+        code = null;
+      }
+      continue;
+    }
+
+    if (code !== null) {
+      code.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length;
+      const className =
+        level === 1
+          ? "text-[16px] font-semibold text-slate-800"
+          : level === 2
+            ? "text-[15px] font-semibold text-slate-800"
+            : "text-[14px] font-semibold text-slate-700";
+      blocks.push(
+        <div key={`h-${blocks.length}`} className={className}>
+          {renderInlineMarkdown(heading[2])}
+        </div>
+      );
+      continue;
+    }
+
+    const listItem = line.match(/^\s*[-*]\s+(.+)$/);
+    if (listItem) {
+      flushParagraph();
+      list.push(listItem[1]);
+      continue;
+    }
+
+    paragraph.push(line.trim());
+  }
+
+  flushParagraph();
+  flushList();
+  if (code !== null) {
+    blocks.push(
+      <pre
+        key={`code-${blocks.length}`}
+        className="overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-[12px] leading-relaxed text-slate-100"
+      >
+        <code>{code.join("\n")}</code>
+      </pre>
+    );
+  }
+
+  return blocks;
+}
+
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+    const value = match[0];
+    if (value.startsWith("**")) {
+      nodes.push(
+        <strong key={`strong-${match.index}`} className="font-semibold text-slate-700">
+          {value.slice(2, -2)}
+        </strong>
+      );
+    } else if (value.startsWith("`")) {
+      nodes.push(
+        <code key={`code-${match.index}`} className="rounded bg-slate-100 px-1 py-0.5 text-[12px] text-slate-700">
+          {value.slice(1, -1)}
+        </code>
+      );
+    } else {
+      const link = value.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (link) {
+        nodes.push(
+          <a
+            key={`link-${match.index}`}
+            href={link[2]}
+            target="_blank"
+            rel="noreferrer"
+            className="text-blue-600 hover:underline"
+          >
+            {link[1]}
+          </a>
+        );
+      }
+    }
+    lastIndex = match.index + value.length;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+  return nodes;
+}
+
+function formatMessageTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--:--";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function AgentAvatar() {
@@ -256,11 +522,29 @@ function AgentAvatar() {
   );
 }
 
-function PulsingDot() {
+function CopyIcon() {
   return (
-    <span className="flex h-2 w-2 relative">
-      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75" />
-      <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500" />
-    </span>
+    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+        d="M8 8h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z"
+      />
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+        d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="m5 13 4 4L19 7" />
+    </svg>
   );
 }

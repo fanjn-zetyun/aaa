@@ -10,17 +10,28 @@ interface Conversation {
   metadata: { github_url?: string; paper_url?: string; intent_hint?: string };
   created_at: string;
   updated_at: string;
+  messages: ConversationMessage[];
+}
+
+interface ConversationMessage {
+  id: number;
+  role: "user" | "assistant" | "tool" | "system";
+  content: string;
+  message_metadata: Record<string, unknown>;
+  created_at: string;
 }
 
 export default function RightPanel() {
   const { taskId: id } = useParams();
 
   const { data: conversation } = useQuery({
-    queryKey: ["conversation-panel", id],
+    queryKey: ["conversation", id],
     queryFn: () => apiFetch<Conversation>(`/api/conversations/${id}`),
     enabled: !!id,
     refetchInterval: 3000,
   });
+
+  const toolEvents = (conversation?.messages || []).filter((message) => message.role === "tool");
 
   if (!id) {
     return (
@@ -55,6 +66,20 @@ export default function RightPanel() {
         </div>
       </div>
 
+      <div className="min-h-[220px] flex flex-col overflow-hidden border-b border-slate-100">
+        <div className="px-5 py-4 bg-slate-50/50 flex items-center justify-between border-b border-slate-100">
+          <h3 className="text-[13px] font-semibold text-slate-700">Tool Events</h3>
+          {conversation?.status === "running" && <PulsingDot />}
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+          {toolEvents.length === 0 ? (
+            <div className="text-[12px] text-slate-400">暂无工具事件</div>
+          ) : (
+            toolEvents.map((event) => <ToolEventItem key={event.id} event={event} />)
+          )}
+        </div>
+      </div>
+
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="px-5 py-4 bg-slate-50/50 flex items-center justify-between border-b border-slate-100">
           <h3 className="text-[13px] font-semibold text-slate-700">任务信息</h3>
@@ -74,6 +99,25 @@ export default function RightPanel() {
         </div>
       </div>
     </aside>
+  );
+}
+
+function ToolEventItem({ event }: { event: ConversationMessage }) {
+  const toolName = String(event.message_metadata.tool_name || "tool");
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="truncate font-mono text-[11px] font-semibold text-slate-600">
+          {toolName}
+        </span>
+        <span className="shrink-0 text-[10px] text-slate-400">
+          {formatPanelTime(event.created_at)}
+        </span>
+      </div>
+      <div className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-500">
+        {event.content}
+      </div>
+    </div>
   );
 }
 
@@ -110,4 +154,19 @@ function TaskStatusBadge({ status }: { status: string }) {
       {status}
     </span>
   );
+}
+
+function PulsingDot() {
+  return (
+    <span className="flex h-2 w-2 relative">
+      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75" />
+      <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500" />
+    </span>
+  );
+}
+
+function formatPanelTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--:--";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }

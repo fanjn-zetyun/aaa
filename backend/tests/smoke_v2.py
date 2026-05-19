@@ -62,14 +62,29 @@ async def main() -> None:
             conversation_id = r.json()["id"]
             print("[ok] create conversation ->", conversation_id)
 
+            asked_for_confirmation = False
             for _ in range(30):
                 await asyncio.sleep(0.2)
                 r = await client.get(f"/api/conversations/{conversation_id}", headers=headers)
                 assert r.status_code == 200, r.text
                 data = r.json()
+                workflow_state = data.get("metadata", {}).get("workflow_state")
+                if workflow_state == "waiting_for_user" and not asked_for_confirmation:
+                    asked_for_confirmation = True
+                    pending = data.get("metadata", {}).get("pending_user_input") or {}
+                    print("[ok] waiting for user ->", pending.get("question", ""))
+                    r = await client.post(
+                        f"/api/conversations/{conversation_id}/messages",
+                        json={"content": "继续执行"},
+                        headers=headers,
+                    )
+                    assert r.status_code == 200, r.text
+                    print("[ok] resumed conversation")
+                    continue
                 if data["status"] in ("completed", "failed", "stopped"):
                     break
             assert data["status"] == "completed", data
+            assert data.get("metadata", {}).get("memory"), data
             roles = [m["role"] for m in data["messages"]]
             assert "assistant" in roles and "tool" in roles, data
             print("[ok] final status ->", data["status"])

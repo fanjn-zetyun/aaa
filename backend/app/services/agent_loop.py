@@ -13,9 +13,29 @@ from app.models import Conversation, ConversationMessage, LLMConfig
 from app.models.conversation import ConversationStatus, MessageRole
 from app.core.config import get_settings
 from app.services.conversation_store import append_conversation_event
+from app.services.conversation_memory import (
+    DECISION_NEEDS_REVISION,
+    DECISION_REJECTED,
+    DECISION_STOPPED,
+    WORKFLOW_WAITING_FOR_USER,
+    build_memory_context,
+    compact_memory_from_messages,
+    ensure_memory,
+    get_latest_decision_outcome,
+    has_approved_decision,
+    mark_idle,
+    mark_completed,
+    mark_failed,
+    mark_running,
+    mark_stopped,
+    mark_waiting_for_user,
+    remember_artifact,
+    remember_fact,
+    resolve_pending_user_input,
+)
 from app.services.llm_client import LLMRuntimeConfig, call_anthropic_compatible
 from app.services.skills import SkillDefinition, SkillLoader, select_skill
-from app.services.tools import ToolRegistry
+from app.services.tools import ToolRegistry, ToolResult
 
 
 @dataclass
@@ -69,6 +89,7 @@ class AgentLoopManager:
             conv = await session.get(Conversation, conversation_id)
             if conv:
                 conv.status = ConversationStatus.STOPPED
+                conv.metadata_ = mark_stopped(conv.metadata_ or {})
                 session.add(
                     ConversationMessage(
                         conversation_id=conversation_id,
@@ -81,16 +102,21 @@ class AgentLoopManager:
         self._streams[conversation_id].close()
 
     async def _run(self, conversation_id: int) -> None:
+        metadata: dict = {}
         try:
             await self._set_status(conversation_id, ConversationStatus.RUNNING)
             self._publish(conversation_id, {"type": "status", "status": "running"})
 
+            stop_after_user_reply = False
+            decision_outcome: str | None = None
+            pending_input: dict | None = None
+            memory_compacted = False
             async with SessionLocal() as session:
                 conv = await session.get(Conversation, conversation_id)
                 if conv is None:
                     return
                 user_id = conv.user_id
-                metadata = conv.metadata_ or {}
+                metadata = ensure_memory(conv.metadata_ or {})
                 db_messages = (
                     await session.execute(
                         select(ConversationMessage)
@@ -102,11 +128,63 @@ class AgentLoopManager:
                     (m.content for m in reversed(db_messages) if m.role == MessageRole.USER),
                     "",
                 )
+                if metadata.get("workflow_state") == WORKFLOW_WAITING_FOR_USER:
+                    pending_input = dict(metadata.get("pending_user_input") or {})
+                    pending_step = pending_input.get("step")
+                    metadata = resolve_pending_user_input(metadata, answer=latest_user)
+                    if pending_step:
+                        decision_outcome = get_latest_decision_outcome(metadata, str(pending_step))
+                    stop_after_user_reply = decision_outcome == DECISION_STOPPED or _is_stop_request(
+                        latest_user
+                    )
+                else:
+                    metadata = mark_running(metadata)
+                metadata, memory_compacted = compact_memory_from_messages(metadata, db_messages)
+                conv.metadata_ = metadata
+                await session.commit()
+
+            if memory_compacted:
+                self._publish(
+                    conversation_id,
+                    {
+                        "type": "memory_compacted",
+                        "compacted_through_message_id": metadata["memory"].get(
+                            "compacted_through_message_id"
+                        ),
+                        "compaction_count": metadata["memory"].get("compaction_count"),
+                    },
+                )
+
+            if stop_after_user_reply:
+                metadata = mark_stopped(metadata)
+                await self._system(conversation_id, "已根据你的回复停止当前任务。")
+                await self._set_status_and_metadata(
+                    conversation_id, ConversationStatus.STOPPED, metadata
+                )
+                self._publish(conversation_id, {"type": "status", "status": "stopped"})
+                return
+
+            if decision_outcome in (DECISION_NEEDS_REVISION, DECISION_REJECTED):
+                tool_name = pending_input.get("tool_name") if pending_input else None
+                blocked_step = f" `{tool_name}`" if tool_name else "需要确认的步骤"
+                metadata = mark_idle(metadata)
+                await self._assistant(
+                    conversation_id,
+                    (
+                        f"我已记录你的回复，当前不会继续执行{blocked_step}。"
+                        "请直接补充你希望修改的方案或新的执行约束。"
+                    ),
+                )
+                await self._set_status_and_metadata(
+                    conversation_id, ConversationStatus.ACTIVE, metadata
+                )
+                self._publish(conversation_id, {"type": "status", "status": "active"})
+                return
 
             llm_config = await _load_llm_config(user_id)
             skill = select_skill(self._skills, metadata)
             skill_name = skill.name if skill else _select_skill(metadata)
-            system_prompt = _build_system_prompt(metadata, skill_name, skill)
+            system_prompt = _build_system_prompt(metadata, skill_name, skill, self._tools)
             initial_messages = _build_llm_messages(db_messages, metadata)
 
             await self._tool(
@@ -128,25 +206,58 @@ class AgentLoopManager:
             await self._assistant(conversation_id, plan)
 
             tool_outputs: list[str] = []
-            result = await self._tools.analyze_repo(metadata.get("github_url"))
-            tool_outputs.append(f"{result.name}: {result.content}")
-            await self._tool(conversation_id, result.name, result.content)
+            result, metadata, paused = await self._invoke_tool_with_policy(
+                conversation_id,
+                metadata,
+                "analyze_repo",
+                {"github_url": metadata.get("github_url")},
+            )
+            if paused:
+                return
+            if result:
+                tool_outputs.append(f"{result.name}: {result.content}")
+            if metadata.get("github_url"):
+                metadata = remember_fact(metadata, f"目标仓库：{metadata['github_url']}")
+                await self._set_metadata(conversation_id, metadata)
 
             if metadata.get("task_type") == "reproduce" or metadata.get("github_url"):
-                result = await self._tools.lab4ai_create_instance()
-                tool_outputs.append(f"{result.name}: {result.content}")
-                await self._tool(conversation_id, result.name, result.content)
-
-                result = await self._tools.ssh_execute(
-                    "git clone && inspect README/requirements"
+                result, metadata, paused = await self._invoke_tool_with_policy(
+                    conversation_id,
+                    metadata,
+                    "lab4ai_create_instance",
+                    {},
                 )
-                tool_outputs.append(f"{result.name}: {result.content}")
-                await self._tool(conversation_id, result.name, result.content)
+                if paused:
+                    return
+                if result:
+                    tool_outputs.append(f"{result.name}: {result.content}")
+                    metadata = remember_artifact(metadata, result.content)
+                    await self._set_metadata(conversation_id, metadata)
 
-                result = await self._tools.lab4ai_stop_instance()
-                tool_outputs.append(f"{result.name}: {result.content}")
-                await self._tool(conversation_id, result.name, result.content)
+                result, metadata, paused = await self._invoke_tool_with_policy(
+                    conversation_id,
+                    metadata,
+                    "ssh_execute",
+                    {"command": "git clone && inspect README/requirements"},
+                )
+                if paused:
+                    return
+                if result:
+                    tool_outputs.append(f"{result.name}: {result.content}")
 
+                result, metadata, paused = await self._invoke_tool_with_policy(
+                    conversation_id,
+                    metadata,
+                    "lab4ai_stop_instance",
+                    {},
+                )
+                if paused:
+                    return
+                if result:
+                    tool_outputs.append(f"{result.name}: {result.content}")
+
+            metadata = _refresh_summary(metadata, latest_user, tool_outputs)
+            await self._set_metadata(conversation_id, metadata)
             reply = await self._model_or_fallback(
                 llm_config,
                 system=system_prompt,
@@ -166,13 +277,18 @@ class AgentLoopManager:
                 fallback=self._build_reply(metadata, latest_user),
             )
             await self._assistant(conversation_id, reply)
-            await self._set_status(conversation_id, ConversationStatus.COMPLETED)
+            metadata = mark_completed(metadata)
+            await self._set_status_and_metadata(
+                conversation_id, ConversationStatus.COMPLETED, metadata
+            )
             self._publish(conversation_id, {"type": "status", "status": "completed"})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await self._assistant(conversation_id, f"执行失败：{_format_exception(exc)}")
-            await self._set_status(conversation_id, ConversationStatus.FAILED)
+            await self._set_status_and_metadata(
+                conversation_id, ConversationStatus.FAILED, mark_failed(metadata)
+            )
             self._publish(conversation_id, {"type": "status", "status": "failed"})
         finally:
             self._streams[conversation_id].close()
@@ -200,13 +316,19 @@ class AgentLoopManager:
             await session.refresh(msg)
             self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
 
-    async def _tool(self, conversation_id: int, name: str, content: str) -> None:
+    async def _tool(
+        self,
+        conversation_id: int,
+        name: str,
+        content: str,
+        message_metadata: dict | None = None,
+    ) -> None:
         async with SessionLocal() as session:
             msg = ConversationMessage(
                 conversation_id=conversation_id,
                 role=MessageRole.TOOL,
                 content=content,
-                message_metadata={"tool_name": name},
+                message_metadata={"tool_name": name, **(message_metadata or {})},
             )
             session.add(msg)
             await session.commit()
@@ -216,11 +338,120 @@ class AgentLoopManager:
                 {"type": "tool", "tool_name": name, "message": _message_event(msg)},
             )
 
+    async def _system(self, conversation_id: int, content: str) -> None:
+        async with SessionLocal() as session:
+            msg = ConversationMessage(
+                conversation_id=conversation_id,
+                role=MessageRole.SYSTEM,
+                content=content,
+            )
+            session.add(msg)
+            await session.commit()
+            await session.refresh(msg)
+            self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
+
+    async def _invoke_tool_with_policy(
+        self,
+        conversation_id: int,
+        metadata: dict,
+        tool_name: str,
+        tool_input: dict[str, object] | None = None,
+    ) -> tuple[ToolResult | None, dict, bool]:
+        tool_input = dict(tool_input or {})
+        confirmation = self._tools.confirmation_for(tool_name, tool_input)
+        if confirmation and not has_approved_decision(metadata, confirmation.step):
+            metadata = await self._ask_user(
+                conversation_id,
+                metadata=metadata,
+                question=confirmation.question,
+                options=list(confirmation.options),
+                step=confirmation.step,
+                tool_name=tool_name,
+                tool_input=tool_input,
+            )
+            return None, metadata, True
+
+        result = await self._tools.invoke(tool_name, tool_input)
+        await self._tool(
+            conversation_id,
+            result.name,
+            result.content,
+            {
+                "tool_input": tool_input,
+                "ok": result.ok,
+                **(result.metadata or {}),
+            },
+        )
+        return result, metadata, False
+
+    async def _ask_user(
+        self,
+        conversation_id: int,
+        *,
+        metadata: dict,
+        question: str,
+        options: list[str],
+        step: str,
+        tool_name: str | None = None,
+        tool_input: dict[str, object] | None = None,
+    ) -> dict:
+        result = await self._tools.ask_user(question)
+        metadata = mark_waiting_for_user(
+            metadata,
+            question=question,
+            options=options,
+            step=step,
+            tool_name=tool_name,
+            tool_input=tool_input,
+        )
+        await self._set_status_and_metadata(conversation_id, ConversationStatus.ACTIVE, metadata)
+        await self._tool(
+            conversation_id,
+            result.name,
+            result.content,
+            {"step": step, "options": options, "tool_name": tool_name},
+        )
+        await self._system(
+            conversation_id,
+            "需要你确认后再继续执行：\n"
+            f"{question}\n\n"
+            "可回复：继续执行 / 先修改方案 / 停止任务，或直接输入你的具体要求。",
+        )
+        self._publish(
+            conversation_id,
+            {
+                "type": "ask_user",
+                "question": question,
+                "options": options,
+                "step": step,
+                "tool_name": tool_name,
+            },
+        )
+        self._publish(conversation_id, {"type": "status", "status": WORKFLOW_WAITING_FOR_USER})
+        return metadata
+
     async def _set_status(self, conversation_id: int, status: ConversationStatus) -> None:
         async with SessionLocal() as session:
             conv = await session.get(Conversation, conversation_id)
             if conv:
                 conv.status = status
+                await session.commit()
+
+    async def _set_metadata(self, conversation_id: int, metadata: dict) -> None:
+        async with SessionLocal() as session:
+            conv = await session.get(Conversation, conversation_id)
+            if conv:
+                conv.metadata_ = metadata
+                await session.commit()
+
+    async def _set_status_and_metadata(
+        self, conversation_id: int, status: ConversationStatus, metadata: dict
+    ) -> None:
+        async with SessionLocal() as session:
+            conv = await session.get(Conversation, conversation_id)
+            if conv:
+                conv.status = status
+                conv.metadata_ = metadata
                 await session.commit()
 
     async def _model_or_fallback(
@@ -294,6 +525,30 @@ def _select_skill(metadata: dict) -> str:
     return "general-chat"
 
 
+def _refresh_summary(metadata: dict, latest_user: str, tool_outputs: list[str]) -> dict:
+    metadata = ensure_memory(metadata)
+    memory = metadata["memory"]
+    parts: list[str] = []
+    if metadata.get("github_url"):
+        parts.append(f"仓库 {metadata['github_url']}")
+    if latest_user:
+        parts.append(f"用户需求 {latest_user}")
+    if tool_outputs:
+        parts.append(f"工具步骤 {len(tool_outputs)} 项")
+    current_summary = "；".join(parts)
+    previous_summary = str(memory.get("summary") or "").strip()
+    if current_summary:
+        marker = f"[当前轮次] {current_summary}"
+        if marker not in previous_summary:
+            memory["summary"] = f"{previous_summary}\n{marker}".strip()
+    return metadata
+
+
+def _is_stop_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(key in lowered for key in ("停止", "中止", "取消", "stop", "cancel"))
+
+
 def _format_exception(exc: Exception) -> str:
     message = str(exc).strip()
     if message:
@@ -302,7 +557,10 @@ def _format_exception(exc: Exception) -> str:
 
 
 def _build_system_prompt(
-    metadata: dict, skill_name: str, skill: SkillDefinition | None = None
+    metadata: dict,
+    skill_name: str,
+    skill: SkillDefinition | None = None,
+    tools: ToolRegistry | None = None,
 ) -> str:
     parts = [
         "你是 LOBSTER 科研复现 Agent。",
@@ -314,6 +572,10 @@ def _build_system_prompt(
         f"GitHub：{metadata.get('github_url') or '未提供'}",
         f"论文：{metadata.get('paper_url') or '未提供'}",
     ]
+    if tools:
+        parts.extend(["", tools.prompt_context(skill.allowed_tools if skill else None)])
+    if metadata.get("memory"):
+        parts.extend(["", build_memory_context(metadata)])
     if skill:
         parts.extend(
             [
@@ -331,6 +593,7 @@ def _build_llm_messages(
     result: list[dict[str, str]] = []
     if metadata:
         result.append({"role": "user", "content": f"任务元数据：{metadata}"})
+        result.append({"role": "user", "content": build_memory_context(metadata)})
     for msg in messages[-12:]:
         if msg.role == MessageRole.USER:
             result.append({"role": "user", "content": msg.content})

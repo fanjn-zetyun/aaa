@@ -169,15 +169,32 @@ MVP 当前允许用固定工具链模拟闭环：
 每个 Tool 是结构化对象：
 
 ```python
-class Tool:
+class ToolDefinition:
     name: str
     description: str
     input_schema: dict
+    read_only: bool
+    confirmation_policy: Literal["never", "always", "risky"]
+    confirmation_reason: str
 
-    async def call(self, input: dict, context: ToolContext) -> ToolResult: ...
-    def is_read_only(self) -> bool: ...
-    def requires_confirmation(self) -> bool: ...
+class ToolResult:
+    name: str
+    content: str
+    ok: bool
+    metadata: dict
+
+class ToolRegistry:
+    def confirmation_for(name: str, input: dict) -> ToolConfirmation | None: ...
+    async def invoke(name: str, input: dict) -> ToolResult: ...
 ```
+
+当前实现已经落地声明式 `ToolRegistry`：Tool 的 schema、只读属性、确认策略和执行器集中在 `backend/app/services/tools.py`。Agent Loop 不再手写某个资源确认分支，而是通过 `_invoke_tool_with_policy` 统一检查确认策略、暂停等待用户、再执行 Tool。
+
+确认策略约定：
+
+- `never`：只读或安全动作，不触发 HITL。
+- `always`：创建算力实例等会产生费用或占用资源的动作，必须先确认。
+- `risky`：如 SSH 命令，只有命中高风险模式时才确认。
 
 MVP Tool：
 
@@ -289,11 +306,77 @@ WebSocket 推送内容：
 - assistant 文本增量。
 - tool start / result / error。
 - skill selection。
+- human confirmation request / answer。
 - 任务状态变化。
 - Lab4AI 实例状态变化。
 - 错误类型和错误消息。
 
 事件必须持久化，断线重连后可以通过 conversation history 回看。
+
+### 5.9 对话记忆
+
+每个对话都需要自己的结构化记忆，不只是保留原始消息历史。当前推荐做法是把记忆放在 `Conversation.metadata` 中，由后端统一读写，避免再引入额外存储面。
+
+建议结构：
+
+```json
+{
+  "memory": {
+    "summary": "当前任务摘要",
+    "facts": ["已确认事实"],
+    "decisions": ["用户已确认的决策"],
+    "open_questions": ["待用户回答的问题"],
+    "artifacts": ["报告路径 / 远程实例 / 日志路径"],
+    "last_compacted_at": "2026-05-19T00:00:00Z",
+    "compacted_through_message_id": 123,
+    "compaction_count": 1
+  },
+  "workflow_run_id": "每轮 Agent 执行的唯一 ID",
+  "workflow_state": "idle | running | waiting_for_user | completed | failed | stopped",
+  "pending_user_input": {
+    "question": "需要用户确认的问题",
+    "options": ["继续", "修改方案", "停止"],
+    "step": "human_checkpoint",
+    "tool_name": "lab4ai_create_instance",
+    "tool_input": {},
+    "run_id": "当前 workflow_run_id"
+  }
+}
+```
+
+记忆更新原则：
+
+- 新消息进入后，先追加原始消息，再更新结构化记忆。
+- 重要事实、用户确认、远程实例 ID、报告路径必须写入 `memory`。
+- Agent 请求模型时，使用“完整消息历史 + 最近窗口 + memory 摘要”三层上下文，而不是只依赖最近 12 条消息。
+- 当对话过长时，后端把早期消息压缩为摘要写入 `memory.summary`，记录 `last_compacted_at / compacted_through_message_id / compaction_count`；完整原始消息仍保留在数据库和 JSONL 事件日志中。
+
+### 5.10 Human-in-the-loop
+
+HITL 不是单独一个页面，而是对话流程中的“等待用户决策”状态。
+
+适合触发人工参与的场景：
+
+- 信息不足，无法安全继续，例如缺少仓库、论文链接、数据集许可信息。
+- 动作会产生费用或影响远程资源，例如创建 GPU 实例、启动长训练、下载受限数据。
+- 多个方案都可行，但需要用户确认优先级，例如“先 CPU 探索还是直接上 GPU”。
+- 解析到高风险命令或可能破坏环境的操作。
+
+推荐交互：
+
+1. Agent 通过 `ask_user` 生成问题。
+2. 后端把 `workflow_state` 置为 `waiting_for_user`，并写入 `pending_user_input`。
+3. WebSocket 推送 `ask_user` 事件，前端展示问题和可选操作。
+4. 输入框保持可用，用户直接回复文字或点击快捷按钮。
+5. 用户回复后，`POST /api/conversations/{id}/messages` 继续推进流程。
+6. 后端读取原始消息历史与 `memory`，从上次暂停点继续执行。
+
+实现约束：
+
+- `ask_user` 不应只是普通文本，它必须能暂停流程。
+- 被确认过的决策要写进 `memory.decisions`，但审批只对当前 `workflow_run_id` 生效，避免新一轮对话误用旧确认。
+- 没有收到用户回复时，不得自动跳过需要确认的步骤。
+- 发生中断、刷新页面或重新连接后，前端仍应通过 `pending_user_input` 恢复到等待态。
 
 ## 6. 数据模型
 
@@ -326,6 +409,14 @@ Conversation
 ├── log_file_path
 ├── created_at
 └── updated_at
+
+metadata 建议承载：
+
+- `memory`
+- `workflow_state`
+- `workflow_run_id`
+- `pending_user_input`
+- `task_type / github_url / paper_url / intent_hint`
 
 ConversationMessage
 ├── id
@@ -393,9 +484,9 @@ CloudInstance
 
 - 登录 / 注册。
 - WelcomePage：创建科研任务入口。
-- ChatPage：多轮对话、执行事件、停止按钮、结果回看。
+- ChatPage：多轮对话、Agent 回复 Markdown 渲染、每条消息的时间与复制按钮、停止按钮、结果回看。
 - Sidebar：历史对话、配额展示、任务类型导航。
-- RightPanel：当前对话详情、云实例、任务 metadata。
+- RightPanel：Tool Events 流、当前对话详情、云实例、任务 metadata。
 - ModelSettings：用户模型配置和连通性测试。
 - Admin 页面：用户管理、云实例总览、Lab4AI 凭证、用量报表。
 
@@ -419,7 +510,11 @@ CloudInstance
 - 模型配置页面和连通性测试。
 - WebSocket 流式事件。
 - 对话历史持久化。
+- 对话 memory 已可写入 `Conversation.metadata`，包含摘要、事实、决策、待答问题和产物列表。
+- reproduce 任务已具备 Tool 策略驱动的 HITL：`lab4ai_create_instance` 必须确认，高风险 `ssh_execute` 条件确认，回复后按 `approved / needs_revision / rejected / stopped` 分类处理。
+- 对话 memory 已支持长历史压缩，早期消息会压缩进 `memory.summary`，并记录 `compacted_through_message_id / compaction_count`。
 - 前端对话入口、历史记录、模型设置页。
+- ChatPage 已支持 Agent Markdown 渲染，消息底部显示时间和复制按钮；Tool Events 已移动到右侧栏展示。
 - 配额查询和前端展示。
 - SkillLoader 最小实现：扫描 `skills/*/SKILL.md`、解析 frontmatter、加载 `lab4ai-auto-reproduct/project_reproduce.yaml` 并注入 Agent Loop system prompt。
 - MVP 模拟 Tool：创建实例、SSH 执行、停止实例。
@@ -431,6 +526,8 @@ CloudInstance
 - Agent Loop 仍以固定工具链为主，尚未升级为完整 tool-use 循环。
 - `api_key_encrypted` 字段尚未接入真实加密。
 - `skills/` 目录已支持最小解析和注入，但仍需继续标准化元数据、`allowed_tools` 和任务类型映射。
+- memory 仍是基于 `Conversation.metadata` 的轻量结构化实现，尚未接入向量检索或跨对话长期记忆。
+- HITL 已接入统一 Tool 确认管线，但还不是完整权限系统，后续需要覆盖真实 Lab4AI、真实 SSH、文件写入等更多动作。
 - 旧 `claw-instances` 接口和相关命名仍有历史遗留，后续需要迁移或删除。
 
 ## 10. 下一步
@@ -439,6 +536,8 @@ CloudInstance
 2. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
 3. 将 Agent Loop 升级为模型驱动的 tool-use 循环。
 4. 继续标准化 `skills/` 元数据、`allowed_tools` 和 prompt 模板。
-5. 为用户 LLM API Key 接入加密存储。
-6. 清理旧 `claw-instances` API、模型命名和测试。
-7. 完成管理员前端页面。
+5. 把 HITL 权限系统扩展到真实 Lab4AI、真实 SSH、文件写入等高风险 Tool，并补齐审计记录。
+6. 为对话 memory 增加跨对话长期记忆和检索策略。
+7. 为用户 LLM API Key 接入加密存储。
+8. 清理旧 `claw-instances` API、模型命名和测试。
+9. 完成管理员前端页面。

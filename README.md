@@ -92,9 +92,17 @@ npm run dev
 
 ## 当前开发状态
 
-当前 V2 MVP 已跑通：后端已支持 `conversations` 对话式任务、真实模型配置与 Anthropic-compatible 模型调用，前端已支持对话页、历史记录、模型设置页和 WebSocket 流式事件。Skill Loader 最小闭环已接入，复现任务会加载 `lab4ai-auto-reproduct` 及其 `project_reproduce.yaml` 并注入 Agent Loop。
+当前 V2 MVP 已跑通：后端已支持 `conversations` 对话式任务、真实模型配置与 Anthropic-compatible 模型调用，前端已支持对话页、历史记录、模型设置页和 WebSocket 流式事件。Skill Loader 最小闭环已接入，复现任务会加载 `lab4ai-auto-reproduct` 及其 `project_reproduce.yaml` 并注入 Agent Loop。每个对话已具备轻量结构化 memory，复现任务会在创建资源前进入 human-in-the-loop 确认，用户回复后继续执行。
 
 目前 Lab4AI 实例创建、SSH 执行、实例释放仍是 MVP 模拟工具层；下一步需要接入真实 Lab4AI API 和真实 SSH 执行。详细进度见 [docs/progress.md](docs/progress.md)，完整设计方案见 [docs/proposal.md](docs/proposal.md)。
+
+## 当前实现补充（2026-05-19）
+
+- 后端 Tool 层已从硬编码方法升级为声明式 `ToolRegistry`，每个 Tool 统一声明 `description / input_schema / confirmation_policy / executor`。
+- HITL 现在由 Tool 确认策略统一触发：创建 Lab4AI 算力实例必须确认，高风险 SSH 命令按策略确认，用户回复会被分类为 `approved / needs_revision / rejected / stopped`。
+- 每轮 Agent 执行都有 `workflow_run_id`，用户确认只对当前运行生效，避免后续新一轮对话误用旧确认。
+- 对话 memory 已支持摘要压缩，长历史会汇总进 `memory.summary`，完整原始消息仍保留在数据库和 JSONL 事件日志中。
+- 当前验证通过：`uv run pytest` 46 个后端用例、`uv run python backend/tests/smoke_v2.py`、`uv run ruff check backend/app`、前端 12 个 Vitest 用例和 `npm run build`。
 
 ## License
 

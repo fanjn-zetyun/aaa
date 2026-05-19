@@ -19,6 +19,7 @@ from app.schemas.conversation import (
     MessageCreateRequest,
 )
 from app.services.agent_loop import get_agent_manager
+from app.services.conversation_memory import ensure_memory
 from app.services.conversation_store import conversation_log_path
 from app.services.tools import infer_task_type
 
@@ -50,6 +51,7 @@ async def create_conversation(
         "paper_url": str(payload.paper_url) if payload.paper_url else None,
         "intent_hint": task_type.value,
     }
+    metadata = ensure_memory(metadata)
     conv = Conversation(
         user_id=user.id,
         task_type=task_type,
