@@ -109,6 +109,8 @@ def mark_waiting_for_user(
     step: str,
     tool_name: str | None = None,
     tool_input: dict[str, Any] | None = None,
+    tool_call_id: str | None = None,
+    workflow_step_id: str | None = None,
 ) -> dict[str, Any]:
     result = ensure_memory(metadata)
     result["workflow_state"] = WORKFLOW_WAITING_FOR_USER
@@ -122,6 +124,12 @@ def mark_waiting_for_user(
     if tool_name:
         pending["tool_name"] = tool_name
         pending["tool_input"] = dict(tool_input or {})
+    resolved_tool_call_id = tool_call_id or (tool_input or {}).get("tool_call_id")
+    resolved_workflow_step_id = workflow_step_id or (tool_input or {}).get("workflow_step_id")
+    if resolved_tool_call_id:
+        pending["tool_call_id"] = str(resolved_tool_call_id)
+    if resolved_workflow_step_id:
+        pending["workflow_step_id"] = str(resolved_workflow_step_id)
     result["pending_user_input"] = pending
     memory = result["memory"]
     open_questions = [
@@ -160,6 +168,10 @@ def resolve_pending_user_input(
     if pending.get("tool_name"):
         decision["tool_name"] = pending.get("tool_name")
         decision["tool_input"] = pending.get("tool_input") or {}
+    if pending.get("tool_call_id"):
+        decision["tool_call_id"] = pending.get("tool_call_id")
+    if pending.get("workflow_step_id"):
+        decision["workflow_step_id"] = pending.get("workflow_step_id")
     memory = result["memory"]
     memory["decisions"] = [*(memory.get("decisions") or []), decision]
     memory["open_questions"] = [
@@ -184,11 +196,24 @@ def has_decision(metadata: dict[str, Any], step: str) -> bool:
     )
 
 
-def has_approved_decision(metadata: dict[str, Any], step: str) -> bool:
-    return get_latest_decision_outcome(metadata, step) == DECISION_APPROVED
+def has_approved_decision(
+    metadata: dict[str, Any],
+    step: str,
+    *,
+    tool_call_id: str | None = None,
+) -> bool:
+    return (
+        get_latest_decision_outcome(metadata, step, tool_call_id=tool_call_id)
+        == DECISION_APPROVED
+    )
 
 
-def get_latest_decision_outcome(metadata: dict[str, Any], step: str) -> str | None:
+def get_latest_decision_outcome(
+    metadata: dict[str, Any],
+    step: str,
+    *,
+    tool_call_id: str | None = None,
+) -> str | None:
     result = ensure_memory(metadata)
     memory = result["memory"]
     run_id = result.get("workflow_run_id")
@@ -197,6 +222,11 @@ def get_latest_decision_outcome(metadata: dict[str, Any], step: str) -> str | No
             isinstance(item, dict)
             and item.get("step") == step
             and (run_id is None or item.get("run_id") == run_id)
+            and (
+                tool_call_id is None
+                or not item.get("tool_call_id")
+                or item.get("tool_call_id") == tool_call_id
+            )
         ):
             return str(item.get("outcome") or "")
     return None

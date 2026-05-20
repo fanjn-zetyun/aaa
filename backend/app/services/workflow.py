@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Awaitable, Callable
+from uuid import uuid4
 
 from app.services.conversation_memory import ensure_memory, remember_artifact, remember_fact
 from app.services.tools import ToolResult
@@ -15,6 +17,27 @@ WORKFLOW_STEP_WAITING = "waiting_for_user"
 WORKFLOW_STEP_COMPLETED = "completed"
 WORKFLOW_STEP_FAILED = "failed"
 WORKFLOW_STEP_SKIPPED = "skipped"
+
+STEP_ALLOWED_TOOLS = {
+    "step_1_audit": ["analyze_repo"],
+    "step_2_condition_check": [],
+    "step_3_deploy_cpu": ["lab4ai_create_instance"],
+    "step_4_cpu_env_setup": ["ssh_execute", "file_write"],
+    "step_5_release_cpu": ["lab4ai_stop_instance"],
+    "step_6_deploy_gpu": ["lab4ai_create_instance"],
+    "step_7_gpu_execution": ["ssh_execute", "file_write"],
+    "step_8_generate_report": ["repro_report", "file_write"],
+    "step_9_release_gpu": ["lab4ai_stop_instance"],
+}
+
+TOOL_AUDIT_METADATA = {
+    "analyze_repo": {"audit_category": "general", "risk_level": "low"},
+    "lab4ai_create_instance": {"audit_category": "lab4ai", "risk_level": "high"},
+    "lab4ai_stop_instance": {"audit_category": "lab4ai", "risk_level": "medium"},
+    "ssh_execute": {"audit_category": "ssh", "risk_level": "high"},
+    "file_write": {"audit_category": "file", "risk_level": "high"},
+    "repro_report": {"audit_category": "workflow", "risk_level": "low"},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +61,10 @@ ToolInvoker = Callable[
     [dict, str, dict[str, object]],
     Awaitable[tuple[ToolResult | None, dict, bool]],
 ]
+StepModelToolRunner = Callable[
+    [dict, WorkflowStep],
+    Awaitable[tuple[dict, list[str], bool, bool]],
+]
 MetadataWriter = Callable[[dict], Awaitable[None]]
 EventPublisher = Callable[[dict], None]
 
@@ -59,12 +86,15 @@ class SkillWorkflowRunner:
         invoke_tool: ToolInvoker,
         write_metadata: MetadataWriter,
         publish: EventPublisher,
+        run_step_model_tools: StepModelToolRunner | None = None,
     ) -> None:
         self.workflow = workflow
         self.skill_name = skill_name
         self.invoke_tool = invoke_tool
         self.write_metadata = write_metadata
         self.publish = publish
+        self.run_step_model_tools = run_step_model_tools
+        self._latest_metadata: dict = {}
 
     async def run(self, metadata: dict) -> WorkflowRunResult:
         metadata = ensure_workflow_metadata(
@@ -72,6 +102,7 @@ class SkillWorkflowRunner:
             self.workflow,
             skill_name=self.skill_name,
         )
+        self._latest_metadata = metadata
         await self.write_metadata(metadata)
         self.publish(
             {
@@ -91,6 +122,7 @@ class SkillWorkflowRunner:
                     step,
                     WORKFLOW_STEP_FAILED,
                     output="依赖步骤尚未完成，workflow 已中止。",
+                    error="Workflow dependency step has not completed.",
                 )
                 metadata, cleanup_outputs = await cleanup_workflow_resources(
                     metadata,
@@ -111,15 +143,22 @@ class SkillWorkflowRunner:
             metadata["workflow_current_step_id"] = step.id
             await self.write_metadata(metadata)
             self._publish_step("workflow_step_started", metadata, step)
+            metadata = await self._publish_step_progress(
+                metadata,
+                step,
+                f"Start step: {step.name}",
+            )
 
             try:
                 metadata, outputs, paused = await self._execute_step(metadata, step)
             except Exception as exc:
+                metadata = self._latest_metadata or metadata
                 metadata = mark_workflow_step(
                     metadata,
                     step,
                     WORKFLOW_STEP_FAILED,
                     output=f"{type(exc).__name__}: {exc}",
+                    error=f"{type(exc).__name__}: {exc}",
                 )
                 metadata, cleanup_outputs = await cleanup_workflow_resources(
                     metadata,
@@ -186,9 +225,35 @@ class SkillWorkflowRunner:
         repo_name = repo_name_from_url(str(metadata.get("github_url") or "project"))
         outputs: list[str] = []
 
+        metadata, model_outputs, paused, handled = await self._run_model_tools_for_step(
+            metadata,
+            step,
+        )
+        outputs.extend(model_outputs)
+        if paused:
+            return metadata, outputs, True
+        if handled:
+            if step.id == "step_7_gpu_execution":
+                metadata = ensure_workflow_results(metadata)
+                metadata["workflow_results"]["smoke_test_metrics"] = {
+                    "status": "passed",
+                    "source": "model_tool_use",
+                }
+            return (
+                mark_workflow_step(
+                    metadata,
+                    step,
+                    WORKFLOW_STEP_COMPLETED,
+                    output="\n".join(model_outputs) or "step 内模型 tool-use 已完成。",
+                ),
+                outputs,
+                False,
+            )
+
         if step.id == "step_1_audit":
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "analyze_repo",
                 {"github_url": metadata.get("github_url")},
             )
@@ -204,6 +269,11 @@ class SkillWorkflowRunner:
                     "audit_report_path": f"/root/lab4ai/workspace/{repo_name}/{repo_name}_Audit_Report.md",
                     "baseline_metrics": "MVP 阶段记录论文链接，真实指标待 paper_analysis 接入后提取。",
                 }
+            )
+            metadata = add_workflow_step_artifact(
+                metadata,
+                step,
+                metadata["workflow_results"]["audit_report_path"],
             )
             metadata = remember_fact(metadata, f"目标仓库：{metadata.get('github_url')}")
             if metadata.get("paper_url"):
@@ -223,16 +293,26 @@ class SkillWorkflowRunner:
             score = int(ensure_workflow_results(metadata)["workflow_results"].get("score") or 0)
             status = WORKFLOW_STEP_COMPLETED if score >= 60 else WORKFLOW_STEP_FAILED
             output = "验证通过，继续执行。" if score >= 60 else f"score={score}，低于 60，触发熔断。"
-            return mark_workflow_step(metadata, step, status, output=output), outputs, False
+            return (
+                mark_workflow_step(
+                    metadata,
+                    step,
+                    status,
+                    output=output,
+                    error=None if status == WORKFLOW_STEP_COMPLETED else output,
+                ),
+                outputs,
+                False,
+            )
 
         if step.id == "step_3_deploy_cpu":
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "lab4ai_create_instance",
                 {
                     "resource_kind": "CPU",
                     "cpu_cores": 2,
-                    "workflow_step_id": step.id,
                 },
             )
             if paused:
@@ -249,6 +329,7 @@ class SkillWorkflowRunner:
                     released=False,
                     raw=result.metadata,
                 )
+                metadata = add_workflow_step_artifact(metadata, step, f"lab4ai:cpu:{server_id}")
                 metadata = remember_artifact(metadata, f"CPU 实例：{server_id}")
                 return (
                     mark_workflow_step(
@@ -263,10 +344,11 @@ class SkillWorkflowRunner:
 
         if step.id == "step_4_cpu_env_setup":
             command = f"prepare CPU workspace and dependencies for {repo_name}"
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "ssh_execute",
-                {"command": command, "workflow_step_id": step.id},
+                {"command": command},
             )
             if paused:
                 return metadata, outputs, True
@@ -285,10 +367,11 @@ class SkillWorkflowRunner:
 
         if step.id == "step_5_release_cpu":
             server_id = workflow_resource_server_id(metadata, "cpu")
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "lab4ai_stop_instance",
-                {"server_id": server_id, "workflow_step_id": step.id},
+                {"server_id": server_id},
             )
             if paused:
                 return metadata, outputs, True
@@ -307,13 +390,13 @@ class SkillWorkflowRunner:
             )
 
         if step.id == "step_6_deploy_gpu":
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "lab4ai_create_instance",
                 {
                     "resource_kind": "GPU",
                     "gpu_count": 1,
-                    "workflow_step_id": step.id,
                 },
             )
             if paused:
@@ -330,6 +413,7 @@ class SkillWorkflowRunner:
                     released=False,
                     raw=result.metadata,
                 )
+                metadata = add_workflow_step_artifact(metadata, step, f"lab4ai:gpu:{server_id}")
                 metadata = remember_artifact(metadata, f"GPU 实例：{server_id}")
                 return (
                     mark_workflow_step(
@@ -344,10 +428,11 @@ class SkillWorkflowRunner:
 
         if step.id == "step_7_gpu_execution":
             command = f"run GPU smoke test for {repo_name}"
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "ssh_execute",
-                {"command": command, "workflow_step_id": step.id},
+                {"command": command},
             )
             if paused:
                 return metadata, outputs, True
@@ -370,10 +455,11 @@ class SkillWorkflowRunner:
             )
 
         if step.id == "step_8_generate_report":
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "repro_report",
-                {"repo_name": repo_name, "workflow_step_id": step.id},
+                {"repo_name": repo_name},
             )
             if paused:
                 return metadata, outputs, True
@@ -383,6 +469,7 @@ class SkillWorkflowRunner:
                 report_path = str(result.metadata.get("report_path") or report_path)
             metadata = ensure_workflow_results(metadata)
             metadata["workflow_results"]["word_report_path"] = report_path
+            metadata = add_workflow_step_artifact(metadata, step, report_path)
             metadata = remember_artifact(metadata, f"复现报告：{report_path}")
             return (
                 mark_workflow_step(
@@ -397,10 +484,11 @@ class SkillWorkflowRunner:
 
         if step.id == "step_9_release_gpu":
             server_id = workflow_resource_server_id(metadata, "gpu")
-            result, metadata, paused = await self.invoke_tool(
+            result, metadata, paused = await self._invoke_step_tool(
                 metadata,
+                step,
                 "lab4ai_stop_instance",
-                {"server_id": server_id, "workflow_step_id": step.id},
+                {"server_id": server_id},
             )
             if paused:
                 return metadata, outputs, True
@@ -438,6 +526,129 @@ class SkillWorkflowRunner:
             }
         )
 
+    async def _publish_step_progress(
+        self,
+        metadata: dict,
+        step: WorkflowStep,
+        content: str,
+    ) -> dict:
+        metadata = add_workflow_step_progress(metadata, step, content)
+        self._latest_metadata = metadata
+        await self.write_metadata(metadata)
+        self.publish(
+            {
+                "type": "workflow_step_progress",
+                "workflow_step_id": step.id,
+                "content": content,
+                "step": workflow_step_state(metadata, step.id),
+                "workflow": workflow_public_state(metadata),
+            }
+        )
+        return metadata
+
+    async def _invoke_step_tool(
+        self,
+        metadata: dict,
+        step: WorkflowStep,
+        tool_name: str,
+        tool_input: dict[str, object] | None = None,
+    ) -> tuple[ToolResult | None, dict, bool]:
+        tool_call_id = f"toolu_{uuid4().hex}"
+        payload = dict(tool_input or {})
+        payload.setdefault("workflow_step_id", step.id)
+        payload.setdefault("tool_call_id", tool_call_id)
+
+        metadata = add_workflow_tool_call(
+            metadata,
+            step,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            status="running",
+        )
+        self._latest_metadata = metadata
+        metadata = await self._publish_step_progress(
+            metadata,
+            step,
+            f"Invoking tool: {tool_name}",
+        )
+
+        try:
+            result, metadata, paused = await self.invoke_tool(metadata, tool_name, payload)
+        except Exception as exc:
+            error = _format_exception(exc)
+            metadata = update_workflow_tool_call(
+                metadata,
+                step.id,
+                tool_call_id,
+                status="failed",
+                ok=False,
+                error=error,
+            )
+            metadata = mark_workflow_step(
+                metadata,
+                step,
+                WORKFLOW_STEP_FAILED,
+                output=error,
+                error=error,
+            )
+            metadata = await self._publish_step_progress(
+                metadata,
+                step,
+                f"Tool failed: {tool_name}",
+            )
+            raise
+
+        if paused:
+            metadata = update_workflow_tool_call(
+                metadata,
+                step.id,
+                tool_call_id,
+                status="waiting_for_user",
+            )
+            metadata = await self._publish_step_progress(
+                metadata,
+                step,
+                f"Tool waiting for user: {tool_name}",
+            )
+            return result, metadata, paused
+
+        ok = result.ok if result else None
+        metadata = update_workflow_tool_call(
+            metadata,
+            step.id,
+            tool_call_id,
+            status="completed" if ok is not False else "failed",
+            ok=ok,
+            result_metadata=result.metadata if result else None,
+        )
+        if result and result.ok is False:
+            metadata = mark_workflow_step(
+                metadata,
+                step,
+                WORKFLOW_STEP_FAILED,
+                output=result.content,
+                error=result.content,
+            )
+            self._latest_metadata = metadata
+        metadata = await self._publish_step_progress(
+            metadata,
+            step,
+            f"Tool completed: {tool_name}",
+        )
+        return result, metadata, paused
+
+    async def _run_model_tools_for_step(
+        self,
+        metadata: dict,
+        step: WorkflowStep,
+    ) -> tuple[dict, list[str], bool, bool]:
+        if self.run_step_model_tools is None or step.id not in {
+            "step_4_cpu_env_setup",
+            "step_7_gpu_execution",
+        }:
+            return metadata, [], False, False
+        return await self.run_step_model_tools(metadata, step)
+
 
 async def cleanup_workflow_resources(
     metadata: dict,
@@ -473,22 +684,64 @@ async def cleanup_workflow_resources(
 
     for kind, step_id, resource in to_release:
         server_id = str(resource.get("server_id"))
+        step = _cleanup_step(step_id, kind)
+        metadata = ensure_workflow_metadata_for_step(metadata, step)
+        metadata = mark_workflow_step(metadata, step, WORKFLOW_STEP_RUNNING)
+        tool_call_id = f"toolu_{uuid4().hex}"
+        metadata = add_workflow_tool_call(
+            metadata,
+            step,
+            tool_call_id=tool_call_id,
+            tool_name="lab4ai_stop_instance",
+            status="running",
+        )
+        metadata = add_workflow_step_progress(
+            metadata,
+            step,
+            f"Cleanup releasing {kind.upper()} instance: {server_id}",
+        )
+        await write_metadata(metadata)
+        publish(
+            {
+                "type": "workflow_step_progress",
+                "workflow_step_id": step_id,
+                "content": f"Cleanup releasing {kind.upper()} instance: {server_id}",
+                "step": workflow_step_state(metadata, step_id),
+                "workflow": workflow_public_state(metadata),
+            }
+        )
         result, metadata, paused = await invoke_tool(
             metadata,
             "lab4ai_stop_instance",
             {
                 "server_id": server_id,
                 "workflow_step_id": step_id,
+                "tool_call_id": tool_call_id,
                 "resource_kind": kind.upper(),
                 "force_cleanup": True,
             },
         )
         if paused:
+            metadata = update_workflow_tool_call(
+                metadata,
+                step_id,
+                tool_call_id,
+                status="waiting_for_user",
+            )
+            await write_metadata(metadata)
             continue
         if result:
             outputs.append(f"{result.name}: {result.content}")
+        ok = result.ok if result else None
+        metadata = update_workflow_tool_call(
+            metadata,
+            step_id,
+            tool_call_id,
+            status="completed" if ok is not False else "failed",
+            ok=ok,
+            result_metadata=result.metadata if result else None,
+        )
         metadata = set_workflow_resource(metadata, kind, released=True)
-        step = _cleanup_step(step_id, kind)
         metadata = mark_workflow_step(
             metadata,
             step,
@@ -573,6 +826,7 @@ def ensure_workflow_metadata(
                 "output": "",
                 "depends_on": step.depends_on,
                 "expected_output": step.expected_output,
+                **_initial_step_runtime_fields(step.id),
             }
             for step in workflow.steps
         ]
@@ -596,6 +850,7 @@ def ensure_workflow_metadata(
         )
         item.setdefault("status", WORKFLOW_STEP_PENDING)
         item.setdefault("output", "")
+        _ensure_step_runtime_fields(item, step.id)
         merged.append(item)
     result["workflow_steps"] = merged
     return result
@@ -619,6 +874,37 @@ def workflow_step_state(metadata: dict, step_id: str) -> dict:
     return {}
 
 
+def ensure_workflow_metadata_for_step(metadata: dict, step: WorkflowStep) -> dict:
+    result = ensure_memory(metadata)
+    steps = []
+    found = False
+    for item in result.get("workflow_steps") or []:
+        current = dict(item)
+        if current.get("id") == step.id:
+            current.setdefault("name", step.name)
+            current.setdefault("status", WORKFLOW_STEP_PENDING)
+            current.setdefault("output", "")
+            current.setdefault("depends_on", step.depends_on)
+            current.setdefault("expected_output", step.expected_output)
+            _ensure_step_runtime_fields(current, step.id)
+            found = True
+        steps.append(current)
+    if not found:
+        steps.append(
+            {
+                "id": step.id,
+                "name": step.name,
+                "status": WORKFLOW_STEP_PENDING,
+                "output": "",
+                "depends_on": step.depends_on,
+                "expected_output": step.expected_output,
+                **_initial_step_runtime_fields(step.id),
+            }
+        )
+    result["workflow_steps"] = steps
+    return result
+
+
 def dependencies_completed(metadata: dict, step: WorkflowStep) -> bool:
     for dependency in step.depends_on:
         if workflow_step_state(metadata, dependency).get("status") != WORKFLOW_STEP_COMPLETED:
@@ -632,6 +918,7 @@ def mark_workflow_step(
     status: str,
     *,
     output: str | None = None,
+    error: str | None = None,
 ) -> dict:
     result = ensure_memory(metadata)
     steps = []
@@ -639,22 +926,162 @@ def mark_workflow_step(
     for item in result.get("workflow_steps") or []:
         current = dict(item)
         if current.get("id") == step.id:
+            previous_status = current.get("status")
+            _ensure_step_runtime_fields(current, step.id)
             current["status"] = status
+            if status == WORKFLOW_STEP_RUNNING and previous_status != WORKFLOW_STEP_RUNNING:
+                current["attempts"] = int(current.get("attempts") or 0) + 1
             if output is not None:
                 current["output"] = output
+            if error is not None:
+                current["error"] = error
+            elif status in (WORKFLOW_STEP_COMPLETED, WORKFLOW_STEP_RUNNING):
+                current["error"] = None
             found = True
         steps.append(current)
     if not found:
-        steps.append(
-            {
-                "id": step.id,
-                "name": step.name,
-                "status": status,
-                "output": output or "",
-                "depends_on": step.depends_on,
-                "expected_output": step.expected_output,
-            }
-        )
+        item = {
+            "id": step.id,
+            "name": step.name,
+            "status": status,
+            "output": output or "",
+            "depends_on": step.depends_on,
+            "expected_output": step.expected_output,
+            **_initial_step_runtime_fields(step.id),
+        }
+        if status == WORKFLOW_STEP_RUNNING:
+            item["attempts"] = 1
+        if error is not None:
+            item["error"] = error
+        steps.append(item)
+    result["workflow_steps"] = steps
+    return result
+
+
+def add_workflow_step_progress(metadata: dict, step: WorkflowStep, content: str) -> dict:
+    result = ensure_memory(metadata)
+    steps = []
+    found = False
+    for item in result.get("workflow_steps") or []:
+        current = dict(item)
+        if current.get("id") == step.id:
+            _ensure_step_runtime_fields(current, step.id)
+            current["progress"] = [*current["progress"], content]
+            found = True
+        steps.append(current)
+    if not found:
+        current = {
+            "id": step.id,
+            "name": step.name,
+            "status": WORKFLOW_STEP_PENDING,
+            "output": "",
+            "depends_on": step.depends_on,
+            "expected_output": step.expected_output,
+            **_initial_step_runtime_fields(step.id),
+        }
+        current["progress"] = [content]
+        steps.append(current)
+    result["workflow_steps"] = steps
+    return result
+
+
+def add_workflow_tool_call(
+    metadata: dict,
+    step: WorkflowStep,
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    status: str,
+) -> dict:
+    result = ensure_memory(metadata)
+    steps = []
+    found = False
+    for item in result.get("workflow_steps") or []:
+        current = dict(item)
+        if current.get("id") == step.id:
+            _ensure_step_runtime_fields(current, step.id)
+            current["tool_calls"] = [
+                *current["tool_calls"],
+                _new_tool_call(tool_call_id, tool_name, status),
+            ]
+            found = True
+        steps.append(current)
+    if not found:
+        current = {
+            "id": step.id,
+            "name": step.name,
+            "status": WORKFLOW_STEP_PENDING,
+            "output": "",
+            "depends_on": step.depends_on,
+            "expected_output": step.expected_output,
+            **_initial_step_runtime_fields(step.id),
+        }
+        current["tool_calls"] = [_new_tool_call(tool_call_id, tool_name, status)]
+        steps.append(current)
+    result["workflow_steps"] = steps
+    return result
+
+
+def add_workflow_step_artifact(metadata: dict, step: WorkflowStep, artifact: str) -> dict:
+    result = ensure_memory(metadata)
+    steps = []
+    found = False
+    for item in result.get("workflow_steps") or []:
+        current = dict(item)
+        if current.get("id") == step.id:
+            _ensure_step_runtime_fields(current, step.id)
+            if artifact not in current["artifacts"]:
+                current["artifacts"] = [*current["artifacts"], artifact]
+            found = True
+        steps.append(current)
+    if not found:
+        current = {
+            "id": step.id,
+            "name": step.name,
+            "status": WORKFLOW_STEP_PENDING,
+            "output": "",
+            "depends_on": step.depends_on,
+            "expected_output": step.expected_output,
+            **_initial_step_runtime_fields(step.id),
+        }
+        current["artifacts"] = [artifact]
+        steps.append(current)
+    result["workflow_steps"] = steps
+    return result
+
+
+def update_workflow_tool_call(
+    metadata: dict,
+    step_id: str,
+    tool_call_id: str,
+    *,
+    status: str,
+    ok: bool | None = None,
+    error: str | None = None,
+    result_metadata: dict | None = None,
+) -> dict:
+    result = ensure_memory(metadata)
+    steps = []
+    for item in result.get("workflow_steps") or []:
+        current = dict(item)
+        if current.get("id") == step_id:
+            _ensure_step_runtime_fields(current, step_id)
+            calls = []
+            for call in current["tool_calls"]:
+                current_call = dict(call)
+                if current_call.get("tool_call_id") == tool_call_id:
+                    current_call["status"] = status
+                    if status in ("completed", "failed"):
+                        current_call["completed_at"] = _now_iso()
+                    if ok is not None:
+                        current_call["ok"] = ok
+                    if error is not None:
+                        current_call["error"] = error
+                    if result_metadata is not None:
+                        current_call["metadata"] = result_metadata
+                calls.append(current_call)
+            current["tool_calls"] = calls
+        steps.append(current)
     result["workflow_steps"] = steps
     return result
 
@@ -692,6 +1119,57 @@ def workflow_resource_server_id(metadata: dict, kind: str) -> str | None:
     resource = (metadata.get("workflow_resources") or {}).get(kind) or {}
     server_id = resource.get("server_id")
     return str(server_id) if server_id else None
+
+
+def _initial_step_runtime_fields(step_id: str) -> dict:
+    return {
+        "attempts": 0,
+        "allowed_tools": list(STEP_ALLOWED_TOOLS.get(step_id, [])),
+        "tool_calls": [],
+        "artifacts": [],
+        "progress": [],
+        "error": None,
+    }
+
+
+def _ensure_step_runtime_fields(item: dict, step_id: str) -> None:
+    item.setdefault("attempts", 0)
+    if not isinstance(item.get("attempts"), int):
+        try:
+            item["attempts"] = int(item.get("attempts") or 0)
+        except (TypeError, ValueError):
+            item["attempts"] = 0
+    item["allowed_tools"] = list(STEP_ALLOWED_TOOLS.get(step_id, item.get("allowed_tools") or []))
+    for key in ("tool_calls", "artifacts", "progress"):
+        if not isinstance(item.get(key), list):
+            item[key] = []
+    item.setdefault("error", None)
+
+
+def _new_tool_call(tool_call_id: str, tool_name: str, status: str) -> dict:
+    audit = TOOL_AUDIT_METADATA.get(tool_name, {})
+    return {
+        "tool_call_id": tool_call_id,
+        "name": tool_name,
+        "status": status,
+        "started_at": _now_iso(),
+        "completed_at": None,
+        "ok": None,
+        "audit_category": audit.get("audit_category", "general"),
+        "risk_level": audit.get("risk_level", "low"),
+        "error": None,
+    }
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _format_exception(exc: Exception) -> str:
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return type(exc).__name__
 
 
 def step_output_for(metadata: dict, step_id: str) -> str:

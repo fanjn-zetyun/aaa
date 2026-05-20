@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -20,6 +20,21 @@ class LLMRuntimeConfig:
     @property
     def configured(self) -> bool:
         return bool(self.api_key and self.model and self.base_url)
+
+
+@dataclass(slots=True)
+class LLMToolUse:
+    id: str
+    name: str
+    input: dict[str, Any]
+
+
+@dataclass(slots=True)
+class LLMToolResponse:
+    text: str
+    tool_calls: list[LLMToolUse]
+    stop_reason: str | None
+    raw: dict[str, Any]
 
 
 async def call_anthropic_compatible(
@@ -49,6 +64,39 @@ async def call_anthropic_compatible(
         response.raise_for_status()
         data = response.json()
     return _extract_text(data)
+
+
+async def call_anthropic_compatible_tool_use(
+    config: LLMRuntimeConfig,
+    *,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> LLMToolResponse:
+    """Call Anthropic Messages API and preserve text/tool_use content blocks."""
+    if not config.configured:
+        raise RuntimeError("LLM config is not complete")
+
+    endpoint = _messages_endpoint(config.base_url)
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": config.api_key or "",
+    }
+    payload: dict[str, Any] = {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "system": system,
+        "messages": messages,
+    }
+    if tools is not None:
+        payload["tools"] = tools
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+    return _extract_tool_response(data)
 
 
 async def stream_anthropic_compatible(
@@ -115,6 +163,40 @@ def _extract_text(data: dict) -> str:
     if isinstance(content, str):
         return content
     return str(data)
+
+
+def _extract_tool_response(data: dict[str, Any]) -> LLMToolResponse:
+    content = data.get("content")
+    text_parts: list[str] = []
+    tool_calls: list[LLMToolUse] = []
+
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                text = block.get("text")
+                if text:
+                    text_parts.append(str(text))
+            elif block_type == "tool_use":
+                tool_input = block.get("input")
+                tool_calls.append(
+                    LLMToolUse(
+                        id=str(block.get("id") or ""),
+                        name=str(block.get("name") or ""),
+                        input=tool_input if isinstance(tool_input, dict) else {},
+                    )
+                )
+    elif isinstance(content, str):
+        text_parts.append(content)
+
+    return LLMToolResponse(
+        text="\n".join(part for part in text_parts if part).strip(),
+        tool_calls=tool_calls,
+        stop_reason=data.get("stop_reason") if isinstance(data.get("stop_reason"), str) else None,
+        raw=data,
+    )
 
 
 def _extract_stream_text(data: dict) -> str:

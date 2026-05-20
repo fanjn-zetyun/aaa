@@ -6,6 +6,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy import select
 
@@ -35,9 +36,16 @@ from app.services.conversation_memory import (
     resolve_pending_user_input,
 )
 from app.services.llm_client import (
+    LLMToolResponse,
     LLMRuntimeConfig,
     call_anthropic_compatible,
+    call_anthropic_compatible_tool_use,
     stream_anthropic_compatible,
+)
+from app.services.long_term_memory import (
+    format_long_term_memory_context,
+    search_user_memories,
+    store_user_memory,
 )
 from app.services.skills import SkillDefinition, SkillLoader, select_skill
 from app.services.tools import ToolExecutionContext, ToolRegistry, ToolResult
@@ -50,6 +58,7 @@ from app.services.workflow import (
 AGENT_PLAN_MAX_TOKENS = 2048
 AGENT_REPLY_MAX_TOKENS = 8192
 AGENT_REPLY_FALLBACK_MAX_TOKENS = 4096
+AGENT_TOOL_USE_MAX_ITERATIONS = 8
 
 
 @dataclass
@@ -83,6 +92,14 @@ class ConversationStream:
         for q in self.subscribers:
             q.put_nowait(None)
         self.subscribers.clear()
+
+
+@dataclass(slots=True)
+class ModelToolRunResult:
+    metadata: dict
+    tool_outputs: list[str]
+    paused: bool = False
+    used_model_tools: bool = False
 
 
 class AgentLoopManager:
@@ -231,6 +248,9 @@ class AgentLoopManager:
             skill_name = skill.name if skill else _select_skill(metadata)
             system_prompt = _build_system_prompt(metadata, skill_name, skill, self._tools)
             initial_messages = _build_llm_messages(db_messages, metadata)
+            long_term_context = await self._long_term_memory_context(user_id, latest_user)
+            if long_term_context:
+                system_prompt = f"{system_prompt}\n\n{long_term_context}"
 
             await self._progress(
                 conversation_id,
@@ -269,6 +289,19 @@ class AgentLoopManager:
                         conversation_id, current_metadata
                     ),
                     publish=lambda event: self._publish(conversation_id, event),
+                    run_step_model_tools=lambda current_metadata, step: (
+                        self._run_step_model_tool_use(
+                            conversation_id,
+                            current_metadata,
+                            step,
+                            llm_config,
+                            system=system_prompt,
+                            messages=[
+                                *initial_messages,
+                                {"role": "assistant", "content": plan},
+                            ],
+                        )
+                    ),
                 )
                 workflow_result = await runner.run(metadata)
                 metadata = workflow_result.metadata
@@ -359,6 +392,7 @@ class AgentLoopManager:
             await self._set_status_and_metadata(
                 conversation_id, ConversationStatus.COMPLETED, metadata
             )
+            await self._store_completion_memory(conversation_id, user_id, metadata, latest_user)
             self._publish(conversation_id, {"type": "status", "status": "completed"})
         except asyncio.CancelledError:
             raise
@@ -416,6 +450,154 @@ class AgentLoopManager:
             },
         )
 
+    async def _run_model_tool_use_or_fallback(
+        self,
+        conversation_id: int,
+        metadata: dict,
+        config: LLMRuntimeConfig,
+        *,
+        system: str,
+        messages: list[dict],
+        allowed_tools: list[str] | None,
+    ) -> ModelToolRunResult:
+        if not config.configured:
+            return ModelToolRunResult(metadata=metadata, tool_outputs=[])
+
+        available_tools = self._tools.list_anthropic_tools(allowed_tools)
+        if not available_tools:
+            return ModelToolRunResult(metadata=metadata, tool_outputs=[])
+
+        current_messages = list(messages)
+        tool_outputs: list[str] = []
+        used_model_tools = False
+        last_error: Exception | None = None
+        for iteration in range(AGENT_TOOL_USE_MAX_ITERATIONS):
+            try:
+                response = await call_anthropic_compatible_tool_use(
+                    replace(config, max_tokens=AGENT_PLAN_MAX_TOKENS),
+                    system=system,
+                    messages=current_messages,
+                    tools=available_tools,
+                )
+            except Exception as exc:
+                last_error = exc
+                break
+
+            if response.text:
+                await self._progress(
+                    conversation_id,
+                    response.text,
+                    stage=f"tool_use_iteration_{iteration + 1}",
+                )
+            if not response.tool_calls:
+                break
+
+            used_model_tools = True
+            current_messages.append(_assistant_tool_message(response))
+            tool_result_blocks: list[dict] = []
+            for tool_call in response.tool_calls:
+                if tool_call.name not in {item["name"] for item in available_tools}:
+                    tool_result_blocks.append(
+                        _tool_result_block(
+                            tool_call.id,
+                            f"工具 `{tool_call.name}` 不在当前 allowlist 中，已拒绝执行。",
+                            is_error=True,
+                        )
+                    )
+                    continue
+
+                tool_input = dict(tool_call.input or {})
+                tool_input.setdefault("tool_call_id", tool_call.id or f"toolu_{uuid4().hex}")
+                result, metadata, paused = await self._invoke_tool_with_policy(
+                    conversation_id,
+                    metadata,
+                    tool_call.name,
+                    tool_input,
+                )
+                if paused:
+                    return ModelToolRunResult(
+                        metadata=metadata,
+                        tool_outputs=tool_outputs,
+                        paused=True,
+                        used_model_tools=True,
+                    )
+                if result:
+                    output = f"{result.name}: {result.content}"
+                    tool_outputs.append(output)
+                    tool_result_blocks.append(
+                        _tool_result_block(
+                            str(tool_input["tool_call_id"]),
+                            result.content,
+                            is_error=not result.ok,
+                        )
+                    )
+            if tool_result_blocks:
+                current_messages.append({"role": "user", "content": tool_result_blocks})
+
+        if last_error:
+            await self._progress(
+                conversation_id,
+                f"模型 tool-use 调用失败，已回退到固定执行链路。错误：{_format_exception(last_error)}",
+                stage="tool_use_fallback",
+            )
+        return ModelToolRunResult(
+            metadata=metadata,
+            tool_outputs=tool_outputs,
+            used_model_tools=used_model_tools,
+        )
+
+    async def _run_step_model_tool_use(
+        self,
+        conversation_id: int,
+        metadata: dict,
+        step,
+        config: LLMRuntimeConfig,
+        *,
+        system: str,
+        messages: list[dict],
+    ) -> tuple[dict, list[str], bool, bool]:
+        step_state = next(
+            (
+                item
+                for item in metadata.get("workflow_steps") or []
+                if isinstance(item, dict) and item.get("id") == step.id
+            ),
+            {},
+        )
+        allowed_tools = [
+            str(item)
+            for item in (step_state.get("allowed_tools") or [])
+            if isinstance(item, str) and item
+        ]
+        if not allowed_tools:
+            return metadata, [], False, False
+
+        result = await self._run_model_tool_use_or_fallback(
+            conversation_id,
+            metadata,
+            config,
+            system=system,
+            messages=[
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        f"当前 workflow step：{step.id} / {step.name}\n"
+                        f"step 指令：{step.instruction or '未提供'}\n"
+                        f"期望产出：{step.expected_output or '未提供'}\n"
+                        "你只能调用当前 step allowlist 中的 Tool；不要越过 Workflow 顺序。"
+                    ),
+                },
+            ],
+            allowed_tools=allowed_tools,
+        )
+        return (
+            result.metadata,
+            result.tool_outputs,
+            result.paused,
+            result.used_model_tools,
+        )
+
     async def _tool(
         self,
         conversation_id: int,
@@ -440,6 +622,8 @@ class AgentLoopManager:
                     "tool_name": name,
                     "message": _message_event(msg),
                     "ok": msg.message_metadata.get("ok", True),
+                    "tool_call_id": msg.message_metadata.get("tool_call_id"),
+                    "workflow_step_id": msg.message_metadata.get("workflow_step_id"),
                 },
             )
 
@@ -455,8 +639,21 @@ class AgentLoopManager:
         tool_input: dict[str, object] | None = None,
     ) -> tuple[ToolResult | None, dict, bool]:
         tool_input = dict(tool_input or {})
+        run_id = str(metadata.get("workflow_run_id") or "")
+        if run_id:
+            tool_input.setdefault("workflow_run_id", run_id)
+        tool_input.setdefault("tool_call_id", _stable_tool_call_id(metadata, tool_name, tool_input))
         confirmation = self._tools.confirmation_for(tool_name, tool_input)
-        if confirmation and not has_approved_decision(metadata, confirmation.step):
+        approved = (
+            has_approved_decision(
+                metadata,
+                confirmation.step,
+                tool_call_id=confirmation.tool_call_id,
+            )
+            if confirmation
+            else False
+        )
+        if confirmation and not approved:
             metadata = await self._ask_user(
                 conversation_id,
                 metadata=metadata,
@@ -465,15 +662,24 @@ class AgentLoopManager:
                 step=confirmation.step,
                 tool_name=tool_name,
                 tool_input=tool_input,
+                risk_level=confirmation.risk_level,
+                audit_category=confirmation.audit_category,
+                tool_call_id=confirmation.tool_call_id,
+                workflow_step_id=confirmation.workflow_step_id,
             )
             return None, metadata, True
 
+        tool_definition = self._tools.definition(tool_name)
         self._publish(
             conversation_id,
             {
                 "type": "tool_started",
                 "tool_name": tool_name,
                 "tool_input": tool_input,
+                "tool_call_id": tool_input.get("tool_call_id"),
+                "workflow_step_id": tool_input.get("workflow_step_id"),
+                "risk_level": tool_definition.risk_level,
+                "audit_category": tool_definition.audit_category,
             },
         )
         try:
@@ -496,6 +702,8 @@ class AgentLoopManager:
                     "type": "tool_error",
                     "tool_name": tool_name,
                     "tool_input": tool_input,
+                    "tool_call_id": tool_input.get("tool_call_id"),
+                    "workflow_step_id": tool_input.get("workflow_step_id"),
                     "error": _format_exception(exc),
                 },
             )
@@ -507,6 +715,12 @@ class AgentLoopManager:
             {
                 "tool_input": tool_input,
                 "ok": result.ok,
+                "tool_call_id": tool_input.get("tool_call_id"),
+                "workflow_step_id": tool_input.get("workflow_step_id"),
+                "risk_level": tool_definition.risk_level,
+                "audit_category": tool_definition.audit_category,
+                "confirmation_required": confirmation is not None,
+                "confirmed_by_user": confirmation is not None,
                 **(result.metadata or {}),
             },
         )
@@ -522,6 +736,10 @@ class AgentLoopManager:
         step: str,
         tool_name: str | None = None,
         tool_input: dict[str, object] | None = None,
+        risk_level: str | None = None,
+        audit_category: str | None = None,
+        tool_call_id: str | None = None,
+        workflow_step_id: str | None = None,
     ) -> dict:
         result = await self._tools.ask_user(question)
         metadata = mark_waiting_for_user(
@@ -531,13 +749,25 @@ class AgentLoopManager:
             step=step,
             tool_name=tool_name,
             tool_input=tool_input,
+            tool_call_id=tool_call_id,
+            workflow_step_id=workflow_step_id,
         )
         await self._set_status_and_metadata(conversation_id, ConversationStatus.ACTIVE, metadata)
         await self._tool(
             conversation_id,
             result.name,
             result.content,
-            {"step": step, "options": options, "tool_name": tool_name},
+            {
+                "step": step,
+                "options": options,
+                "tool_name": tool_name,
+                "tool_input": tool_input or {},
+                "tool_call_id": tool_call_id,
+                "workflow_step_id": workflow_step_id,
+                "risk_level": risk_level,
+                "audit_category": audit_category,
+                "confirmation_required": True,
+            },
         )
         await self._system(
             conversation_id,
@@ -553,6 +783,10 @@ class AgentLoopManager:
                 "options": options,
                 "step": step,
                 "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "workflow_step_id": workflow_step_id,
+                "risk_level": risk_level,
+                "audit_category": audit_category,
             },
         )
         self._publish(conversation_id, {"type": "status", "status": WORKFLOW_WAITING_FOR_USER})
@@ -614,6 +848,39 @@ class AgentLoopManager:
                 conv.status = status
                 conv.metadata_ = metadata
                 await session.commit()
+
+    async def _long_term_memory_context(self, user_id: int, query: str) -> str:
+        async with SessionLocal() as session:
+            memories = await search_user_memories(session, user_id, query, limit=5)
+        return format_long_term_memory_context(memories)
+
+    async def _store_completion_memory(
+        self,
+        conversation_id: int,
+        user_id: int,
+        metadata: dict,
+        latest_user: str,
+    ) -> None:
+        memory = ensure_memory(metadata).get("memory") or {}
+        summary = str(memory.get("summary") or "").strip()
+        artifacts = memory.get("artifacts") or []
+        if not summary and not artifacts:
+            return
+        content_parts = []
+        if latest_user:
+            content_parts.append(f"用户需求：{latest_user}")
+        if summary:
+            content_parts.append(f"摘要：{summary}")
+        if artifacts:
+            content_parts.append("产物：" + "；".join(str(item) for item in artifacts[-5:]))
+        async with SessionLocal() as session:
+            await store_user_memory(
+                session,
+                user_id=user_id,
+                kind="project",
+                content="\n".join(content_parts),
+                source_conversation_id=conversation_id,
+            )
 
     async def _model_or_fallback(
         self,
@@ -810,6 +1077,46 @@ def _format_exception(exc: Exception) -> str:
     if message:
         return f"{type(exc).__name__}: {message}"
     return type(exc).__name__
+
+
+def _assistant_tool_message(response: LLMToolResponse) -> dict:
+    content: list[dict] = []
+    if response.text:
+        content.append({"type": "text", "text": response.text})
+    for tool_call in response.tool_calls:
+        content.append(
+            {
+                "type": "tool_use",
+                "id": tool_call.id,
+                "name": tool_call.name,
+                "input": tool_call.input,
+            }
+        )
+    return {"role": "assistant", "content": content}
+
+
+def _tool_result_block(tool_use_id: str, content: str, *, is_error: bool = False) -> dict:
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content,
+        "is_error": is_error,
+    }
+
+
+def _stable_tool_call_id(metadata: dict, tool_name: str, tool_input: dict[str, object]) -> str:
+    pending = metadata.get("pending_user_input")
+    if (
+        isinstance(pending, dict)
+        and pending.get("tool_name") == tool_name
+        and pending.get("tool_call_id")
+    ):
+        pending_input = pending.get("tool_input")
+        pending_step = (pending_input or {}).get("workflow_step_id") if isinstance(pending_input, dict) else None
+        current_step = tool_input.get("workflow_step_id")
+        if not pending_step or not current_step or pending_step == current_step:
+            return str(pending["tool_call_id"])
+    return f"toolu_{uuid4().hex}"
 
 
 def _build_system_prompt(

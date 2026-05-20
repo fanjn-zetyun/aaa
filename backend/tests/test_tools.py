@@ -4,6 +4,7 @@ import pytest
 
 from app.models import CloudInstance, CloudInstanceStatus, CloudInstanceType
 from app.services.lab4ai.client import Lab4AIInstance, Lab4AIStopResult
+from app.services.tools import ToolDefinition
 from app.services.tools import ToolRegistry
 from app.services.tools import ToolExecutionContext
 
@@ -22,6 +23,33 @@ async def test_tool_registry_builds_confirmation_for_resource_creation():
     assert "Lab4AI" in confirmation.question
 
 
+async def test_tool_definition_metadata_defaults_keep_old_constructor_compatible():
+    definition = ToolDefinition(
+        name="read_only_probe",
+        description="Read-only probe",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    assert definition.risk_level == "low"
+    assert definition.audit_category == "general"
+
+
+async def test_tool_registry_anthropic_schema_filters_allowed_tools():
+    registry = ToolRegistry()
+
+    tools = registry.list_anthropic_tools(["ssh_execute"])
+
+    assert tools == [
+        {
+            "name": "ssh_execute",
+            "description": registry.definition("ssh_execute").description,
+            "input_schema": registry.definition("ssh_execute").input_schema,
+        }
+    ]
+    assert "confirmation_policy" not in tools[0]
+    assert "risk_level" not in tools[0]
+
+
 async def test_tool_registry_only_confirms_risky_ssh_commands():
     registry = ToolRegistry()
 
@@ -34,6 +62,30 @@ async def test_tool_registry_only_confirms_risky_ssh_commands():
     assert safe_confirmation is None
     assert risky_confirmation is not None
     assert risky_confirmation.tool_name == "ssh_execute"
+
+
+async def test_tool_registry_confirmation_includes_tool_call_scope_in_pending_payload():
+    registry = ToolRegistry()
+
+    confirmation = registry.confirmation_for(
+        "lab4ai_create_instance",
+        {"resource_kind": "GPU"},
+        workflow_run_id="run-1",
+        tool_call_id="toolu-1",
+        workflow_step_id="step_6_deploy_gpu",
+    )
+
+    assert confirmation is not None
+    assert confirmation.step == "tool_confirm:lab4ai_create_instance:run-1:toolu-1:step_6_deploy_gpu"
+    assert confirmation.tool_input["workflow_run_id"] == "run-1"
+    assert confirmation.tool_input["tool_call_id"] == "toolu-1"
+    pending = confirmation.as_pending_input()
+    assert pending["workflow_run_id"] == "run-1"
+    assert pending["run_id"] == "run-1"
+    assert pending["tool_call_id"] == "toolu-1"
+    assert pending["workflow_step_id"] == "step_6_deploy_gpu"
+    assert pending["risk_level"] == "critical"
+    assert pending["audit_category"] == "lab4ai"
 
 
 async def test_tool_registry_skips_confirmation_for_forced_cleanup():
@@ -54,6 +106,40 @@ async def test_tool_registry_prompt_context_filters_by_allowed_tools():
 
     assert "analyze_repo" in context
     assert "lab4ai_create_instance" not in context
+
+
+async def test_file_write_requires_confirmation_and_only_simulates():
+    registry = ToolRegistry()
+
+    confirmation = registry.confirmation_for(
+        "file_write",
+        {"path": "/tmp/result.md", "content": "ok", "tool_call_id": "toolu-file"},
+    )
+    result = await registry.invoke(
+        "file_write",
+        {"path": "/tmp/result.md", "content": "ok"},
+    )
+
+    assert confirmation is not None
+    assert confirmation.risk_level == "high"
+    assert confirmation.audit_category == "file"
+    assert confirmation.step == "tool_confirm:file_write:toolu-file"
+    assert result.ok is True
+    assert result.metadata["simulated"] is True
+    assert result.metadata["written"] is False
+
+
+async def test_file_write_refuses_skills_path():
+    registry = ToolRegistry()
+
+    result = await registry.invoke(
+        "file_write",
+        {"path": "skills/lab4ai-auto-reproduct/SKILL.md", "content": "no"},
+    )
+
+    assert result.ok is False
+    assert result.metadata["simulated"] is True
+    assert result.metadata["written"] is False
 
 
 async def test_lab4ai_create_instance_requires_credentials(test_user, db_session):

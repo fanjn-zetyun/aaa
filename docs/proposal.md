@@ -165,7 +165,15 @@ MVP 当前允许用固定工具链推进闭环：
 4. 调用 `lab4ai_stop_instance` 释放真实 Lab4AI 实例。
 5. 调用模型生成总结。
 
-后续目标是升级为真正由模型返回 `tool_use`，后端执行后继续循环。
+已确认下一阶段升级为 **Workflow 强约束 + step 内模型 tool-use** 的混合模式，而不是让模型完全自由规划。设计约束如下：
+
+- Workflow 仍是复现类强流程任务的主骨架，负责 step 顺序、依赖、状态持久化、前端展示和资源兜底释放。
+- 每个 workflow step 内部可以调用模型，让模型返回 `tool_use`；后端只执行当前 step allowlist 中允许的 Tool。
+- 第一阶段允许接入 `lab4ai_create_instance`、`lab4ai_stop_instance`、`ssh_execute`、`file_write` 等高风险或计费 Tool，但必须经过 ToolRegistry 权限策略、HITL 确认和归属记录，不允许模型绕过。
+- 每轮 tool-use 循环必须有最大轮数，例如 `max_tool_iterations=8`，防止模型无限调用工具。
+- Tool 默认串行执行；只读 Tool 的并发执行留到后续优化，避免状态竞态。
+- `tool_result` 必须回流为下一轮模型上下文，并同步持久化为 `ConversationMessage(role=tool)` 与 WebSocket 事件。
+- 发生失败、中断或用户停止时，仍必须进入 `stopping -> cleanup -> stopped` 语义，资源释放逻辑优先于模型继续规划。
 
 ### 5.4 Tool 系统
 
@@ -179,6 +187,8 @@ class ToolDefinition:
     read_only: bool
     confirmation_policy: Literal["never", "always", "risky"]
     confirmation_reason: str
+    risk_level: Literal["low", "medium", "high", "critical"]
+    audit_category: Literal["lab4ai", "ssh", "file", "llm", "workflow", "general"]
 
 class ToolResult:
     name: str
@@ -192,6 +202,13 @@ class ToolRegistry:
 ```
 
 当前实现已经落地声明式 `ToolRegistry`：Tool 的 schema、只读属性、确认策略和执行器集中在 `backend/app/services/tools.py`。Agent Loop 不再手写某个资源确认分支，而是通过 `_invoke_tool_with_policy` 统一检查确认策略、暂停等待用户、再执行 Tool。
+
+下一阶段 Tool 权限系统不先新建复杂权限中心，而是在 `ToolDefinition` 上补齐风险与审计元数据：
+
+- `risk_level`：`low | medium | high | critical`。
+- `audit_category`：`lab4ai | ssh | file | llm | workflow | general`。
+- 审批绑定 `workflow_run_id + tool_call_id`，旧确认不能被新一轮或新工具调用复用。
+- 第一阶段审计记录写入 `ConversationMessage.message_metadata`，后续如需要管理员级审计检索，再迁移为独立 `AuditLog` 表。
 
 确认策略约定：
 
@@ -302,6 +319,20 @@ Skill 执行链路：
       "id": "step_1_audit",
       "name": "项目复现可行性分析",
       "status": "completed",
+      "attempts": 1,
+      "allowed_tools": ["analyze_repo", "read_url", "ask_user"],
+      "tool_calls": [
+        {
+          "tool_call_id": "toolu_01...",
+          "name": "analyze_repo",
+          "status": "completed",
+          "started_at": "2026-05-20T10:00:00Z",
+          "completed_at": "2026-05-20T10:00:03Z"
+        }
+      ],
+      "artifacts": ["runtime/workspaces/.../audit.md"],
+      "progress": ["已读取 README", "已提取依赖文件"],
+      "error": null,
       "output": "score=75；已完成仓库与论文审计"
     }
   ],
@@ -317,6 +348,17 @@ Skill 执行链路：
   }
 }
 ```
+
+Workflow step metadata 需要比首版状态机更细：
+
+- `attempts`：当前 step 的重试次数，用于恢复和失败诊断。
+- `allowed_tools`：当前 step 内模型可调用的 Tool 白名单，必须来自 workflow/skill 的交集。
+- `tool_calls`：当前 step 内已经发起的工具调用列表，至少记录 `tool_call_id / name / status / started_at / completed_at / ok / audit_category / risk_level`。
+- `artifacts`：当前 step 产物路径或远程资源引用，例如审计报告、训练日志、结果图、Word 报告。
+- `progress`：细粒度进展文本，可通过 `workflow_step_progress` 增量推给前端。
+- `error`：结构化错误，至少包含 `type / message / retryable / tool_call_id`。
+
+这些字段必须写入 `Conversation.metadata.workflow_steps[*]`，不能只存在内存中。恢复执行时，WorkflowRunner 先读取 metadata 判断上次停在何处，再决定继续、重试或进入 cleanup。
 
 Workflow step 状态：
 
@@ -411,6 +453,9 @@ WebSocket 推送内容：
 - assistant 回复必须以同一条用户消息为边界聚合。规划、工具调用和总结属于同一轮执行轨迹，不应在主聊天区拆成多条互不关联的 assistant 回复。
 - 模型最终回复使用 `assistant_started` / `assistant_delta` / `assistant_completed` 事件流式推送。`assistant_completed` 后再把完整文本持久化为一条 `ConversationMessage(role=assistant)`。
 - 工具执行过程使用 `tool_started` / `tool_completed` / `tool_error` 表达，并持久化为 `ConversationMessage(role=tool)`；前端应在当前 assistant 回复下方以执行时间线展示，而不是完全隐藏。
+- 模型驱动 tool-use 阶段，每个 `tool_started / tool_completed / tool_error / workflow_step_waiting / ask_user` 事件都必须携带 `tool_call_id`；如果事件属于某个 workflow step，还必须携带 `workflow_step_id`。
+- HITL 审批事件必须携带 `run_id + tool_call_id + workflow_step_id`。用户确认后，后端只允许恢复同一 `workflow_run_id` 下同一个 `tool_call_id` 的调用，不能只按 tool name 或 step name 复用旧确认。
+- Tool 审计信息第一阶段随 `ConversationMessage(role=tool).message_metadata` 落库，建议字段包括 `tool_call_id / workflow_step_id / risk_level / audit_category / confirmation_required / confirmed_by_user / confirmed_at / tool_input / ok / error`。
 - `message` 事件只用于已完成并落库的历史消息兼容；实时渲染优先消费 `assistant_*` 和 `tool_*` 事件。
 - 中间规划内容可以作为 `progress` / `progress_delta` 事件展示在执行时间线中，不作为独立 assistant 消息，避免“一问多答”的聊天体验。
 
@@ -439,6 +484,8 @@ WebSocket 推送内容：
     "options": ["继续", "修改方案", "停止"],
     "step": "human_checkpoint",
     "tool_name": "lab4ai_create_instance",
+    "tool_call_id": "toolu_01...",
+    "workflow_step_id": "step_3_deploy_cpu",
     "tool_input": {},
     "run_id": "当前 workflow_run_id"
   }
@@ -451,6 +498,14 @@ WebSocket 推送内容：
 - 重要事实、用户确认、远程实例 ID、报告路径必须写入 `memory`。
 - Agent 请求模型时，使用“完整消息历史 + 最近窗口 + memory 摘要”三层上下文，而不是只依赖最近 12 条消息。
 - 当对话过长时，后端把早期消息压缩为摘要写入 `memory.summary`，记录 `last_compacted_at / compacted_through_message_id / compaction_count`；完整原始消息仍保留在数据库和 JSONL 事件日志中。
+
+下一阶段增加跨对话长期记忆，但第一阶段不引入向量库，采用数据库关键词检索：
+
+- 新增 `UserMemory` 或等价持久化结构，按 `user_id` 隔离存储长期事实、偏好、常用环境、历史项目经验和重要决策。
+- 记忆来源只来自明确完成的对话摘要、用户确认的决策和已完成产物，不把临时推测或失败中间状态自动写入长期记忆。
+- 检索时使用关键词、任务类型、GitHub 仓库名、论文标题/URL、Tool 产物路径等结构化字段匹配，最多召回 3-5 条，注入 system prompt 的“长期记忆上下文”区块。
+- 长期记忆必须支持用户级禁用、查看和删除；禁用后不再写入或召回，但不影响单个对话内部的 `Conversation.metadata.memory`。
+- 召回内容必须带来源 `conversation_id / message_id / created_at`，便于审计和后续 UI 展示。
 
 ### 5.10 Human-in-the-loop
 
@@ -475,7 +530,9 @@ HITL 不是单独一个页面，而是对话流程中的“等待用户决策”
 实现约束：
 
 - `ask_user` 不应只是普通文本，它必须能暂停流程。
-- 被确认过的决策要写进 `memory.decisions`，但审批只对当前 `workflow_run_id` 生效，避免新一轮对话误用旧确认。
+- 被确认过的决策要写进 `memory.decisions`，但审批只对当前 `workflow_run_id + tool_call_id` 生效，避免新一轮对话或同一轮内另一个工具调用误用旧确认。
+- HITL 审批绑定字段为 `workflow_run_id / tool_call_id / workflow_step_id / tool_name`。缺任一关键字段时，高风险或计费 Tool 不能继续执行。
+- 第一阶段审计不新增独立表，确认请求、用户回复、审批结果和 Tool 执行结果写入 `ConversationMessage.message_metadata`；后续管理员审计检索需要增强时，再迁移到独立 `AuditLog`。
 - 没有收到用户回复时，不得自动跳过需要确认的步骤。
 - 发生中断、刷新页面或重新连接后，前端仍应通过 `pending_user_input` 恢复到等待态。
 
@@ -518,6 +575,18 @@ metadata 建议承载：
 - `workflow_run_id`
 - `pending_user_input`
 - `task_type / github_url / paper_url / intent_hint`
+
+UserMemory
+├── id
+├── user_id
+├── kind（fact / preference / decision / artifact / project）
+├── content
+├── keywords
+├── source_conversation_id
+├── source_message_id
+├── enabled
+├── created_at
+└── updated_at
 
 ConversationMessage
 ├── id
@@ -623,26 +692,31 @@ CloudInstance
 - Skill Workflow Runtime 首版：解析 `project_reproduce.yaml`，持久化 step 状态，推送 workflow step 事件，并在失败、异常或停止时根据 `workflow_resources` 兜底释放 CPU/GPU 实例。
 - Lab4AI Tool 真实 API：`lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI API，并写入 `CloudInstance` 归属记录；不再保留 Runner/mock 路径。
 - Workflow 解析边界已将历史 `claw-workflow/*` 版本号归一化为 `lab4ai-workflow/*`，运行时 metadata 与 WebSocket 事件不再暴露旧 workflow 品牌命名。
+- 已确认下一阶段的实现方向：采用 Workflow 强约束 + step 内模型 tool-use；高风险和计费 Tool 第一阶段可以接入，但必须经过 ToolRegistry、HITL 和审计管线；跨对话长期记忆先用数据库关键词检索，不引入向量库。
+- Agent Loop 已接入 Anthropic-compatible `tool_use` blocks：模型可在 Workflow step 内按 allowlist 请求工具调用，后端执行 `ToolRegistry` 后把 `tool_result` 回流给模型；超过最大轮数会停止继续调用。
+- ToolRegistry 已补齐 `risk_level / audit_category`、Anthropic tool schema 输出、`workflow_run_id + tool_call_id` 审批绑定，并新增保守模拟的 `file_write` Tool（不写本地文件，不允许指向 `skills/`）。
+- Skill Workflow Runtime 已深化 step metadata：`attempts / allowed_tools / tool_calls / artifacts / progress / error` 会持久化到 `Conversation.metadata.workflow_steps[*]`，并推送 `workflow_step_progress`。
+- 已新增 `UserMemory` 和 `long_term_memory` 服务，第一阶段按数据库关键词/内容检索召回跨对话长期记忆，不引入向量库。
 
 当前限制：
 
 - Lab4AI 创建 / 停止 / 查询已走真实 API 代码路径，仍需要真实凭证与线上环境联调；缺少凭证时会失败，不再自动模拟计费实例。
 - SSH 执行仍是模拟。
-- Agent Loop 仍以固定工具链为主，尚未升级为完整 tool-use 循环。
+- Agent Loop 已具备 step 内模型 tool-use 基础能力，但当前仅在 Workflow 受控 step 中启用；真实效果仍依赖所配置模型是否支持 Anthropic-compatible `tool_use`。
 - `api_key_encrypted` 字段尚未接入真实加密。
 - `skills/` 目录已支持最小解析和注入，但仍需继续标准化元数据、`allowed_tools` 和任务类型映射。
-- `Skill Workflow Runtime` 仍是首版状态机：step executor 目前按已知 9 步映射到后端 Tool，后续需要把更多 step 内部逻辑替换为真实 SSH、文件写入、报告生成和更细粒度进度。
-- memory 仍是基于 `Conversation.metadata` 的轻量结构化实现，尚未接入向量检索或跨对话长期记忆。
-- HITL 已接入统一 Tool 确认管线，但还不是完整权限系统，后续需要覆盖真实 Lab4AI、真实 SSH、文件写入等更多动作。
+- `Skill Workflow Runtime` 已补齐 step metadata 和部分 step 内模型 tool-use，但真实 SSH、真实文件写入和真实报告生成 executor 仍待接入。
+- memory 已新增数据库关键词检索的跨对话长期记忆基础服务，但用户级查看/删除/禁用 API 与前端入口仍待实现。
+- HITL 已支持 `tool_call_id` 级审批绑定和 Tool 审计 metadata，但还不是独立管理员审计系统。
 - `skills/` 原始模板仍包含历史 `claw-workflow` / `openclaw` / `claw-shell` 命名。根据当前协作约束，暂不直接修改 `skills/` 目录；若后续需要标准化模板，需要先确认迁移方案并同步更新 workflow 文档。
 
 ## 10. 下一步
 
 1. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
 2. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
-3. 将 Agent Loop 升级为模型驱动的 tool-use 循环。
-4. 深化 `Skill Workflow Runtime`：把 step 内部的 SSH、文件写入、报告生成和更细粒度 `workflow_step_progress` 接到真实 executor。
-5. 把 HITL 权限系统扩展到真实 Lab4AI、真实 SSH、文件写入等高风险 Tool，并补齐审计记录。
-6. 为对话 memory 增加跨对话长期记忆和检索策略。
+3. 将 `file_write` 从保守模拟升级为受控远程文件写入，限定任务 workspace，不允许修改 `skills/`。
+4. 把报告生成从模拟 `repro_report` 升级为真实产物生成与 artifact 记录。
+5. 为长期记忆补齐用户级查看、删除、禁用 API 与前端入口。
+6. 为 Tool 审计补齐管理员检索视图；如 `ConversationMessage.message_metadata` 不够用，再迁移到独立 `AuditLog`。
 7. 为用户 LLM API Key 接入加密存储。
 8. 完成管理员前端页面。

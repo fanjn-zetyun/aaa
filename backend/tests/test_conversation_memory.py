@@ -79,6 +79,36 @@ def test_tool_confirmation_decisions_are_scoped_to_current_run():
     assert not has_approved_decision(metadata, CONFIRM_RESOURCE_STEP)
 
 
+def test_tool_confirmation_decisions_can_be_scoped_to_tool_call_id():
+    metadata = mark_running(ensure_memory({"task_type": "reproduce"}))
+    metadata = mark_waiting_for_user(
+        metadata,
+        question="是否继续创建实例？",
+        options=["继续执行", "停止任务"],
+        step=CONFIRM_RESOURCE_STEP,
+        tool_name="lab4ai_create_instance",
+        tool_input={"workflow_step_id": "step_3_deploy_cpu"},
+        tool_call_id="tool-call-1",
+        workflow_step_id="step_3_deploy_cpu",
+    )
+
+    assert metadata["pending_user_input"]["tool_call_id"] == "tool-call-1"
+    assert metadata["pending_user_input"]["workflow_step_id"] == "step_3_deploy_cpu"
+
+    metadata = resolve_pending_user_input(metadata, answer="继续执行")
+
+    assert has_approved_decision(
+        metadata,
+        CONFIRM_RESOURCE_STEP,
+        tool_call_id="tool-call-1",
+    )
+    assert not has_approved_decision(
+        metadata,
+        CONFIRM_RESOURCE_STEP,
+        tool_call_id="tool-call-2",
+    )
+
+
 def test_memory_compaction_summarizes_old_messages():
     metadata = ensure_memory({"task_type": "reproduce"})
     messages = [

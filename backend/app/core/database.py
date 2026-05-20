@@ -45,6 +45,7 @@ async def init_db() -> None:
         conversation,
         usage_record,
         user,
+        user_memory,
     )
 
     async with engine.begin() as conn:

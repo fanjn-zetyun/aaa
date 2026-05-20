@@ -12,6 +12,7 @@ from .conversation import (
 )
 from .usage_record import UsageRecord
 from .user import User, UserRole
+from .user_memory import UserMemory
 
 __all__ = [
     "AdminSetting",
@@ -26,5 +27,6 @@ __all__ = [
     "MessageRole",
     "UsageRecord",
     "User",
+    "UserMemory",
     "UserRole",
 ]

@@ -7,6 +7,7 @@ loop: each tool owns its schema, safety policy, confirmation copy and executor.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -34,13 +35,27 @@ class ToolDefinition:
     read_only: bool = False
     confirmation_policy: str = "never"
     confirmation_reason: str = ""
+    risk_level: str = "low"
+    audit_category: str = "general"
 
     @property
     def confirmation_step(self) -> str:
         return f"{TOOL_CONFIRM_STEP_PREFIX}{self.name}"
 
     def confirmation_step_for(self, payload: dict[str, Any]) -> str:
-        workflow_step_id = payload.get("workflow_step_id")
+        workflow_run_id = _non_empty_str(payload.get("workflow_run_id") or payload.get("run_id"))
+        tool_call_id = _non_empty_str(payload.get("tool_call_id"))
+        workflow_step_id = _non_empty_str(payload.get("workflow_step_id"))
+        if workflow_run_id and tool_call_id:
+            step = f"{self.confirmation_step}:{workflow_run_id}:{tool_call_id}"
+            if workflow_step_id:
+                return f"{step}:{workflow_step_id}"
+            return step
+        if tool_call_id:
+            step = f"{self.confirmation_step}:{tool_call_id}"
+            if workflow_step_id:
+                return f"{step}:{workflow_step_id}"
+            return step
         if workflow_step_id:
             return f"{self.confirmation_step}:{workflow_step_id}"
         return self.confirmation_step
@@ -48,6 +63,13 @@ class ToolDefinition:
     @property
     def can_require_confirmation(self) -> bool:
         return self.confirmation_policy != "never"
+
+    def anthropic_schema(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": deepcopy(self.input_schema),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,15 +79,30 @@ class ToolConfirmation:
     options: tuple[str, ...]
     tool_name: str
     tool_input: dict[str, Any] = field(default_factory=dict)
+    workflow_run_id: str | None = None
+    tool_call_id: str | None = None
+    workflow_step_id: str | None = None
+    risk_level: str = "low"
+    audit_category: str = "general"
 
     def as_pending_input(self) -> dict[str, Any]:
-        return {
+        pending = {
             "question": self.question,
             "options": list(self.options),
             "step": self.step,
             "tool_name": self.tool_name,
             "tool_input": self.tool_input,
+            "risk_level": self.risk_level,
+            "audit_category": self.audit_category,
         }
+        if self.workflow_run_id:
+            pending["workflow_run_id"] = self.workflow_run_id
+            pending["run_id"] = self.workflow_run_id
+        if self.tool_call_id:
+            pending["tool_call_id"] = self.tool_call_id
+        if self.workflow_step_id:
+            pending["workflow_step_id"] = self.workflow_step_id
+        return pending
 
 
 @dataclass(slots=True)
@@ -100,6 +137,9 @@ class ToolRegistry:
             definitions = [tool for tool in definitions if tool.name in allowed]
         return sorted(definitions, key=lambda item: item.name)
 
+    def list_anthropic_tools(self, allowed_tools: list[str] | None = None) -> list[dict[str, Any]]:
+        return [tool.anthropic_schema() for tool in self.list_definitions(allowed_tools)]
+
     def prompt_context(self, allowed_tools: list[str] | None = None) -> str:
         lines = ["可用后端 Tool："]
         for tool in self.list_definitions(allowed_tools):
@@ -112,9 +152,16 @@ class ToolRegistry:
         self,
         name: str,
         tool_input: dict[str, Any] | None = None,
+        *,
+        workflow_run_id: str | None = None,
+        tool_call_id: str | None = None,
+        workflow_step_id: str | None = None,
     ) -> ToolConfirmation | None:
         tool = self.definition(name)
         payload = dict(tool_input or {})
+        _set_if_present(payload, "workflow_run_id", workflow_run_id)
+        _set_if_present(payload, "tool_call_id", tool_call_id)
+        _set_if_present(payload, "workflow_step_id", workflow_step_id)
         if not _requires_confirmation(tool, payload):
             return None
 
@@ -124,6 +171,11 @@ class ToolRegistry:
             options=("继续执行", "先修改方案", "停止任务"),
             tool_name=tool.name,
             tool_input=payload,
+            workflow_run_id=_non_empty_str(payload.get("workflow_run_id") or payload.get("run_id")),
+            tool_call_id=_non_empty_str(payload.get("tool_call_id")),
+            workflow_step_id=_non_empty_str(payload.get("workflow_step_id")),
+            risk_level=tool.risk_level,
+            audit_category=tool.audit_category,
         )
 
     async def invoke(
@@ -144,6 +196,8 @@ class ToolRegistry:
             return await self._lab4ai_list_instances(context)
         if name == "ssh_execute":
             return await self._ssh_execute(str(payload.get("command") or ""))
+        if name == "file_write":
+            return await self._file_write(payload)
         if name == "repro_report":
             return await self._repro_report(payload)
         if name == "ask_user":
@@ -245,6 +299,29 @@ class ToolRegistry:
             "ssh_execute",
             f"已模拟执行远程命令：{command}",
             metadata={"command": command, "simulated": True},
+        )
+
+    async def _file_write(self, payload: dict[str, Any]) -> ToolResult:
+        await asyncio.sleep(0.1)
+        path = str(payload.get("path") or payload.get("remote_path") or "").strip()
+        if not path:
+            return ToolResult(
+                "file_write",
+                "No target path was provided; file_write did not run.",
+                ok=False,
+                metadata={"simulated": True, "written": False, **payload},
+            )
+        if _is_skills_path(path):
+            return ToolResult(
+                "file_write",
+                "Refused to target the skills directory; no file was written.",
+                ok=False,
+                metadata={"simulated": True, "written": False, "path": path, **payload},
+            )
+        return ToolResult(
+            "file_write",
+            f"Simulated remote file write to {path}; no local file was written.",
+            metadata={"simulated": True, "written": False, "path": path, **payload},
         )
 
     async def _lab4ai_stop_instance(
@@ -377,12 +454,16 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
                 "properties": {"github_url": {"type": ["string", "null"]}},
             },
             read_only=True,
+            risk_level="low",
+            audit_category="workflow",
         ),
         "lab4ai_create_instance": ToolDefinition(
             name="lab4ai_create_instance",
             description="创建 Lab4AI 云实例并绑定到当前对话。",
             input_schema={"type": "object", "properties": {}},
             confirmation_policy="always",
+            risk_level="critical",
+            audit_category="lab4ai",
             confirmation_reason="会占用远程算力资源并可能产生费用。",
         ),
         "ssh_execute": ToolDefinition(
@@ -394,12 +475,16 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
                 "required": ["command"],
             },
             confirmation_policy="risky",
+            risk_level="high",
+            audit_category="ssh",
             confirmation_reason="检测到命令可能破坏环境或产生长时间副作用。",
         ),
         "lab4ai_stop_instance": ToolDefinition(
             name="lab4ai_stop_instance",
             description="停止并释放当前对话绑定的 Lab4AI 云实例。",
             input_schema={"type": "object", "properties": {"server_id": {"type": "string"}}},
+            risk_level="high",
+            audit_category="lab4ai",
             confirmation_reason="会释放远程算力资源。",
         ),
         "lab4ai_list_instances": ToolDefinition(
@@ -407,6 +492,24 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
             description="查询当前用户可见的 Lab4AI 云实例。",
             input_schema={"type": "object", "properties": {}},
             read_only=True,
+            risk_level="low",
+            audit_category="lab4ai",
+        ),
+        "file_write": ToolDefinition(
+            name="file_write",
+            description="Simulate writing content to a remote task file.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+            confirmation_policy="always",
+            confirmation_reason="Writing files can overwrite task artifacts or remote workspace state.",
+            risk_level="high",
+            audit_category="file",
         ),
         "repro_report": ToolDefinition(
             name="repro_report",
@@ -416,6 +519,8 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
                 "properties": {"repo_name": {"type": "string"}},
                 "required": ["repo_name"],
             },
+            risk_level="medium",
+            audit_category="workflow",
         ),
         "ask_user": ToolDefinition(
             name="ask_user",
@@ -425,6 +530,8 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
                 "properties": {"question": {"type": "string"}},
                 "required": ["question"],
             },
+            risk_level="low",
+            audit_category="workflow",
         ),
     }
 
@@ -458,7 +565,27 @@ def _requires_confirmation(tool: ToolDefinition, payload: dict[str, Any]) -> boo
         return True
     if tool.confirmation_policy == "risky" and tool.name == "ssh_execute":
         return _is_risky_ssh_command(str(payload.get("command") or ""))
+    if tool.confirmation_policy == "risky" and tool.name == "file_write":
+        return True
     return False
+
+
+def _set_if_present(payload: dict[str, Any], key: str, value: str | None) -> None:
+    if value is not None:
+        payload[key] = value
+
+
+def _non_empty_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_skills_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower().strip()
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    return "skills" in parts
 
 
 def _is_risky_ssh_command(command: str) -> bool:
