@@ -194,15 +194,15 @@ export default function ChatPage() {
             <div className="flex gap-4">
               <AgentAvatar />
               <div className="w-full max-w-[85%] rounded-xl border border-amber-200 bg-amber-50 p-4">
-                <div className="text-[12px] font-bold uppercase text-amber-700">
+                <div className="text-ui-meta font-bold uppercase text-amber-700">
                   等待你确认
                 </div>
                 {pendingInput.tool_name && (
-                  <div className="mt-1 text-[11px] text-amber-600">
+                  <div className="mt-1 text-ui-meta text-amber-600">
                     工具：{pendingInput.tool_name}
                   </div>
                 )}
-                <div className="mt-2 text-[14px] leading-relaxed text-slate-700">
+                <div className="mt-2 text-chat-body leading-relaxed text-slate-700">
                   {pendingInput.question}
                 </div>
                 {pendingInput.options && pendingInput.options.length > 0 && (
@@ -212,7 +212,7 @@ export default function ChatPage() {
                         key={option}
                         type="button"
                         onClick={() => submitMessage(option)}
-                        className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-[13px] text-slate-700 hover:bg-amber-100"
+                        className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-ui-small text-slate-700 hover:bg-amber-100"
                       >
                         {option}
                       </button>
@@ -243,7 +243,7 @@ export default function ChatPage() {
               }
               disabled={isRunning}
               rows={1}
-              className="flex-1 text-[14px] text-slate-700 placeholder-slate-300 bg-transparent resize-none leading-relaxed disabled:opacity-50"
+              className="flex-1 text-chat-body text-slate-700 placeholder-slate-300 bg-transparent resize-none leading-relaxed disabled:opacity-50"
             />
             <button
               type="submit"
@@ -273,7 +273,7 @@ function MessageBubble({
   if (message.role === "user") {
     return (
       <div className="flex flex-col items-end gap-1.5">
-        <div className="bg-slate-100 px-5 py-3.5 rounded-2xl rounded-tr-sm text-[14px] text-slate-700 max-w-[80%] whitespace-pre-wrap">
+        <div className="bg-slate-100 px-5 py-3.5 rounded-2xl rounded-tr-sm text-chat-body text-slate-700 max-w-[80%] whitespace-pre-wrap">
           {message.content}
         </div>
         <MessageMeta message={message} copied={copied} onCopy={onCopy} align="right" />
@@ -285,8 +285,8 @@ function MessageBubble({
     <div className="flex gap-4">
       <AgentAvatar />
       <div className="flex flex-col gap-2 max-w-[85%]">
-        <span className="text-[13px] font-medium text-slate-800">LOBSTER Agent</span>
-        <div className="border border-slate-200 rounded-xl bg-white p-4 text-[14px] text-slate-600 leading-relaxed whitespace-pre-wrap">
+        <span className="text-ui-small font-medium text-slate-800">LOBSTER Agent</span>
+        <div className="border border-slate-200 rounded-xl bg-white p-4 text-chat-body text-slate-600 leading-relaxed whitespace-pre-wrap">
           {message.type === "status" ? (
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
@@ -315,7 +315,7 @@ function MessageMeta({
 }) {
   return (
     <div
-      className={`flex items-center gap-2 text-[11px] text-slate-400 ${
+      className={`flex items-center gap-2 text-ui-micro text-slate-400 ${
         align === "right" ? "justify-end pr-1" : "justify-start pl-1"
       }`}
     >

@@ -69,7 +69,7 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-8 py-8">
-      <h1 className="text-[2.2rem] font-serif text-[#333] tracking-wide mb-8">
+      <h1 className="text-hero-title font-serif text-[#333] tracking-wide mb-8">
         {title}
       </h1>
 
@@ -83,12 +83,12 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
                 onKeyDown={handleKeyDown}
                 placeholder={placeholder}
                 rows={4}
-                className="w-full text-[14px] text-slate-700 placeholder-slate-300 bg-transparent resize-none leading-relaxed"
+                className="w-full text-chat-body text-slate-700 placeholder-slate-300 bg-transparent resize-none leading-relaxed"
               />
             </div>
 
             <div className="px-5 pb-4 pt-1 flex justify-between items-center border-t border-slate-100">
-              <div className="flex items-center gap-2 text-[11px] text-slate-400">
+              <div className="flex items-center gap-2 text-ui-meta text-slate-400">
                 <span>支持 GitHub URL + 自然语言指令</span>
               </div>
               <button
@@ -105,7 +105,7 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
         </form>
 
         {error && (
-          <p className="mt-3 text-[13px] text-red-500 text-center">{error}</p>
+          <p className="mt-3 text-ui-small text-red-500 text-center">{error}</p>
         )}
 
         <div className="mt-6 flex flex-wrap gap-2 justify-center">
@@ -113,7 +113,7 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
             <button
               key={s}
               onClick={() => setInput(s)}
-              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-[12px] text-slate-500 hover:text-slate-700 hover:border-slate-300 transition-colors"
+              className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-ui-small text-slate-500 hover:text-slate-700 hover:border-slate-300 transition-colors"
             >
               {s}
             </button>

@@ -59,16 +59,16 @@ export default function RightPanel() {
 
   if (!id) {
     return (
-      <aside className="w-[280px] h-full min-h-0 bg-white border-l border-slate-200 flex flex-col z-10 shrink-0 overflow-hidden">
+      <aside className="h-full w-full min-h-0 bg-white flex flex-col z-10 overflow-hidden">
         <div className="flex-1 flex items-center justify-center px-6 text-center">
-          <p className="text-[13px] text-slate-400">选择或创建任务查看详情</p>
+          <p className="text-ui-small text-slate-400">选择或创建任务查看详情</p>
         </div>
       </aside>
     );
   }
 
   return (
-    <aside className="w-[280px] h-full min-h-0 bg-white border-l border-slate-200 flex flex-col z-10 shrink-0 overflow-hidden">
+    <aside className="h-full w-full min-h-0 bg-white flex flex-col z-10 overflow-hidden">
       <section className="h-[44%] min-h-[280px] shrink-0 flex flex-col border-b border-slate-200">
         <PanelHeader title="权限与环境配置" subtitle={conversation?.status || "loading"} />
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5">
@@ -162,7 +162,7 @@ function WorkspaceFileList({
 function FileRow({ file }: { file: WorkspaceFile }) {
   return (
     <div
-      className="group flex items-center gap-2 px-4 py-2 text-[12px] hover:bg-slate-50"
+      className="group flex items-center gap-2 px-4 py-2 text-ui-meta hover:bg-slate-50"
       title={file.path}
       style={{ paddingLeft: `${16 + file.depth * 14}px` }}
     >
@@ -170,7 +170,7 @@ function FileRow({ file }: { file: WorkspaceFile }) {
       <div className="min-w-0 flex-1">
         <div className="truncate text-slate-700">{file.name}</div>
         {file.kind === "file" && (
-          <div className="mt-0.5 text-[10px] text-slate-400">
+          <div className="mt-0.5 text-ui-micro text-slate-400">
             {formatSize(file.size)}
             {file.modified_at ? ` · ${formatPanelTime(file.modified_at)}` : ""}
           </div>
@@ -184,15 +184,15 @@ function PanelHeader({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <div className="shrink-0 px-5 py-4 bg-slate-50/70 border-b border-slate-100">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-[13px] font-semibold text-slate-800">{title}</h3>
-        <span className="truncate text-[10px] uppercase tracking-wide text-slate-400">{subtitle}</span>
+        <h3 className="text-ui-title font-semibold text-slate-800">{title}</h3>
+        <span className="truncate text-ui-micro uppercase tracking-wide text-slate-400">{subtitle}</span>
       </div>
     </div>
   );
 }
 
 function SectionTitle({ label }: { label: string }) {
-  return <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>;
+  return <div className="mb-2 text-ui-meta font-semibold uppercase tracking-wide text-slate-400">{label}</div>;
 }
 
 function InfoRow({
@@ -206,8 +206,8 @@ function InfoRow({
 }) {
   return (
     <div className="flex items-start justify-between gap-3">
-      <span className="shrink-0 text-[12px] text-slate-400">{label}</span>
-      <span className={`min-w-0 break-words text-right text-[12px] ${toneClass(tone)}`}>{value}</span>
+      <span className="shrink-0 text-ui-small text-slate-400">{label}</span>
+      <span className={`min-w-0 break-words text-right text-ui-small ${toneClass(tone)}`}>{value}</span>
     </div>
   );
 }
@@ -215,12 +215,12 @@ function InfoRow({
 function LinkRow({ label, href }: { label: string; href: string }) {
   return (
     <div className="space-y-1">
-      <div className="text-[12px] text-slate-400">{label}</div>
+      <div className="text-ui-small text-slate-400">{label}</div>
       <a
         href={href}
         target="_blank"
         rel="noreferrer"
-        className="block break-all text-[12px] leading-relaxed text-blue-600 hover:underline"
+        className="block break-all text-ui-small leading-relaxed text-blue-600 hover:underline"
       >
         {href}
       </a>
@@ -239,8 +239,8 @@ function PermissionRow({
 }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2">
-      <span className="text-[12px] text-slate-600">{label}</span>
-      <span className={`shrink-0 text-[11px] font-medium ${toneClass(tone)}`}>{value}</span>
+      <span className="text-ui-small text-slate-600">{label}</span>
+      <span className={`shrink-0 text-ui-meta font-medium ${toneClass(tone)}`}>{value}</span>
     </div>
   );
 }
@@ -248,7 +248,7 @@ function PermissionRow({
 function EmptyState({ text }: { text: string }) {
   return (
     <div className="flex-1 min-h-0 flex items-center justify-center px-6 text-center">
-      <p className="text-[12px] leading-relaxed text-slate-400">{text}</p>
+      <p className="text-ui-small leading-relaxed text-slate-400">{text}</p>
     </div>
   );
 }

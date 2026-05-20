@@ -10,32 +10,32 @@ interface MarkdownContentProps {
 
 const markdownComponents: Components = {
   h1: ({ children, ...props }: ComponentPropsWithoutRef<"h1">) => (
-    <h1 className="text-[17px] font-semibold leading-snug text-slate-800" {...props}>
+    <h1 className="text-md-h1 font-semibold leading-snug text-slate-800" {...props}>
       {children}
     </h1>
   ),
   h2: ({ children, ...props }: ComponentPropsWithoutRef<"h2">) => (
-    <h2 className="text-[16px] font-semibold leading-snug text-slate-800" {...props}>
+    <h2 className="text-md-h2 font-semibold leading-snug text-slate-800" {...props}>
       {children}
     </h2>
   ),
   h3: ({ children, ...props }: ComponentPropsWithoutRef<"h3">) => (
-    <h3 className="text-[15px] font-semibold leading-snug text-slate-700" {...props}>
+    <h3 className="text-md-h3 font-semibold leading-snug text-slate-700" {...props}>
       {children}
     </h3>
   ),
   h4: ({ children, ...props }: ComponentPropsWithoutRef<"h4">) => (
-    <h4 className="text-[14px] font-semibold leading-snug text-slate-700" {...props}>
+    <h4 className="text-chat-body font-semibold leading-snug text-slate-700" {...props}>
       {children}
     </h4>
   ),
   h5: ({ children, ...props }: ComponentPropsWithoutRef<"h5">) => (
-    <h5 className="text-[14px] font-semibold leading-snug text-slate-700" {...props}>
+    <h5 className="text-chat-body font-semibold leading-snug text-slate-700" {...props}>
       {children}
     </h5>
   ),
   h6: ({ children, ...props }: ComponentPropsWithoutRef<"h6">) => (
-    <h6 className="text-[14px] font-semibold leading-snug text-slate-700" {...props}>
+    <h6 className="text-chat-body font-semibold leading-snug text-slate-700" {...props}>
       {children}
     </h6>
   ),
@@ -85,7 +85,7 @@ const markdownComponents: Components = {
   hr: (props: ComponentPropsWithoutRef<"hr">) => <hr className="my-3 border-slate-200" {...props} />,
   table: ({ children, ...props }: ComponentPropsWithoutRef<"table">) => (
     <div className="max-w-full overflow-x-auto rounded-lg border border-slate-200">
-      <table className="min-w-full border-collapse text-[13px]" {...props}>
+      <table className="min-w-full border-collapse text-ui-small" {...props}>
         {children}
       </table>
     </div>
@@ -120,8 +120,8 @@ const markdownComponents: Components = {
         data-language={language}
         className={
           language
-            ? "bg-transparent p-0 text-[12px] text-slate-100"
-            : "rounded bg-slate-100 px-1 py-0.5 text-[12px] text-slate-700"
+            ? "bg-transparent p-0 text-ui-small text-slate-100"
+            : "rounded bg-slate-100 px-1 py-0.5 text-ui-small text-slate-700"
         }
         {...props}
       >
@@ -131,7 +131,7 @@ const markdownComponents: Components = {
   },
   pre: ({ children, ...props }: ComponentPropsWithoutRef<"pre">) => (
     <pre
-      className="overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-[12px] leading-relaxed text-slate-100"
+      className="overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-ui-small leading-relaxed text-slate-100"
       {...props}
     >
       {children}

@@ -79,7 +79,7 @@ export default function ModelSettingsPage() {
   return (
     <div className="flex-1 px-8 py-8 overflow-y-auto">
       <div className="max-w-2xl mx-auto">
-        <h1 className="text-[22px] font-semibold text-slate-800 mb-6">模型设置</h1>
+        <h1 className="text-ui-page-title font-semibold text-slate-800 mb-6">模型设置</h1>
         <form
           onSubmit={handleSubmit}
           className="space-y-4 bg-white border border-slate-200 rounded-xl p-5"
@@ -134,7 +134,7 @@ export default function ModelSettingsPage() {
             >
               {isTesting ? "测试中..." : "测试连通性"}
             </button>
-            <span className="text-sm text-slate-500">{status}</span>
+            <span className="text-ui-body text-slate-500">{status}</span>
           </div>
         </form>
       </div>
@@ -145,11 +145,11 @@ export default function ModelSettingsPage() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <div className="text-sm text-slate-600 mb-2">{label}</div>
+      <div className="text-ui-body text-slate-600 mb-2">{label}</div>
       {children}
     </label>
   );
 }
 
 const inputClass =
-  "w-full px-3 py-2 border border-slate-200 rounded-lg text-sm text-slate-700 bg-white";
+  "w-full px-3 py-2 border border-slate-200 rounded-lg text-ui-body text-slate-700 bg-white";

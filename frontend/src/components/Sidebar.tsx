@@ -105,10 +105,10 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="w-[240px] bg-[#FCFCFC] border-r border-slate-200 flex flex-col z-10 shrink-0">
+    <aside className="h-full w-full bg-[#FCFCFC] flex flex-col z-10 overflow-hidden">
       {/* Logo */}
       <div className="h-[72px] flex items-center px-6 border-b border-transparent">
-        <Link to="/" className="flex items-center gap-2 font-bold tracking-widest text-slate-800 text-[15px]">
+        <Link to="/" className="flex items-center gap-2 font-bold tracking-widest text-slate-800 text-ui-title">
           <svg className="w-5 h-5 text-orange-600" viewBox="0 0 24 24" fill="currentColor">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v1.85c2.95 1.3 5 4.25 5 7.65 0 1.61-.46 3.1-1.2 4.36z" />
           </svg>
@@ -127,7 +127,7 @@ export default function Sidebar() {
             <Link
               key={item.path}
               to={item.path}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-[14px] transition-colors ${
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-ui-body transition-colors ${
                 isActive
                   ? "bg-slate-100 font-medium text-slate-800"
                   : "text-slate-500 hover:bg-slate-100"
@@ -146,7 +146,7 @@ export default function Sidebar() {
       <div className="border-t border-slate-100">
         <button
           onClick={() => setHistoryOpen(!historyOpen)}
-          className="w-full px-6 py-3 flex items-center justify-between text-[12px] text-slate-500 hover:text-slate-700 transition-colors"
+          className="w-full px-6 py-3 flex items-center justify-between text-ui-small text-slate-500 hover:text-slate-700 transition-colors"
         >
           <span className="font-medium">历史任务</span>
           <svg
@@ -163,14 +163,14 @@ export default function Sidebar() {
               <Link
                 key={inst.id}
                 to={`/reproduce/task/${inst.id}`}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg text-[12px] text-slate-500 hover:bg-slate-50 transition-colors"
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-ui-meta text-slate-500 hover:bg-slate-50 transition-colors"
               >
                 <StatusDot status={inst.status} />
                 <span className="truncate">{inst.title || extractRepoName(inst.metadata.github_url)}</span>
               </Link>
             ))}
             {(!conversations || conversations.length === 0) && (
-              <p className="text-[11px] text-slate-400 px-3 py-2">暂无历史任务</p>
+              <p className="text-ui-meta text-slate-400 px-3 py-2">暂无历史任务</p>
             )}
           </div>
         )}
@@ -188,12 +188,12 @@ export default function Sidebar() {
       <div className="p-4 border-t border-slate-100">
         <div className="flex items-center justify-between px-2">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 text-[12px] font-medium">
+            <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 text-ui-meta font-medium">
               U
             </div>
             <div className="flex flex-col">
-              <span className="text-[13px] font-medium text-slate-700">Researcher</span>
-              <span className="text-[11px] text-slate-400">Pro Plan</span>
+              <span className="text-ui-small font-medium text-slate-700">Researcher</span>
+              <span className="text-ui-micro text-slate-400">Pro Plan</span>
             </div>
           </div>
           <button
@@ -228,7 +228,7 @@ function QuotaBar({ label, used, total }: { label: string; used: number; total: 
   const isExhausted = used >= total;
   return (
     <div className="mb-2 last:mb-0">
-      <div className="flex justify-between text-[11px] mb-1">
+      <div className="flex justify-between text-ui-micro mb-1">
         <span className={isExhausted ? "text-red-500 font-medium" : "text-slate-500"}>{label}</span>
         <span className="text-slate-400">{used.toFixed(1)}/{total.toFixed(0)}h</span>
       </div>
