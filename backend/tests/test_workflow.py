@@ -23,7 +23,7 @@ def test_parse_project_reproduce_workflow():
     workflow = parse_workflow(raw)
 
     assert workflow.name == "Lab4AI_Auto_Reproduction_Pipeline"
-    assert workflow.version == "claw-workflow/v2.1"
+    assert workflow.version == "lab4ai-workflow/v2.1"
     assert [step.id for step in workflow.steps[:3]] == [
         "step_1_audit",
         "step_2_condition_check",

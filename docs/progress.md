@@ -5,7 +5,7 @@
 ## 已完成
 
 - 项目级协作入口已补充：根目录新增 `AGENTS.md`，用于 Codex / Agents 进入项目时读取，并指向 `CLAUDE.md`、`docs/proposal.md`、`README.md`。
-- 历史遗留的 `claw-instances` 接口和旧版 Runner 已进入优先清理阶段，当前主链路以 `conversations` 和 `cloud-instances` 为准。
+- 历史遗留的 `claw-instances` 接口和旧版 Runner 已完成代码侧清理，当前主链路只保留 `conversations` 和 `cloud-instances`。
 - V2 数据模型已落地：
   - `LLMConfig`：按用户保存 `provider / base_url / api_key / model / max_tokens`。
   - `Conversation`：保存对话/任务、任务类型、状态、metadata、JSONL 日志路径。
@@ -55,6 +55,7 @@
 - Skill Workflow Runtime 首版已落地：
   - 新增 `backend/app/services/workflow.py`，解析 `project_reproduce.yaml` 的 `tasks / depends_on / instruction / expected_output`。
   - `Conversation.metadata` 已持久化 `workflow_name / workflow_version / workflow_current_step_id / workflow_steps / workflow_resources / workflow_results`。
+  - workflow 解析边界已将历史 `claw-workflow/*` 版本号归一化为 `lab4ai-workflow/*`，避免运行时 metadata 继续暴露旧命名。
   - Agent Loop 已在 `lab4ai-auto-reproduct` 复现任务中使用 WorkflowRunner 推进 9 步状态机，并推送 `workflow_loaded / workflow_step_* / workflow_cleanup_*` 事件。
   - 用户在 HITL 确认后可恢复对应 workflow step，失败、异常和用户停止时会根据 `workflow_resources` 兜底释放 CPU/GPU 实例。
   - ChatPage 时间线和 RightPanel 已展示 workflow 加载、步骤状态、资源占用/释放和报告路径。
@@ -93,17 +94,15 @@ cd frontend && npm run build
 - Memory 当前是轻量 metadata 实现，尚未做跨对话长期记忆。
 - HITL 已覆盖资源创建前确认，并对高风险 SSH 命令做条件确认，但还不是完整权限系统。
 - 管理员前端页面仍未完整实现。
-- 旧 `claw-instances` 相关接口、文档和命名仍需继续清理，避免和 `cloud-instances` 主链路混用。
+- `skills/` 原始模板中仍包含历史 `claw-workflow` / `openclaw` / `claw-shell` 命名；根据当前项目约束本轮未修改 `skills/` 目录，后续如需标准化需先单独确认模板迁移方案。
 - 真实 SSH 仍未接入；Lab4AI API 尚未做真实账号联调。
 
 ## 下一步建议
 
-1. 先清理旧 `claw-instances` 相关接口、前端引用、测试和文档，只保留 `cloud-instances` 与 `conversations` 主链路。
-2. 继续删除代码和文档中的旧 Runner 遗留命名，确认 Lab4AI Tool 始终走真实 API，缺凭证时明确失败。
-3. 用真实 Lab4AI 账号联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认创建、查询、停止和异常释放的响应字段与错误处理。
-4. 实现真实 `ssh_execute`，包括 SSH 凭证、命令超时、输出流式回传和失败处理。
-5. 将 Agent Loop 从固定工具链升级为模型驱动的 tool-use 循环。
-6. 深化 Skill Workflow Runtime，把 9 步中的 SSH、文件写入、报告生成接到真实 executor，并补充更细粒度进度事件。
-7. 扩展 HITL 到真实 Lab4AI、SSH、文件写入等高风险 Tool。
-8. 为用户 LLM API Key 接入加密存储。
-9. 完成管理员前端页面。
+1. 用真实 Lab4AI 账号联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认创建、查询、停止和异常释放的响应字段与错误处理。
+2. 实现真实 `ssh_execute`，包括 SSH 凭证、命令超时、输出流式回传和失败处理。
+3. 将 Agent Loop 从固定工具链升级为模型驱动的 tool-use 循环。
+4. 深化 Skill Workflow Runtime，把 9 步中的 SSH、文件写入、报告生成接到真实 executor，并补充更细粒度进度事件。
+5. 扩展 HITL 到真实 Lab4AI、SSH、文件写入等高风险 Tool。
+6. 为用户 LLM API Key 接入加密存储。
+7. 完成管理员前端页面。

@@ -542,7 +542,7 @@ CloudInstance
 └── raw_payload
 ```
 
-历史遗留的旧实例命名已迁移到 `Conversation` 和 `CloudInstance`。后续清理重点是删除旧接口文档、兼容测试和前端引用，避免继续出现 `claw-instances` 相关命名。
+历史遗留的旧实例命名已迁移到 `Conversation` 和 `CloudInstance`。代码、API、测试和前端主链路不再保留 `claw-instances` 入口；涉及算力实例的公开接口统一使用 `cloud-instances`。
 
 ## 7. API 设计
 
@@ -622,6 +622,7 @@ CloudInstance
 - SkillLoader 最小实现：扫描 `skills/*/SKILL.md`、解析 frontmatter、加载 `lab4ai-auto-reproduct/project_reproduce.yaml` 并注入 Agent Loop system prompt。
 - Skill Workflow Runtime 首版：解析 `project_reproduce.yaml`，持久化 step 状态，推送 workflow step 事件，并在失败、异常或停止时根据 `workflow_resources` 兜底释放 CPU/GPU 实例。
 - Lab4AI Tool 真实 API：`lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI API，并写入 `CloudInstance` 归属记录；不再保留 Runner/mock 路径。
+- Workflow 解析边界已将历史 `claw-workflow/*` 版本号归一化为 `lab4ai-workflow/*`，运行时 metadata 与 WebSocket 事件不再暴露旧 workflow 品牌命名。
 
 当前限制：
 
@@ -633,16 +634,15 @@ CloudInstance
 - `Skill Workflow Runtime` 仍是首版状态机：step executor 目前按已知 9 步映射到后端 Tool，后续需要把更多 step 内部逻辑替换为真实 SSH、文件写入、报告生成和更细粒度进度。
 - memory 仍是基于 `Conversation.metadata` 的轻量结构化实现，尚未接入向量检索或跨对话长期记忆。
 - HITL 已接入统一 Tool 确认管线，但还不是完整权限系统，后续需要覆盖真实 Lab4AI、真实 SSH、文件写入等更多动作。
-- 旧 `claw-instances` 接口、文档和相关命名仍需优先清理，当前主链路只保留 `cloud-instances` 与 `conversations`。
+- `skills/` 原始模板仍包含历史 `claw-workflow` / `openclaw` / `claw-shell` 命名。根据当前协作约束，暂不直接修改 `skills/` 目录；若后续需要标准化模板，需要先确认迁移方案并同步更新 workflow 文档。
 
 ## 10. 下一步
 
-1. 优先清理旧 `claw-instances` 相关接口、文档、测试和前端引用，只保留 `cloud-instances` 与 `conversations` 主链路。
-2. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
-3. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
-4. 将 Agent Loop 升级为模型驱动的 tool-use 循环。
-5. 深化 `Skill Workflow Runtime`：把 step 内部的 SSH、文件写入、报告生成和更细粒度 `workflow_step_progress` 接到真实 executor。
-6. 把 HITL 权限系统扩展到真实 Lab4AI、真实 SSH、文件写入等高风险 Tool，并补齐审计记录。
-7. 为对话 memory 增加跨对话长期记忆和检索策略。
-8. 为用户 LLM API Key 接入加密存储。
-9. 完成管理员前端页面。
+1. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
+2. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
+3. 将 Agent Loop 升级为模型驱动的 tool-use 循环。
+4. 深化 `Skill Workflow Runtime`：把 step 内部的 SSH、文件写入、报告生成和更细粒度 `workflow_step_progress` 接到真实 executor。
+5. 把 HITL 权限系统扩展到真实 Lab4AI、真实 SSH、文件写入等高风险 Tool，并补齐审计记录。
+6. 为对话 memory 增加跨对话长期记忆和检索策略。
+7. 为用户 LLM API Key 接入加密存储。
+8. 完成管理员前端页面。

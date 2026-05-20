@@ -515,7 +515,7 @@ async def cleanup_workflow_resources(
 
 
 def parse_workflow(raw: str) -> WorkflowDefinition:
-    version = _extract_top_scalar(raw, "version")
+    version = _normalize_workflow_version(_extract_top_scalar(raw, "version"))
     name = _extract_top_scalar(raw, "name")
     description = _extract_top_scalar(raw, "description")
     steps: list[WorkflowStep] = []
@@ -713,6 +713,12 @@ def _cleanup_step(step_id: str, kind: str) -> WorkflowStep:
 def _extract_top_scalar(raw: str, key: str) -> str:
     match = re.search(rf"(?m)^{re.escape(key)}:\s*(.+)$", raw)
     return _clean_scalar(match.group(1)) if match else ""
+
+
+def _normalize_workflow_version(version: str) -> str:
+    if version.startswith("claw-workflow/"):
+        return version.replace("claw-workflow/", "lab4ai-workflow/", 1)
+    return version
 
 
 def _extract_block_scalar(block: str, key: str) -> str:
