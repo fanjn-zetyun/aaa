@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -33,7 +34,11 @@ from app.services.conversation_memory import (
     remember_fact,
     resolve_pending_user_input,
 )
-from app.services.llm_client import LLMRuntimeConfig, call_anthropic_compatible
+from app.services.llm_client import (
+    LLMRuntimeConfig,
+    call_anthropic_compatible,
+    stream_anthropic_compatible,
+)
 from app.services.skills import SkillDefinition, SkillLoader, select_skill
 from app.services.tools import ToolRegistry, ToolResult
 
@@ -47,6 +52,7 @@ class ConversationStream:
     history: list[dict] = field(default_factory=list)
     subscribers: list[asyncio.Queue[dict | None]] = field(default_factory=list)
     finished: bool = False
+    next_seq: int = 1
 
     def subscribe(self) -> asyncio.Queue[dict | None]:
         q: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -58,10 +64,14 @@ class ConversationStream:
             self.subscribers.append(q)
         return q
 
-    def publish(self, event: dict) -> None:
-        self.history.append(event)
+    def publish(self, event: dict) -> dict:
+        payload = dict(event)
+        payload.setdefault("seq", self.next_seq)
+        self.next_seq += 1
+        self.history.append(payload)
         for q in self.subscribers:
-            q.put_nowait(event)
+            q.put_nowait(payload)
+        return payload
 
     def close(self) -> None:
         self.finished = True
@@ -74,6 +84,7 @@ class AgentLoopManager:
     def __init__(self) -> None:
         self._streams: defaultdict[int, ConversationStream] = defaultdict(ConversationStream)
         self._tasks: dict[int, asyncio.Task] = {}
+        self._active_runs: dict[int, str] = {}
         self._tools = ToolRegistry()
         self._skills = SkillLoader(get_settings().skills_dir_path).load_all()
 
@@ -83,6 +94,9 @@ class AgentLoopManager:
     def start(self, conversation_id: int) -> None:
         if conversation_id in self._tasks and not self._tasks[conversation_id].done():
             return
+        stream = self._streams[conversation_id]
+        if stream.finished:
+            self._streams[conversation_id] = ConversationStream(next_seq=stream.next_seq)
         self._tasks[conversation_id] = asyncio.create_task(self._run(conversation_id))
 
     async def stop(self, conversation_id: int) -> None:
@@ -146,6 +160,9 @@ class AgentLoopManager:
                 metadata, memory_compacted = compact_memory_from_messages(metadata, db_messages)
                 conv.metadata_ = metadata
                 await session.commit()
+            run_id = str(metadata.get("workflow_run_id") or "")
+            if run_id:
+                self._active_runs[conversation_id] = run_id
 
             if memory_compacted:
                 self._publish(
@@ -191,14 +208,14 @@ class AgentLoopManager:
             system_prompt = _build_system_prompt(metadata, skill_name, skill, self._tools)
             initial_messages = _build_llm_messages(db_messages, metadata)
 
-            await self._tool(
+            await self._progress(
                 conversation_id,
-                "skill_selection",
                 (
                     f"已选择 skill：{skill_name}。"
                     "当前后端仍处于 MVP 工具层模式，Lab4AI/SSH 执行为模拟工具事件；"
                     "接入真实 OpenClaw 后会由 skill workflow 驱动真实执行。"
                 ),
+                stage="skill_selection",
             )
 
             plan = await self._model_or_fallback(
@@ -208,7 +225,7 @@ class AgentLoopManager:
                 max_tokens=AGENT_PLAN_MAX_TOKENS,
                 fallback="我会按 V2 Agent Loop 执行：先分析任务，再调用工具，最后给出下一步结果。",
             )
-            await self._assistant(conversation_id, plan)
+            await self._progress(conversation_id, plan, stage="plan")
 
             tool_outputs: list[str] = []
             result, metadata, paused = await self._invoke_tool_with_policy(
@@ -263,7 +280,8 @@ class AgentLoopManager:
 
             metadata = _refresh_summary(metadata, latest_user, tool_outputs)
             await self._set_metadata(conversation_id, metadata)
-            reply = await self._model_or_fallback(
+            await self._stream_model_or_fallback(
+                conversation_id,
                 llm_config,
                 system=system_prompt,
                 messages=[
@@ -282,7 +300,6 @@ class AgentLoopManager:
                 max_tokens=AGENT_REPLY_MAX_TOKENS,
                 fallback=self._build_reply(metadata, latest_user),
             )
-            await self._assistant(conversation_id, reply)
             metadata = mark_completed(metadata)
             await self._set_status_and_metadata(
                 conversation_id, ConversationStatus.COMPLETED, metadata
@@ -298,6 +315,7 @@ class AgentLoopManager:
             self._publish(conversation_id, {"type": "status", "status": "failed"})
         finally:
             self._streams[conversation_id].close()
+            self._active_runs.pop(conversation_id, None)
 
     def _build_reply(self, metadata: dict, latest_user: str) -> str:
         parts = ["MVP 执行完成。"]
@@ -311,16 +329,25 @@ class AgentLoopManager:
         return "\n".join(parts)
 
     async def _assistant(self, conversation_id: int, content: str) -> None:
-        async with SessionLocal() as session:
-            msg = ConversationMessage(
-                conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
-                content=content,
-            )
-            session.add(msg)
-            await session.commit()
-            await session.refresh(msg)
-            self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
+        msg = await self._persist_message(conversation_id, MessageRole.ASSISTANT, content)
+        self._publish(
+            conversation_id,
+            {
+                "type": "assistant_completed",
+                "message": _message_event(msg),
+            },
+        )
+        self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
+
+    async def _progress(self, conversation_id: int, content: str, *, stage: str) -> None:
+        self._publish(
+            conversation_id,
+            {
+                "type": "progress",
+                "stage": stage,
+                "content": content,
+            },
+        )
 
     async def _tool(
         self,
@@ -341,20 +368,17 @@ class AgentLoopManager:
             await session.refresh(msg)
             self._publish(
                 conversation_id,
-                {"type": "tool", "tool_name": name, "message": _message_event(msg)},
+                {
+                    "type": "tool_completed",
+                    "tool_name": name,
+                    "message": _message_event(msg),
+                    "ok": msg.message_metadata.get("ok", True),
+                },
             )
 
     async def _system(self, conversation_id: int, content: str) -> None:
-        async with SessionLocal() as session:
-            msg = ConversationMessage(
-                conversation_id=conversation_id,
-                role=MessageRole.SYSTEM,
-                content=content,
-            )
-            session.add(msg)
-            await session.commit()
-            await session.refresh(msg)
-            self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
+        msg = await self._persist_message(conversation_id, MessageRole.SYSTEM, content)
+        self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
 
     async def _invoke_tool_with_policy(
         self,
@@ -377,7 +401,27 @@ class AgentLoopManager:
             )
             return None, metadata, True
 
-        result = await self._tools.invoke(tool_name, tool_input)
+        self._publish(
+            conversation_id,
+            {
+                "type": "tool_started",
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+            },
+        )
+        try:
+            result = await self._tools.invoke(tool_name, tool_input)
+        except Exception as exc:
+            self._publish(
+                conversation_id,
+                {
+                    "type": "tool_error",
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "error": _format_exception(exc),
+                },
+            )
+            raise
         await self._tool(
             conversation_id,
             result.name,
@@ -436,6 +480,25 @@ class AgentLoopManager:
         self._publish(conversation_id, {"type": "status", "status": WORKFLOW_WAITING_FOR_USER})
         return metadata
 
+    async def _persist_message(
+        self,
+        conversation_id: int,
+        role: MessageRole,
+        content: str,
+        message_metadata: dict | None = None,
+    ) -> ConversationMessage:
+        async with SessionLocal() as session:
+            msg = ConversationMessage(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                message_metadata=message_metadata or {},
+            )
+            session.add(msg)
+            await session.commit()
+            await session.refresh(msg)
+            return msg
+
     async def _set_status(self, conversation_id: int, status: ConversationStatus) -> None:
         async with SessionLocal() as session:
             conv = await session.get(Conversation, conversation_id)
@@ -490,9 +553,90 @@ class AgentLoopManager:
         error = _format_exception(last_error) if last_error else "未知错误"
         return f"真实模型调用失败，已保留本地执行结果。错误：{error}"
 
+    async def _stream_model_or_fallback(
+        self,
+        conversation_id: int,
+        config: LLMRuntimeConfig,
+        *,
+        system: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        fallback: str,
+    ) -> str:
+        if not config.configured:
+            return await self._stream_static_assistant(conversation_id, fallback)
+
+        token_budgets = [max_tokens]
+        if max_tokens > AGENT_REPLY_FALLBACK_MAX_TOKENS:
+            token_budgets.append(AGENT_REPLY_FALLBACK_MAX_TOKENS)
+
+        last_error: Exception | None = None
+        for token_budget in token_budgets:
+            content_parts: list[str] = []
+            self._publish(conversation_id, {"type": "assistant_started"})
+            try:
+                runtime_config = replace(config, max_tokens=token_budget)
+                async for delta in stream_anthropic_compatible(
+                    runtime_config,
+                    system=system,
+                    messages=messages,
+                ):
+                    content_parts.append(delta)
+                    self._publish(
+                        conversation_id,
+                        {
+                            "type": "assistant_delta",
+                            "delta": delta,
+                        },
+                    )
+                content = "".join(content_parts).strip()
+                if not content:
+                    raise RuntimeError("模型流式响应为空")
+                msg = await self._persist_message(conversation_id, MessageRole.ASSISTANT, content)
+                self._publish(
+                    conversation_id,
+                    {
+                        "type": "assistant_completed",
+                        "message": _message_event(msg),
+                    },
+                )
+                return content
+            except Exception as exc:
+                last_error = exc
+                self._publish(
+                    conversation_id,
+                    {
+                        "type": "assistant_error",
+                        "error": _format_exception(exc),
+                    },
+                )
+
+        error = _format_exception(last_error) if last_error else "未知错误"
+        return await self._stream_static_assistant(
+            conversation_id,
+            f"真实模型调用失败，已保留本地执行结果。错误：{error}",
+        )
+
+    async def _stream_static_assistant(self, conversation_id: int, content: str) -> str:
+        self._publish(conversation_id, {"type": "assistant_started"})
+        if content:
+            self._publish(conversation_id, {"type": "assistant_delta", "delta": content})
+        msg = await self._persist_message(conversation_id, MessageRole.ASSISTANT, content)
+        self._publish(
+            conversation_id,
+            {
+                "type": "assistant_completed",
+                "message": _message_event(msg),
+            },
+        )
+        return content
+
     def _publish(self, conversation_id: int, event: dict) -> None:
-        append_conversation_event(conversation_id, event)
-        self._streams[conversation_id].publish(event)
+        payload = dict(event)
+        payload.setdefault("run_id", self._active_runs.get(conversation_id))
+        payload.setdefault("timestamp", datetime.now(UTC).isoformat())
+        stored = self._streams[conversation_id].publish(payload)
+        append_conversation_event(conversation_id, stored)
 
 
 def _message_event(msg: ConversationMessage) -> dict:

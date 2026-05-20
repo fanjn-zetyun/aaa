@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import AsyncIterator
 
 import httpx
 
@@ -49,6 +51,47 @@ async def call_anthropic_compatible(
     return _extract_text(data)
 
 
+async def stream_anthropic_compatible(
+    config: LLMRuntimeConfig,
+    *,
+    system: str,
+    messages: list[dict[str, str]],
+) -> AsyncIterator[str]:
+    """Stream text deltas from Anthropic Messages API compatible endpoints."""
+    if not config.configured:
+        raise RuntimeError("LLM config is not complete")
+
+    endpoint = _messages_endpoint(config.base_url)
+    headers = {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": config.api_key or "",
+    }
+    payload = {
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "system": system,
+        "messages": messages,
+        "stream": True,
+    }
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line or line.startswith(":") or not line.startswith("data:"):
+                    continue
+                raw = line.removeprefix("data:").strip()
+                if raw == "[DONE]":
+                    break
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                text = _extract_stream_text(data)
+                if text:
+                    yield text
+
+
 def _messages_endpoint(base_url: str) -> str:
     root = base_url.rstrip("/")
     if root.endswith("/v1"):
@@ -72,3 +115,24 @@ def _extract_text(data: dict) -> str:
     if isinstance(content, str):
         return content
     return str(data)
+
+
+def _extract_stream_text(data: dict) -> str:
+    if data.get("type") == "content_block_delta":
+        delta = data.get("delta")
+        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+            return str(delta.get("text") or "")
+    if data.get("type") == "content_block_start":
+        block = data.get("content_block")
+        if isinstance(block, dict) and block.get("type") == "text":
+            return str(block.get("text") or "")
+
+    # Some Anthropic-compatible gateways expose OpenAI-style SSE chunks.
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            delta = first.get("delta")
+            if isinstance(delta, dict):
+                return str(delta.get("content") or "")
+    return ""

@@ -316,6 +316,16 @@ WebSocket 推送内容：
 
 事件必须持久化，断线重连后可以通过 conversation history 回看。
 
+事件流协议补充：
+
+- 每个事件必须包含 `seq`，由后端按对话递增分配。前端使用 `seq` 去重，避免 WebSocket 重连回放导致重复追加。
+- 每轮 Agent 执行必须包含 `run_id`，对应 `Conversation.metadata.workflow_run_id`。同一轮中的 assistant 文本、progress、tool 事件和状态变化都用同一个 `run_id` 串联。
+- assistant 回复必须以同一条用户消息为边界聚合。规划、工具调用和总结属于同一轮执行轨迹，不应在主聊天区拆成多条互不关联的 assistant 回复。
+- 模型最终回复使用 `assistant_started` / `assistant_delta` / `assistant_completed` 事件流式推送。`assistant_completed` 后再把完整文本持久化为一条 `ConversationMessage(role=assistant)`。
+- 工具执行过程使用 `tool_started` / `tool_completed` / `tool_error` 表达，并持久化为 `ConversationMessage(role=tool)`；前端应在当前 assistant 回复下方以执行时间线展示，而不是完全隐藏。
+- `message` 事件只用于已完成并落库的历史消息兼容；实时渲染优先消费 `assistant_*` 和 `tool_*` 事件。
+- 中间规划内容可以作为 `progress` / `progress_delta` 事件展示在执行时间线中，不作为独立 assistant 消息，避免“一问多答”的聊天体验。
+
 ### 5.9 对话记忆
 
 每个对话都需要自己的结构化记忆，不只是保留原始消息历史。当前推荐做法是把记忆放在 `Conversation.metadata` 中，由后端统一读写，避免再引入额外存储面。
