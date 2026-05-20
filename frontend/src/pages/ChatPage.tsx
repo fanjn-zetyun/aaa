@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { apiFetch, apiPost, getToken } from "../lib/api";
 
@@ -125,11 +125,6 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const stopMutation = useMutation({
-    mutationFn: () => apiFetch(`/api/conversations/${taskId}/stop`, { method: "POST" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversation", taskId] }),
-  });
-
   async function submitMessage(content: string) {
     if (!content.trim() || !taskId) return;
     const trimmed = content.trim();
@@ -225,18 +220,6 @@ export default function ChatPage() {
                   </div>
                 )}
               </div>
-            </div>
-          )}
-
-          {(isRunning || isWaitingForUser) && (
-            <div className="flex justify-center">
-              <button
-                onClick={() => stopMutation.mutate()}
-                disabled={stopMutation.isPending}
-                className="px-4 py-2 rounded-xl border border-red-200 bg-red-50 text-red-600 text-[13px] font-medium hover:bg-red-100 transition-colors"
-              >
-                停止执行
-              </button>
             </div>
           )}
 

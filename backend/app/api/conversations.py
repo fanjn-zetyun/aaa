@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
 
 from starlette.websockets import WebSocketState
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
@@ -17,7 +20,10 @@ from app.schemas.conversation import (
     ConversationDetailResponse,
     ConversationResponse,
     MessageCreateRequest,
+    WorkspaceFileListResponse,
+    WorkspaceFileResponse,
 )
+from app.core.config import get_settings
 from app.services.agent_loop import get_agent_manager
 from app.services.conversation_memory import ensure_memory
 from app.services.conversation_store import conversation_log_path
@@ -154,6 +160,21 @@ async def stop_conversation(
     return conv
 
 
+@router.get("/{conversation_id}/workspace-files", response_model=WorkspaceFileListResponse)
+async def get_workspace_files(
+    conversation_id: int, user: CurrentUser, session: DbSession
+) -> WorkspaceFileListResponse:
+    await _get_owned_conversation(conversation_id, user.id, session)
+    settings = get_settings()
+    root = settings.workspace_root_path / str(conversation_id)
+    files = _list_workspace_files(root)
+    return WorkspaceFileListResponse(
+        exists=root.exists(),
+        root=_display_workspace_root(root, settings.project_root),
+        files=files,
+    )
+
+
 @router.websocket("/{conversation_id}/stream")
 async def ws_conversation_stream(websocket: WebSocket, conversation_id: int) -> None:
     user = await _authenticate_ws(websocket)
@@ -207,3 +228,68 @@ def _build_title(
     if user_prompt:
         return user_prompt[:80]
     return task_type.value
+
+
+def _list_workspace_files(root: Path) -> list[WorkspaceFileResponse]:
+    if not root.exists() or not root.is_dir():
+        return []
+
+    ignored_dirs = {".git", ".openclaw", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+    ignored_files = {".DS_Store"}
+    items: list[WorkspaceFileResponse] = []
+    max_items = 200
+
+    def walk(current: Path, depth: int) -> None:
+        nonlocal items
+        if len(items) >= max_items:
+            return
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            return
+
+        for entry in entries:
+            if len(items) >= max_items:
+                break
+            if entry.name in ignored_files:
+                continue
+            if entry.is_dir() and entry.name in ignored_dirs:
+                continue
+
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                stat = None
+
+            kind: Literal["file", "directory", "symlink"]
+            if entry.is_symlink():
+                kind = "symlink"
+            elif entry.is_dir():
+                kind = "directory"
+            else:
+                kind = "file"
+
+            rel_path = str(entry.relative_to(root)).replace("\\", "/")
+            items.append(
+                WorkspaceFileResponse(
+                    path=rel_path,
+                    name=entry.name,
+                    kind=kind,
+                    size=None if stat is None or entry.is_dir() else stat.st_size,
+                    modified_at=None if stat is None else datetime.fromtimestamp(stat.st_mtime),
+                    depth=depth,
+                )
+            )
+
+            if entry.is_dir() and not entry.is_symlink() and depth < 3:
+                walk(entry, depth + 1)
+
+    walk(root, 0)
+    return items
+
+
+def _display_workspace_root(root: Path, project_root: Path) -> str:
+    try:
+        return root.relative_to(project_root).as_posix()
+    except ValueError:
+        return str(root).replace("\\", "/")

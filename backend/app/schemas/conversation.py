@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -70,3 +71,18 @@ class ConversationResponse(BaseModel):
 
 class ConversationDetailResponse(ConversationResponse):
     messages: list[ConversationMessageResponse] = Field(default_factory=list)
+
+
+class WorkspaceFileResponse(BaseModel):
+    path: str
+    name: str
+    kind: Literal["file", "directory", "symlink"]
+    size: int | None = None
+    modified_at: datetime | None = None
+    depth: int = 0
+
+
+class WorkspaceFileListResponse(BaseModel):
+    exists: bool
+    root: str
+    files: list[WorkspaceFileResponse] = Field(default_factory=list)
