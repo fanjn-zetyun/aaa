@@ -5,7 +5,6 @@ interface LLMConfig {
   provider: string;
   base_url: string;
   model: string;
-  max_tokens: number;
   api_key_configured: boolean;
 }
 
@@ -19,7 +18,6 @@ export default function ModelSettingsPage() {
   const [baseUrl, setBaseUrl] = useState("https://api.anthropic.com");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("claude-sonnet-4-6");
-  const [maxTokens, setMaxTokens] = useState("4096");
   const [status, setStatus] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -29,7 +27,6 @@ export default function ModelSettingsPage() {
       setProvider(cfg.provider);
       setBaseUrl(cfg.base_url);
       setModel(cfg.model);
-      setMaxTokens(String(cfg.max_tokens));
       setStatus(cfg.api_key_configured ? "已配置 API Key" : "尚未配置 API Key");
     });
   }, []);
@@ -39,7 +36,6 @@ export default function ModelSettingsPage() {
     base_url: baseUrl,
     api_key: apiKey || null,
     model,
-    max_tokens: Number(maxTokens),
   };
 
   async function handleSubmit(e: FormEvent) {
@@ -110,14 +106,9 @@ export default function ModelSettingsPage() {
           <Field label="Model">
             <input value={model} onChange={(e) => setModel(e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Max Tokens">
-            <input
-              type="number"
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(e.target.value)}
-              className={inputClass}
-            />
-          </Field>
+          <p className="text-ui-small leading-relaxed text-slate-500">
+            Agent 输出长度由后端按任务阶段自动控制，避免过长参数导致模型调用失败。
+          </p>
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="submit"

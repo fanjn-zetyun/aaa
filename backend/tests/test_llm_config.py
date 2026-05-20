@@ -30,7 +30,6 @@ async def test_llm_config_connection_test_uses_saved_key(client, db_session, mon
             base_url="https://api.anthropic.com",
             api_key_encrypted="saved-key",
             model="claude-sonnet-4-6",
-            max_tokens=4096,
         )
     )
     await db_session.commit()
@@ -50,10 +49,17 @@ async def test_llm_config_connection_test_uses_saved_key(client, db_session, mon
             "base_url": "https://api.anthropic.com",
             "api_key": None,
             "model": "claude-sonnet-4-6",
-            "max_tokens": 4096,
         },
         headers=auth_headers(user),
     )
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "message": "OK"}
+
+
+@pytest.mark.asyncio
+async def test_llm_config_response_hides_max_tokens(client, test_user):
+    response = await client.get("/api/llm-config", headers=auth_headers(test_user))
+
+    assert response.status_code == 200
+    assert "max_tokens" not in response.json()

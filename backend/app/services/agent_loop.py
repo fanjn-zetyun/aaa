@@ -37,6 +37,10 @@ from app.services.llm_client import LLMRuntimeConfig, call_anthropic_compatible
 from app.services.skills import SkillDefinition, SkillLoader, select_skill
 from app.services.tools import ToolRegistry, ToolResult
 
+AGENT_PLAN_MAX_TOKENS = 2048
+AGENT_REPLY_MAX_TOKENS = 8192
+AGENT_REPLY_FALLBACK_MAX_TOKENS = 4096
+
 
 @dataclass
 class ConversationStream:
@@ -201,6 +205,7 @@ class AgentLoopManager:
                 llm_config,
                 system=system_prompt,
                 messages=initial_messages,
+                max_tokens=AGENT_PLAN_MAX_TOKENS,
                 fallback="我会按 V2 Agent Loop 执行：先分析任务，再调用工具，最后给出下一步结果。",
             )
             await self._assistant(conversation_id, plan)
@@ -274,6 +279,7 @@ class AgentLoopManager:
                         ),
                     },
                 ],
+                max_tokens=AGENT_REPLY_MAX_TOKENS,
                 fallback=self._build_reply(metadata, latest_user),
             )
             await self._assistant(conversation_id, reply)
@@ -460,15 +466,29 @@ class AgentLoopManager:
         *,
         system: str,
         messages: list[dict[str, str]],
+        max_tokens: int,
         fallback: str,
     ) -> str:
         if not config.configured:
             return fallback
-        try:
-            runtime_config = replace(config, max_tokens=min(config.max_tokens, 1024))
-            return await call_anthropic_compatible(runtime_config, system=system, messages=messages)
-        except Exception as exc:
-            return f"真实模型调用失败，已保留本地执行结果。错误：{_format_exception(exc)}"
+        token_budgets = [max_tokens]
+        if max_tokens > AGENT_REPLY_FALLBACK_MAX_TOKENS:
+            token_budgets.append(AGENT_REPLY_FALLBACK_MAX_TOKENS)
+
+        last_error: Exception | None = None
+        for token_budget in token_budgets:
+            try:
+                runtime_config = replace(config, max_tokens=token_budget)
+                return await call_anthropic_compatible(
+                    runtime_config,
+                    system=system,
+                    messages=messages,
+                )
+            except Exception as exc:
+                last_error = exc
+
+        error = _format_exception(last_error) if last_error else "未知错误"
+        return f"真实模型调用失败，已保留本地执行结果。错误：{error}"
 
     def _publish(self, conversation_id: int, event: dict) -> None:
         append_conversation_event(conversation_id, event)

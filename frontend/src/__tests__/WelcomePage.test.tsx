@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import WelcomePage from "../components/WelcomePage";
+import WelcomePage, { parseTaskInput } from "../components/WelcomePage";
 
 const mockNavigate = vi.fn();
 vi.mock("react-router-dom", async () => {
@@ -25,6 +25,7 @@ function renderWelcome(props?: Partial<Parameters<typeof WelcomePage>[0]>) {
 describe("WelcomePage", () => {
   beforeEach(() => {
     mockNavigate.mockClear();
+    vi.restoreAllMocks();
   });
 
   it("renders title and suggestions", () => {
@@ -52,11 +53,12 @@ describe("WelcomePage", () => {
   });
 
   it("submits successfully with github url", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
+    const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 201,
       json: () => Promise.resolve({ id: 42 }),
     });
+    globalThis.fetch = fetchMock;
 
     renderWelcome({ basePath: "/search" });
     const user = userEvent.setup();
@@ -70,6 +72,11 @@ describe("WelcomePage", () => {
 
     await vi.waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith("/search/task/42");
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      github_url: "https://github.com/example/repo",
+      user_prompt: "复现这个项目",
+      original_input: "https://github.com/example/repo 复现这个项目",
     });
   });
 
@@ -89,6 +96,46 @@ describe("WelcomePage", () => {
 
     await vi.waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith("/reproduce/task/10");
+    });
+  });
+
+  it("extracts URLs without swallowing adjacent Chinese text", () => {
+    expect(
+      parseTaskInput(
+        "https://github.com/showlab/PhotoDoodle。论文链接：https://arxiv.org/pdf/2502.14397 帮我复现一下"
+      )
+    ).toEqual({
+      githubUrl: "https://github.com/showlab/PhotoDoodle",
+      paperUrl: "https://arxiv.org/pdf/2502.14397",
+      userPrompt: "帮我复现一下",
+    });
+  });
+
+  it("submits Chinese prompt separately from adjacent URLs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 43 }),
+    });
+    globalThis.fetch = fetchMock;
+
+    renderWelcome();
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox"),
+      "https://github.com/showlab/PhotoDoodle。论文链接：https://arxiv.org/pdf/2502.14397 帮我复现一下"
+    );
+    await user.click(screen.getAllByRole("button")[0]);
+
+    await vi.waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith("/reproduce/task/43");
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      github_url: "https://github.com/showlab/PhotoDoodle",
+      paper_url: "https://arxiv.org/pdf/2502.14397",
+      user_prompt: "帮我复现一下",
+      original_input:
+        "https://github.com/showlab/PhotoDoodle。论文链接：https://arxiv.org/pdf/2502.14397 帮我复现一下",
     });
   });
 });

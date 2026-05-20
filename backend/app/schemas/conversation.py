@@ -14,7 +14,6 @@ class LLMConfigResponse(BaseModel):
     provider: str
     base_url: str
     model: str
-    max_tokens: int
     api_key_configured: bool
     updated_at: datetime | None = None
 
@@ -24,7 +23,6 @@ class LLMConfigUpdateRequest(BaseModel):
     base_url: str = "https://api.anthropic.com"
     api_key: str | None = Field(default=None, min_length=1)
     model: str = "claude-sonnet-4-6"
-    max_tokens: int = Field(default=4096, ge=256, le=65536)
 
 
 class LLMConfigTestResponse(BaseModel):
@@ -38,6 +36,7 @@ class ConversationCreateRequest(BaseModel):
     github_url: HttpUrl | None = None
     paper_url: HttpUrl | None = None
     user_prompt: str | None = Field(default=None, max_length=4000)
+    original_input: str | None = Field(default=None, min_length=1, max_length=8000)
 
 
 class MessageCreateRequest(BaseModel):

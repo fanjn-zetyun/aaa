@@ -22,14 +22,7 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
     setError("");
     setSubmitting(true);
 
-    const urlMatch = input.match(/(https?:\/\/github\.com\/[^\s]+)/);
-    const githubUrl = urlMatch ? urlMatch[1] : "";
-    const paperMatch = input.match(/(https?:\/\/arxiv\.org\/[^\s]+)/);
-    const paperUrl = paperMatch ? paperMatch[1] : "";
-    const userPrompt = input
-      .replace(urlMatch?.[0] || "", "")
-      .replace(paperMatch?.[0] || "", "")
-      .trim();
+    const { githubUrl, paperUrl, userPrompt } = parseTaskInput(input);
 
     if (requireGithubUrl && !githubUrl) {
       setError("请在消息中包含一个 GitHub URL");
@@ -51,6 +44,7 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
         github_url: githubUrl || null,
         paper_url: paperUrl || null,
         user_prompt: userPrompt || null,
+        original_input: input.trim(),
       });
       navigate(`${basePath}/task/${inst.id}`);
     } catch (err: unknown) {
@@ -122,4 +116,32 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
       </div>
     </div>
   );
+}
+
+export function parseTaskInput(input: string) {
+  const githubMatch = input.match(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/i);
+  const paperMatch = input.match(/https?:\/\/(?:www\.)?arxiv\.org\/(?:abs|pdf)\/[A-Za-z0-9.:-]+(?:\.pdf)?/i);
+
+  const githubUrl = cleanUrl(githubMatch?.[0] || "");
+  const paperUrl = cleanUrl(paperMatch?.[0] || "");
+  const userPrompt = cleanPrompt(
+    input
+      .replace(githubMatch?.[0] || "", "")
+      .replace(paperMatch?.[0] || "", "")
+  );
+
+  return { githubUrl, paperUrl, userPrompt };
+}
+
+function cleanUrl(url: string) {
+  return url.replace(/[)。），,.;；:：!?！？]+$/u, "");
+}
+
+function cleanPrompt(prompt: string) {
+  return prompt
+    .replace(/(?:论文|paper)\s*(?:链接|地址|url)?\s*[:：]/giu, " ")
+    .replace(/(?:github|代码|仓库)\s*(?:链接|地址|url)?\s*[:：]/giu, " ")
+    .replace(/^[\s。。，,.;；:：!?！？、/|-]+/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }

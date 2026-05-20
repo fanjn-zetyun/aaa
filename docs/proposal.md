@@ -22,7 +22,7 @@
 | 产品名 | LOBSTER |
 | 交互形态 | 对话式 AI 科研助手 |
 | 智能核心 | 后端自建 Agent Loop |
-| LLM 调用 | 后端直接调用，用户配置 `base_url / api_key / model / max_tokens` |
+| LLM 调用 | 后端直接调用，用户配置 `base_url / api_key / model`；输出 token 预算由 Agent Loop 按阶段控制 |
 | Tool 执行 | 后端 Tool 系统统一调度 |
 | 任务编排 | 先 MVP 固定工具链，后续升级为模型驱动 tool-use 循环 |
 | Lab4AI 凭证 | 平台统一一个账号，管理员配置，所有用户共享算力池 |
@@ -118,7 +118,6 @@ class LLMConfig:
     base_url: str
     api_key_encrypted: str
     model: str
-    max_tokens: int
 ```
 
 要求：
@@ -127,6 +126,7 @@ class LLMConfig:
 - 支持 `POST /api/llm-config/test` 测试当前表单配置连通性。
 - `api_key` 必须加密存储；当前 MVP 尚未完成真正加密，后续需要补齐。
 - 模型需支持 tool use；不支持时可降级为固定工具链或纯对话模式。
+- `max_tokens` 不作为用户配置项暴露。Agent Loop 内部按阶段控制输出预算：规划阶段使用较小预算，最终总结使用更大的安全预算，避免用户设置过大导致模型调用失败。
 
 ### 5.3 Agent Loop
 
@@ -400,7 +400,6 @@ LLMConfig
 ├── base_url
 ├── api_key_encrypted
 ├── model
-├── max_tokens
 └── updated_at
 
 Conversation

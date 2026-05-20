@@ -27,7 +27,6 @@ async def get_llm_config(user: CurrentUser, session: DbSession) -> LLMConfigResp
             provider="anthropic",
             base_url="https://api.anthropic.com",
             model="claude-sonnet-4-6",
-            max_tokens=4096,
             api_key_configured=False,
             updated_at=None,
         )
@@ -46,7 +45,6 @@ async def update_llm_config(
     config.provider = payload.provider
     config.base_url = payload.base_url.rstrip("/")
     config.model = payload.model
-    config.max_tokens = payload.max_tokens
     if payload.api_key:
         # MVP: do not return the key to clients. A later migration can replace this with
         # project-wide encryption once key management is finalized.
@@ -62,7 +60,6 @@ def _to_response(config: LLMConfig) -> LLMConfigResponse:
         provider=config.provider,
         base_url=config.base_url,
         model=config.model,
-        max_tokens=config.max_tokens,
         api_key_configured=bool(config.api_key_encrypted),
         updated_at=config.updated_at,
     )
@@ -79,7 +76,7 @@ async def test_llm_config(
         base_url=payload.base_url.rstrip("/"),
         api_key=api_key,
         model=payload.model,
-        max_tokens=min(payload.max_tokens, 32),
+        max_tokens=32,
     )
 
     try:

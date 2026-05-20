@@ -40,7 +40,7 @@ async def create_conversation(
 ) -> ConversationResponse:
     await _ensure_quota_available(user.id, user.gpu_quota_hours + user.cpu_quota_hours, session)
 
-    seed = " ".join(
+    structured_seed = " ".join(
         part
         for part in (
             str(payload.github_url) if payload.github_url else "",
@@ -49,7 +49,8 @@ async def create_conversation(
         )
         if part
     )
-    task_type = ConversationTaskType(infer_task_type(seed, payload.task_type.value))
+    display_seed = (payload.original_input or "").strip() or structured_seed
+    task_type = ConversationTaskType(infer_task_type(structured_seed, payload.task_type.value))
     title = payload.title or _build_title(task_type, payload.github_url, payload.user_prompt)
     metadata = {
         "task_type": task_type.value,
@@ -70,21 +71,22 @@ async def create_conversation(
     await session.refresh(conv)
 
     conv.log_file_path = str(conversation_log_path(conv.id))
-    if seed:
+    if display_seed:
         session.add(
             ConversationMessage(
                 conversation_id=conv.id,
                 role=MessageRole.USER,
-                content=seed,
+                content=display_seed,
                 message_metadata={
                     "github_url": metadata["github_url"],
                     "paper_url": metadata["paper_url"],
+                    "structured_user_prompt": payload.user_prompt,
                 },
             )
         )
     await session.commit()
     await session.refresh(conv)
-    if seed:
+    if display_seed:
         get_agent_manager().start(conv.id)
     return ConversationResponse.model_validate(conv)
 

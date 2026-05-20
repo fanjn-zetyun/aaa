@@ -45,7 +45,6 @@ async def main() -> None:
                     "provider": "anthropic",
                     "base_url": "https://api.anthropic.com",
                     "model": "claude-sonnet-4-6",
-                    "max_tokens": 4096,
                 },
                 headers=headers,
             )
