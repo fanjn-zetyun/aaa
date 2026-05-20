@@ -96,7 +96,7 @@ uv sync
 # 启动开发服务器（自动 reload）
 uv run uvicorn app.main:app --reload --app-dir backend --host 127.0.0.1 --port 8000
 
-# 冒烟测试（端到端：注册→登录→创建任务→等 mock 完成）
+# 冒烟测试（端到端：注册→登录→创建任务→HITL 处停止，避免误创建真实 Lab4AI 实例）
 uv run python backend/tests/smoke.py
 
 # 运行测试
@@ -126,6 +126,8 @@ npm run dev    # Vite dev server → http://localhost:5173
 ## 5. Claude 协作规则（重要）
 
 以下规则是和我协作的硬性要求，请严格遵守：
+
+不要修改skills目录下所有文件的内容
 
 ### 5.1 必须提问确认
 
@@ -251,7 +253,7 @@ npm run dev    # Vite dev server → http://localhost:5173
 - [x] React + Vite 前端骨架（AppLayout + Sidebar + 路由）
 - [x] 前端核心页面：登录、复现任务输入（WelcomePage）、任务对话（ChatPage）、右侧面板
 - [x] 前端其他任务类型页面（search / paper-only / experiments / polish）独立路由 + basePath 导航
-- [x] 算力限额后端接口（GET /api/claw-instances/quota）+ 创建任务时配额校验
+- [x] 算力限额后端接口（GET /api/cloud-instances/quota）+ 创建任务时配额校验
 - [x] 算力限额前端展示（Sidebar 配额进度条）+ 超额拦截
 - [x] SkillLoader 最小闭环：扫描 `skills/*/SKILL.md`、解析 frontmatter、为 `lab4ai-auto-reproduct` 加载 `project_reproduce.yaml`，并注入 Agent Loop system prompt
 - [x] 对话 memory + HITL 闭环：结构化 memory 存入 `Conversation.metadata`，ToolRegistry 统一声明确认策略，reproduce 任务在创建资源前暂停等待用户确认，用户回复后按 approved / needs_revision / stopped 分类处理，并支持长对话摘要压缩
@@ -263,7 +265,7 @@ npm run dev    # Vite dev server → http://localhost:5173
   - LoginPage：登录/注册切换、错误提示
   - WelcomePage：表单提交、URL 校验、路由导航
   - API 层：token 管理
-- [x] 冒烟测试验证通过（注册→登录→创建任务→HITL 等待确认→用户回复→mock 执行完成→状态 completed）
+- [x] 冒烟测试验证通过（注册→登录→创建任务→HITL 等待确认→用户停止→状态 stopped，避免误创建真实 Lab4AI 实例）
 - [x] 前端 build 验证通过（`npm run build`）
 - [ ] 管理员前端页面（用户管理、云实例总览、平台设置、用量报表）
 - [ ] 前端 build 产物部署配置

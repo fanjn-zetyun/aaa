@@ -9,7 +9,19 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import CloudInstance, CloudInstanceStatus, CloudInstanceType
+from app.services.lab4ai.client import (
+    create_instance,
+    list_instances,
+    stop_instance_details,
+)
+from app.services.lab4ai.credentials import load_lab4ai_credentials
 
 TOOL_CONFIRM_STEP_PREFIX = "tool_confirm:"
 
@@ -26,6 +38,12 @@ class ToolDefinition:
     @property
     def confirmation_step(self) -> str:
         return f"{TOOL_CONFIRM_STEP_PREFIX}{self.name}"
+
+    def confirmation_step_for(self, payload: dict[str, Any]) -> str:
+        workflow_step_id = payload.get("workflow_step_id")
+        if workflow_step_id:
+            return f"{self.confirmation_step}:{workflow_step_id}"
+        return self.confirmation_step
 
     @property
     def can_require_confirmation(self) -> bool:
@@ -56,6 +74,13 @@ class ToolResult:
     content: str
     ok: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ToolExecutionContext:
+    user_id: int
+    conversation_id: int
+    session: AsyncSession
 
 
 class ToolRegistry:
@@ -94,7 +119,7 @@ class ToolRegistry:
             return None
 
         return ToolConfirmation(
-            step=tool.confirmation_step,
+            step=tool.confirmation_step_for(payload),
             question=_build_confirmation_question(tool, payload),
             options=("继续执行", "先修改方案", "停止任务"),
             tool_name=tool.name,
@@ -105,17 +130,22 @@ class ToolRegistry:
         self,
         name: str,
         tool_input: dict[str, Any] | None = None,
+        context: ToolExecutionContext | None = None,
     ) -> ToolResult:
         self.definition(name)
         payload = dict(tool_input or {})
         if name == "analyze_repo":
             return await self._analyze_repo(payload.get("github_url"))
         if name == "lab4ai_create_instance":
-            return await self._lab4ai_create_instance(payload)
+            return await self._lab4ai_create_instance(payload, context)
         if name == "lab4ai_stop_instance":
-            return await self._lab4ai_stop_instance(payload)
+            return await self._lab4ai_stop_instance(payload, context)
+        if name == "lab4ai_list_instances":
+            return await self._lab4ai_list_instances(context)
         if name == "ssh_execute":
             return await self._ssh_execute(str(payload.get("command") or ""))
+        if name == "repro_report":
+            return await self._repro_report(payload)
         if name == "ask_user":
             return await self._ask_user(str(payload.get("question") or ""))
         raise ValueError(f"未知工具：{name}")
@@ -146,12 +176,65 @@ class ToolRegistry:
             metadata={"repo": repo},
         )
 
-    async def _lab4ai_create_instance(self, payload: dict[str, Any]) -> ToolResult:
-        await asyncio.sleep(0.1)
+    async def _lab4ai_create_instance(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        resource_kind = str(payload.get("resource_kind") or "instance").lower()
+        if context is None:
+            raise RuntimeError("缺少 Tool 执行上下文，无法创建 Lab4AI 实例")
+        creds = await load_lab4ai_credentials(context.session)
+        if creds is None:
+            raise RuntimeError("Lab4AI 凭证未配置，请先由管理员配置平台账号")
+
+        target_model = "GPU" if resource_kind == "gpu" else "CPU"
+        instance = await create_instance(
+            creds.phone,
+            creds.password,
+            target_model=target_model,
+            cpu_count=_as_int(payload.get("cpu_cores"), default=2),
+            gpu_count=_as_int(payload.get("gpu_count"), default=1),
+            image_tag=str(
+                payload.get("image_tag") or "lf0.9.4-tf4.57.1-torch2.8.0-cu12.6-1.1"
+            ),
+            source=str(payload.get("source") or "lab"),
+        )
+        if not instance.server_id:
+            raise RuntimeError("Lab4AI 创建实例成功响应缺少 serverId")
+
+        cloud = CloudInstance(
+            user_id=context.user_id,
+            conversation_id=context.conversation_id,
+            server_id=instance.server_id,
+            instance_id=instance.instance_id or None,
+            instance_type=CloudInstanceType.GPU
+            if target_model == "GPU"
+            else CloudInstanceType.CPU,
+            gpu_count=instance.gpu_count,
+            ssh_host=instance.ssh_host or None,
+            ssh_port=_as_int(instance.ssh_port, default=0) or None,
+            ssh_user=instance.ssh_user or "root",
+            ssh_pass=instance.ssh_pass or None,
+            status=CloudInstanceStatus.RUNNING,
+            raw_payload=instance.raw_payload or {},
+        )
+        context.session.add(cloud)
+        await context.session.commit()
+        await context.session.refresh(cloud)
         return ToolResult(
             "lab4ai_create_instance",
-            "已通过 MVP 工具层模拟创建 Lab4AI 实例；真实创建会接入 Lab4AI API/skills。",
-            metadata={"simulated": True, **payload},
+            f"已创建 Lab4AI {target_model} 实例：{instance.server_id}",
+            metadata={
+                "cloud_instance_id": cloud.id,
+                "server_id": instance.server_id,
+                "instance_id": instance.instance_id,
+                "resource_kind": target_model,
+                "ssh_host": instance.ssh_host,
+                "ssh_port": instance.ssh_port,
+                "ssh_user": instance.ssh_user or "root",
+                **payload,
+            },
         )
 
     async def _ssh_execute(self, command: str) -> ToolResult:
@@ -164,12 +247,106 @@ class ToolRegistry:
             metadata={"command": command, "simulated": True},
         )
 
-    async def _lab4ai_stop_instance(self, payload: dict[str, Any]) -> ToolResult:
-        await asyncio.sleep(0.1)
+    async def _lab4ai_stop_instance(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        if context is None:
+            raise RuntimeError("缺少 Tool 执行上下文，无法停止 Lab4AI 实例")
+        server_id = str(payload.get("server_id") or "").strip()
+        if not server_id:
+            raise RuntimeError("缺少 server_id，无法停止 Lab4AI 实例")
+
+        instance = await context.session.scalar(
+            select(CloudInstance).where(
+                CloudInstance.server_id == server_id,
+                CloudInstance.user_id == context.user_id,
+            )
+        )
+        if instance is None:
+            raise RuntimeError("未找到当前用户名下的 Lab4AI 实例记录，拒绝停止未绑定实例")
+        if instance.status == CloudInstanceStatus.STOPPED:
+            return ToolResult(
+                "lab4ai_stop_instance",
+                f"Lab4AI 实例已处于停止状态：{server_id}",
+                metadata={"cloud_instance_id": instance.id, "server_id": server_id, **payload},
+            )
+
+        creds = await load_lab4ai_credentials(context.session)
+        if creds is None:
+            raise RuntimeError("Lab4AI 凭证未配置，请先由管理员配置平台账号")
+
+        stop_result = await stop_instance_details(creds.phone, creds.password, server_id)
+        instance.status = CloudInstanceStatus.STOPPED
+        instance.stopped_at = datetime.now(UTC)
+        instance.raw_payload = {
+            **(instance.raw_payload or {}),
+            "stop": stop_result.raw_payload or {},
+        }
+        await context.session.commit()
         return ToolResult(
             "lab4ai_stop_instance",
-            "已模拟释放 Lab4AI 实例。",
-            metadata={"simulated": True, **payload},
+            f"已停止 Lab4AI 实例：{server_id}",
+            metadata={
+                "cloud_instance_id": instance.id,
+                "server_id": server_id,
+                "start_time": stop_result.start_time,
+                "stop_time": stop_result.stop_time,
+                **payload,
+            },
+        )
+
+    async def _lab4ai_list_instances(
+        self,
+        context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        if not context:
+            return ToolResult(
+                "lab4ai_list_instances",
+                "当前缺少执行上下文，无法查询用户实例。",
+                ok=False,
+            )
+        creds = await load_lab4ai_credentials(context.session)
+        if creds is None:
+            raise RuntimeError("Lab4AI 凭证未配置，请先由管理员配置平台账号")
+
+        instances = await list_instances(creds.phone, creds.password)
+        remote_by_id = {item.server_id: item for item in instances}
+        local_instances = (
+            await context.session.execute(
+                select(CloudInstance).where(CloudInstance.user_id == context.user_id)
+            )
+        ).scalars().all()
+        for item in local_instances:
+            if (
+                item.status == CloudInstanceStatus.RUNNING
+                and item.server_id not in remote_by_id
+            ):
+                item.status = CloudInstanceStatus.STOPPED
+                item.stopped_at = datetime.now(UTC)
+        await context.session.commit()
+        visible = [
+            item
+            for item in instances
+            if any(local.server_id == item.server_id for local in local_instances)
+        ]
+        return ToolResult(
+            "lab4ai_list_instances",
+            f"已从 Lab4AI 查询到当前用户可见运行实例 {len(visible)} 台。",
+            metadata={
+                "instances": [item.raw_payload or {} for item in visible],
+            },
+        )
+
+    async def _repro_report(self, payload: dict[str, Any]) -> ToolResult:
+        await asyncio.sleep(0.1)
+        repo_name = str(payload.get("repo_name") or "project")
+        report_path = f"/root/lab4ai/workspace/{repo_name}/{repo_name}_Repro_Report.docx"
+        return ToolResult(
+            "repro_report",
+            f"已模拟生成工业级复现报告：{report_path}",
+            metadata={"simulated": True, "report_path": report_path, **payload},
         )
 
     async def _ask_user(self, question: str) -> ToolResult:
@@ -225,6 +402,21 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
             input_schema={"type": "object", "properties": {"server_id": {"type": "string"}}},
             confirmation_reason="会释放远程算力资源。",
         ),
+        "lab4ai_list_instances": ToolDefinition(
+            name="lab4ai_list_instances",
+            description="查询当前用户可见的 Lab4AI 云实例。",
+            input_schema={"type": "object", "properties": {}},
+            read_only=True,
+        ),
+        "repro_report": ToolDefinition(
+            name="repro_report",
+            description="生成项目复现报告并返回报告路径。",
+            input_schema={
+                "type": "object",
+                "properties": {"repo_name": {"type": "string"}},
+                "required": ["repo_name"],
+            },
+        ),
         "ask_user": ToolDefinition(
             name="ask_user",
             description="向用户提出需要人工决策的问题并暂停当前工作流。",
@@ -258,6 +450,8 @@ def _build_confirmation_question(tool: ToolDefinition, payload: dict[str, Any]) 
 
 
 def _requires_confirmation(tool: ToolDefinition, payload: dict[str, Any]) -> bool:
+    if tool.name == "lab4ai_stop_instance" and payload.get("force_cleanup"):
+        return False
     if tool.confirmation_policy == "never":
         return False
     if tool.confirmation_policy == "always":
@@ -293,3 +487,10 @@ def _format_confirmation_policy(policy: str) -> str:
     if policy == "risky":
         return "高风险时需要 HITL 确认"
     return "无需确认"
+
+
+def _as_int(value: object, *, default: int = 0) -> int:
+    try:
+        return int(value if value not in (None, "") else default)
+    except (TypeError, ValueError):
+        return default

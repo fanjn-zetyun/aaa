@@ -14,11 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin as admin_router
 from app.api import auth as auth_router
-from app.api import claw_instances as claw_router
 from app.api import cloud_instances as cloud_router
 from app.api import conversations as conversations_router
 from app.api import llm_config as llm_config_router
-from app.api import logs_ws as logs_router
 from app.core.bootstrap import ensure_default_admin
 from app.core.config import get_settings
 from app.core.database import init_db
@@ -49,19 +47,24 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
+            "http://localhost:5175",
+            "http://127.0.0.1:5175",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
     app.include_router(auth_router.router)
-    app.include_router(claw_router.router)
     app.include_router(conversations_router.router)
     app.include_router(llm_config_router.router)
     app.include_router(cloud_router.router)
     app.include_router(admin_router.router)
-    app.include_router(logs_router.router)
 
     @app.get("/api/health", tags=["meta"])
     async def health() -> dict[str, str]:

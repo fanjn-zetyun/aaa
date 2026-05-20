@@ -41,7 +41,6 @@ async def init_db() -> None:
     # 触发模型注册
     from app.models import (  # noqa: F401
         admin_settings,
-        claw_instance,
         cloud_instance,
         conversation,
         usage_record,
@@ -63,3 +62,16 @@ def _ensure_compatible_schema(sync_conn) -> None:
         sync_conn.execute(
             text("ALTER TABLE users ADD COLUMN institution VARCHAR(128) NOT NULL DEFAULT ''")
         )
+    if "cloud_instances" in inspector.get_table_names():
+        cloud_columns = {column["name"] for column in inspector.get_columns("cloud_instances")}
+        for column_name, definition in (
+            ("conversation_id", "INTEGER"),
+            ("instance_id", "VARCHAR(128)"),
+            ("ssh_user", "VARCHAR(64)"),
+            ("ssh_pass", "VARCHAR(256)"),
+            ("raw_payload", "JSON NOT NULL DEFAULT '{}'"),
+        ):
+            if column_name not in cloud_columns:
+                sync_conn.execute(
+                    text(f"ALTER TABLE cloud_instances ADD COLUMN {column_name} {definition}")
+                )

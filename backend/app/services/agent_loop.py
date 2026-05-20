@@ -40,7 +40,12 @@ from app.services.llm_client import (
     stream_anthropic_compatible,
 )
 from app.services.skills import SkillDefinition, SkillLoader, select_skill
-from app.services.tools import ToolRegistry, ToolResult
+from app.services.tools import ToolExecutionContext, ToolRegistry, ToolResult
+from app.services.workflow import (
+    SkillWorkflowRunner,
+    cleanup_workflow_resources,
+    parse_workflow,
+)
 
 AGENT_PLAN_MAX_TOKENS = 2048
 AGENT_REPLY_MAX_TOKENS = 8192
@@ -85,6 +90,7 @@ class AgentLoopManager:
         self._streams: defaultdict[int, ConversationStream] = defaultdict(ConversationStream)
         self._tasks: dict[int, asyncio.Task] = {}
         self._active_runs: dict[int, str] = {}
+        self._pending_starts: set[int] = set()
         self._tools = ToolRegistry()
         self._skills = SkillLoader(get_settings().skills_dir_path).load_all()
 
@@ -93,21 +99,38 @@ class AgentLoopManager:
 
     def start(self, conversation_id: int) -> None:
         if conversation_id in self._tasks and not self._tasks[conversation_id].done():
+            self._pending_starts.add(conversation_id)
             return
         stream = self._streams[conversation_id]
         if stream.finished:
             self._streams[conversation_id] = ConversationStream(next_seq=stream.next_seq)
-        self._tasks[conversation_id] = asyncio.create_task(self._run(conversation_id))
+        task = asyncio.create_task(self._run(conversation_id))
+        task.add_done_callback(lambda _task, cid=conversation_id: self._restart_if_pending(cid))
+        self._tasks[conversation_id] = task
+
+    def _restart_if_pending(self, conversation_id: int) -> None:
+        if conversation_id not in self._pending_starts:
+            return
+        self._pending_starts.discard(conversation_id)
+        self.start(conversation_id)
 
     async def stop(self, conversation_id: int) -> None:
         task = self._tasks.get(conversation_id)
         if task and not task.done():
             task.cancel()
+        self._pending_starts.discard(conversation_id)
+        metadata: dict = {}
+        async with SessionLocal() as session:
+            conv = await session.get(Conversation, conversation_id)
+            if conv:
+                metadata = ensure_memory(conv.metadata_ or {})
+        if metadata:
+            metadata = await self._cleanup_workflow_resources(conversation_id, metadata)
         async with SessionLocal() as session:
             conv = await session.get(Conversation, conversation_id)
             if conv:
                 conv.status = ConversationStatus.STOPPED
-                conv.metadata_ = mark_stopped(conv.metadata_ or {})
+                conv.metadata_ = mark_stopped(metadata or conv.metadata_ or {})
                 session.add(
                     ConversationMessage(
                         conversation_id=conversation_id,
@@ -177,6 +200,7 @@ class AgentLoopManager:
                 )
 
             if stop_after_user_reply:
+                metadata = await self._cleanup_workflow_resources(conversation_id, metadata)
                 metadata = mark_stopped(metadata)
                 await self._system(conversation_id, "已根据你的回复停止当前任务。")
                 await self._set_status_and_metadata(
@@ -212,8 +236,8 @@ class AgentLoopManager:
                 conversation_id,
                 (
                     f"已选择 skill：{skill_name}。"
-                    "当前后端仍处于 MVP 工具层模式，Lab4AI/SSH 执行为模拟工具事件；"
-                    "接入真实 OpenClaw 后会由 skill workflow 驱动真实执行。"
+                    "当前 Lab4AI Tool 会直接调用真实平台 API；"
+                    "SSH executor 仍需后续接入真实远程执行。"
                 ),
                 stage="skill_selection",
             )
@@ -228,55 +252,86 @@ class AgentLoopManager:
             await self._progress(conversation_id, plan, stage="plan")
 
             tool_outputs: list[str] = []
-            result, metadata, paused = await self._invoke_tool_with_policy(
-                conversation_id,
-                metadata,
-                "analyze_repo",
-                {"github_url": metadata.get("github_url")},
-            )
-            if paused:
-                return
-            if result:
-                tool_outputs.append(f"{result.name}: {result.content}")
-            if metadata.get("github_url"):
-                metadata = remember_fact(metadata, f"目标仓库：{metadata['github_url']}")
-                await self._set_metadata(conversation_id, metadata)
-
-            if metadata.get("task_type") == "reproduce" or metadata.get("github_url"):
+            if skill and skill.name == "lab4ai-auto-reproduct" and skill.workflow_context:
+                workflow = parse_workflow(skill.workflow_context)
+                runner = SkillWorkflowRunner(
+                    workflow,
+                    skill_name=skill.name,
+                    invoke_tool=lambda current_metadata, tool_name, tool_input: (
+                        self._invoke_tool_with_policy(
+                            conversation_id,
+                            current_metadata,
+                            tool_name,
+                            tool_input,
+                        )
+                    ),
+                    write_metadata=lambda current_metadata: self._set_metadata(
+                        conversation_id, current_metadata
+                    ),
+                    publish=lambda event: self._publish(conversation_id, event),
+                )
+                workflow_result = await runner.run(metadata)
+                metadata = workflow_result.metadata
+                tool_outputs.extend(workflow_result.tool_outputs)
+                if workflow_result.paused:
+                    return
+                if workflow_result.failed:
+                    metadata = mark_failed(metadata)
+                    await self._set_status_and_metadata(
+                        conversation_id, ConversationStatus.FAILED, metadata
+                    )
+                    self._publish(conversation_id, {"type": "status", "status": "failed"})
+                    return
+            else:
                 result, metadata, paused = await self._invoke_tool_with_policy(
                     conversation_id,
                     metadata,
-                    "lab4ai_create_instance",
-                    {},
+                    "analyze_repo",
+                    {"github_url": metadata.get("github_url")},
                 )
                 if paused:
                     return
                 if result:
                     tool_outputs.append(f"{result.name}: {result.content}")
-                    metadata = remember_artifact(metadata, result.content)
+                if metadata.get("github_url"):
+                    metadata = remember_fact(metadata, f"目标仓库：{metadata['github_url']}")
                     await self._set_metadata(conversation_id, metadata)
 
-                result, metadata, paused = await self._invoke_tool_with_policy(
-                    conversation_id,
-                    metadata,
-                    "ssh_execute",
-                    {"command": "git clone && inspect README/requirements"},
-                )
-                if paused:
-                    return
-                if result:
-                    tool_outputs.append(f"{result.name}: {result.content}")
+                if metadata.get("task_type") == "reproduce" or metadata.get("github_url"):
+                    result, metadata, paused = await self._invoke_tool_with_policy(
+                        conversation_id,
+                        metadata,
+                        "lab4ai_create_instance",
+                        {},
+                    )
+                    if paused:
+                        return
+                    if result:
+                        tool_outputs.append(f"{result.name}: {result.content}")
+                        metadata = remember_artifact(metadata, result.content)
+                        await self._set_metadata(conversation_id, metadata)
 
-                result, metadata, paused = await self._invoke_tool_with_policy(
-                    conversation_id,
-                    metadata,
-                    "lab4ai_stop_instance",
-                    {},
-                )
-                if paused:
-                    return
-                if result:
-                    tool_outputs.append(f"{result.name}: {result.content}")
+                    result, metadata, paused = await self._invoke_tool_with_policy(
+                        conversation_id,
+                        metadata,
+                        "ssh_execute",
+                        {"command": "git clone && inspect README/requirements"},
+                    )
+                    if paused:
+                        return
+                    if result:
+                        tool_outputs.append(f"{result.name}: {result.content}")
+
+                    result, metadata, paused = await self._invoke_tool_with_policy(
+                        conversation_id,
+                        metadata,
+                        "lab4ai_stop_instance",
+                        {},
+                    )
+                    if paused:
+                        return
+                    if result:
+                        tool_outputs.append(f"{result.name}: {result.content}")
 
             metadata = _refresh_summary(metadata, latest_user, tool_outputs)
             await self._set_metadata(conversation_id, metadata)
@@ -323,6 +378,18 @@ class AgentLoopManager:
             parts.append(f"仓库：{github_url}")
         if paper_url := metadata.get("paper_url"):
             parts.append(f"论文：{paper_url}")
+        if workflow_name := metadata.get("workflow_name"):
+            parts.append(f"工作流：{workflow_name}")
+            completed = [
+                step
+                for step in (metadata.get("workflow_steps") or [])
+                if isinstance(step, dict) and step.get("status") == "completed"
+            ]
+            total = len(metadata.get("workflow_steps") or [])
+            parts.append(f"步骤进度：{len(completed)}/{total} 已完成")
+        if results := metadata.get("workflow_results"):
+            if isinstance(results, dict) and results.get("word_report_path"):
+                parts.append(f"报告路径：{results['word_report_path']}")
         if latest_user:
             parts.append(f"已记录你的要求：{latest_user}")
         parts.append("当前版本已经具备对话历史、工具事件、WebSocket 流式推送和配额检查骨架。")
@@ -410,7 +477,18 @@ class AgentLoopManager:
             },
         )
         try:
-            result = await self._tools.invoke(tool_name, tool_input)
+            async with SessionLocal() as session:
+                conv = await session.get(Conversation, conversation_id)
+                context = (
+                    ToolExecutionContext(
+                        user_id=conv.user_id,
+                        conversation_id=conversation_id,
+                        session=session,
+                    )
+                    if conv
+                    else None
+                )
+                result = await self._tools.invoke(tool_name, tool_input, context=context)
         except Exception as exc:
             self._publish(
                 conversation_id,
@@ -478,6 +556,20 @@ class AgentLoopManager:
             },
         )
         self._publish(conversation_id, {"type": "status", "status": WORKFLOW_WAITING_FOR_USER})
+        return metadata
+
+    async def _cleanup_workflow_resources(self, conversation_id: int, metadata: dict) -> dict:
+        metadata, _outputs = await cleanup_workflow_resources(
+            metadata,
+            lambda current_metadata, tool_name, tool_input: self._invoke_tool_with_policy(
+                conversation_id,
+                current_metadata,
+                tool_name,
+                tool_input,
+            ),
+            lambda current_metadata: self._set_metadata(conversation_id, current_metadata),
+            lambda event: self._publish(conversation_id, event),
+        )
         return metadata
 
     async def _persist_message(
@@ -731,7 +823,7 @@ def _build_system_prompt(
         "你需要基于用户输入制定真实科研复现计划，并在工具执行后总结结果。",
         "当前后端负责任务调度、工具执行和日志转发。",
         f"已选择 skill：{skill_name}",
-        "当前真实 Lab4AI/SSH 尚未接入时，工具事件代表 MVP 模拟执行结果，不代表真实云实例已经创建。",
+        "Lab4AI 资源操作必须通过后端 Tool 调用真实平台 API 并写入归属记录。",
         f"任务类型：{metadata.get('task_type') or 'general'}",
         f"GitHub：{metadata.get('github_url') or '未提供'}",
         f"论文：{metadata.get('paper_url') or '未提供'}",

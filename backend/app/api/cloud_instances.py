@@ -6,10 +6,10 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models import CloudInstance, CloudInstanceStatus
+from app.models import CloudInstance, CloudInstanceStatus, CloudInstanceType, UsageRecord
 from app.services.lab4ai.client import list_instances, stop_instance
 from app.services.lab4ai.credentials import load_lab4ai_credentials
 
@@ -18,16 +18,37 @@ router = APIRouter(prefix="/api/cloud-instances", tags=["cloud-instances"])
 
 class CloudInstanceResponse(BaseModel):
     id: int
+    conversation_id: int | None = None
     server_id: str
+    instance_id: str | None = None
     instance_type: str
     gpu_count: int
     ssh_host: str | None
     ssh_port: int | None
+    ssh_user: str | None = None
     status: str
     started_at: datetime
     stopped_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class QuotaResponse(BaseModel):
+    gpu_quota_hours: float
+    cpu_quota_hours: float
+    gpu_used_hours: float
+    cpu_used_hours: float
+
+
+@router.get("/quota", response_model=QuotaResponse)
+async def get_quota(user: CurrentUser, session: DbSession) -> dict:
+    used = await _get_used_hours(user.id, session)
+    return {
+        "gpu_quota_hours": user.gpu_quota_hours,
+        "cpu_quota_hours": user.cpu_quota_hours,
+        "gpu_used_hours": used["gpu"],
+        "cpu_used_hours": used["cpu"],
+    }
 
 
 @router.get("", response_model=list[CloudInstanceResponse])
@@ -110,3 +131,22 @@ async def stop_cloud_instance(
     await session.commit()
     await session.refresh(instance)
     return instance  # type: ignore[return-value]
+
+
+async def _get_used_hours(user_id: int, session) -> dict[str, float]:
+    result = await session.execute(
+        select(
+            UsageRecord.instance_type,
+            func.sum(UsageRecord.duration_seconds),
+        )
+        .where(UsageRecord.user_id == user_id)
+        .group_by(UsageRecord.instance_type)
+    )
+    gpu_seconds = 0.0
+    cpu_seconds = 0.0
+    for row in result.all():
+        if row[0] == CloudInstanceType.GPU:
+            gpu_seconds = row[1] or 0.0
+        else:
+            cpu_seconds = row[1] or 0.0
+    return {"gpu": gpu_seconds / 3600, "cpu": cpu_seconds / 3600}

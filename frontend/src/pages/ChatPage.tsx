@@ -45,6 +45,22 @@ interface StreamPayload {
   ok?: boolean;
   error?: string;
   message?: ConversationMessage;
+  step?: WorkflowStepState;
+  workflow?: WorkflowState;
+}
+
+interface WorkflowStepState {
+  id: string;
+  name: string;
+  status: string;
+  output?: string;
+}
+
+interface WorkflowState {
+  name?: string;
+  version?: string;
+  current_step_id?: string | null;
+  steps?: WorkflowStepState[];
 }
 
 interface TimelineEvent {
@@ -164,6 +180,38 @@ export default function ChatPage() {
         content: payload.content,
         created_at: payload.timestamp || new Date().toISOString(),
         status: "info",
+      });
+      return;
+    }
+    if (payload.type === "workflow_loaded") {
+      appendTimelineEvent(payload, {
+        id: `workflow-loaded-${payload.seq ?? Date.now()}`,
+        title: "加载复现工作流",
+        content: payload.workflow?.name
+          ? `${payload.workflow.name} · ${payload.workflow.steps?.length || 0} 个步骤`
+          : "已加载 workflow",
+        created_at: payload.timestamp || new Date().toISOString(),
+        status: "info",
+      });
+      return;
+    }
+    if (payload.type.startsWith("workflow_step_") && payload.step) {
+      appendTimelineEvent(payload, {
+        id: `workflow-step-${payload.step.id}`,
+        title: payload.step.name || payload.step.id,
+        content: payload.step.output || payload.step.id,
+        created_at: payload.timestamp || new Date().toISOString(),
+        status: workflowEventStatus(payload.type, payload.step.status),
+      });
+      return;
+    }
+    if (payload.type === "workflow_cleanup_started" || payload.type === "workflow_cleanup_completed") {
+      appendTimelineEvent(payload, {
+        id: `workflow-cleanup-${payload.type}`,
+        title: payload.type === "workflow_cleanup_started" ? "资源兜底释放" : "资源释放检查完成",
+        content: payload.content,
+        created_at: payload.timestamp || new Date().toISOString(),
+        status: payload.type === "workflow_cleanup_started" ? "running" : "done",
       });
       return;
     }
@@ -676,6 +724,13 @@ function progressTitle(stage?: string) {
   if (stage === "skill_selection") return "选择 skill";
   if (stage === "plan") return "生成计划";
   return "任务进度";
+}
+
+function workflowEventStatus(eventType: string, stepStatus: string): TimelineEvent["status"] {
+  if (eventType === "workflow_step_started" || stepStatus === "running") return "running";
+  if (eventType === "workflow_step_failed" || stepStatus === "failed") return "error";
+  if (eventType === "workflow_step_waiting" || stepStatus === "waiting_for_user") return "info";
+  return "done";
 }
 
 function formatToolInput(input?: Record<string, unknown>) {

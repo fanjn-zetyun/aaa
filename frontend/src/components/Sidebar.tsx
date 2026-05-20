@@ -89,7 +89,7 @@ export default function Sidebar() {
 
   const { data: quota } = useQuery({
     queryKey: ["quota"],
-    queryFn: () => apiFetch<QuotaInfo>("/api/claw-instances/quota"),
+    queryFn: () => apiFetch<QuotaInfo>("/api/cloud-instances/quota"),
     refetchInterval: 30000,
   });
 

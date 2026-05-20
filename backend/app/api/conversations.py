@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, st
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
-from app.api.logs_ws import _authenticate_ws
+from app.api.ws_auth import authenticate_ws
 from app.models import Conversation, ConversationMessage, UsageRecord
 from app.models.conversation import ConversationStatus, ConversationTaskType, MessageRole
 from app.schemas.conversation import (
@@ -179,7 +179,7 @@ async def get_workspace_files(
 
 @router.websocket("/{conversation_id}/stream")
 async def ws_conversation_stream(websocket: WebSocket, conversation_id: int) -> None:
-    user = await _authenticate_ws(websocket)
+    user = await authenticate_ws(websocket)
     if user is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="unauthorized")
         return
@@ -236,7 +236,16 @@ def _list_workspace_files(root: Path) -> list[WorkspaceFileResponse]:
     if not root.exists() or not root.is_dir():
         return []
 
-    ignored_dirs = {".git", ".openclaw", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+    ignored_dirs = {
+        ".git",
+        ".lobster",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+    }
     ignored_files = {".DS_Store"}
     items: list[WorkspaceFileResponse] = []
     max_items = 200

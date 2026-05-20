@@ -7,9 +7,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, DbSession
-from app.models import ClawInstance, CloudInstance, User
+from app.models import CloudInstance, User
 from app.schemas.auth import UserResponse
-from app.schemas.claw_instance import ClawInstanceResponse
 from app.services.lab4ai.credentials import load_lab4ai_credentials, save_lab4ai_credentials
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -79,14 +78,6 @@ async def set_lab4ai_settings(
 # --- 全局实例查看 ---
 
 
-@router.get("/claw-instances", response_model=list[ClawInstanceResponse])
-async def list_all_claw_instances(_admin: AdminUser, session: DbSession) -> list[ClawInstance]:
-    result = await session.execute(
-        select(ClawInstance).order_by(ClawInstance.created_at.desc())
-    )
-    return list(result.scalars().all())
-
-
 @router.get("/cloud-instances")
 async def list_all_cloud_instances(_admin: AdminUser, session: DbSession) -> list[dict]:
     result = await session.execute(
@@ -97,9 +88,13 @@ async def list_all_cloud_instances(_admin: AdminUser, session: DbSession) -> lis
         {
             "id": i.id,
             "user_id": i.user_id,
+            "conversation_id": i.conversation_id,
             "server_id": i.server_id,
+            "instance_id": i.instance_id,
             "instance_type": i.instance_type.value,
             "gpu_count": i.gpu_count,
+            "ssh_host": i.ssh_host,
+            "ssh_port": i.ssh_port,
             "status": i.status.value,
             "started_at": i.started_at.isoformat() if i.started_at else None,
             "stopped_at": i.stopped_at.isoformat() if i.stopped_at else None,

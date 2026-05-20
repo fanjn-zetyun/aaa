@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "OpenClaw 多实例管理"
+    app_name: str = "LOBSTER 科研助手平台"
     app_env: str = "development"
     app_host: str = "127.0.0.1"
     app_port: int = 8000
@@ -36,10 +36,8 @@ class Settings(BaseSettings):
     default_admin_username: str = "admin"
     default_admin_password: str = "admin123"
 
-    openclaw_runner: str = Field(default="mock", description="mock 或 real")
-    openclaw_bin: str = "openclaw"
-    openclaw_workspace_root: str = "runtime/workspaces"
-    openclaw_skills_dir: str = "skills"
+    workspace_root: str = "runtime/workspaces"
+    skills_dir: str = "skills"
 
     lab4ai_credential_key: str = ""
 
@@ -49,11 +47,11 @@ class Settings(BaseSettings):
 
     @property
     def workspace_root_path(self) -> Path:
-        return PROJECT_ROOT / self.openclaw_workspace_root
+        return PROJECT_ROOT / self.workspace_root
 
     @property
     def skills_dir_path(self) -> Path:
-        return PROJECT_ROOT / self.openclaw_skills_dir
+        return PROJECT_ROOT / self.skills_dir
 
 
 @lru_cache

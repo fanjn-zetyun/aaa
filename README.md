@@ -94,7 +94,7 @@ npm run dev
 
 当前 V2 MVP 已跑通：后端已支持 `conversations` 对话式任务、真实模型配置与 Anthropic-compatible 模型调用，前端已支持对话页、历史记录、模型设置页和 WebSocket 流式事件。Skill Loader 最小闭环已接入，复现任务会加载 `lab4ai-auto-reproduct` 及其 `project_reproduce.yaml` 并注入 Agent Loop。每个对话已具备轻量结构化 memory，复现任务会在创建资源前进入 human-in-the-loop 确认，用户回复后继续执行。
 
-目前 Lab4AI 实例创建、SSH 执行、实例释放仍是 MVP 模拟工具层；下一步需要接入真实 Lab4AI API 和真实 SSH 执行。详细进度见 [docs/progress.md](docs/progress.md)，完整设计方案见 [docs/proposal.md](docs/proposal.md)。
+目前 Lab4AI 实例创建、查询和释放已改为直接走真实 API；缺少管理员凭证时会失败，不再通过 mock Runner 模拟计费实例。SSH 执行仍需接入真实 executor。详细进度见 [docs/progress.md](docs/progress.md)，完整设计方案见 [docs/proposal.md](docs/proposal.md)。
 
 ## 当前实现补充（2026-05-19）
 

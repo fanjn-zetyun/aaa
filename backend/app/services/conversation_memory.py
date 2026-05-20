@@ -124,7 +124,15 @@ def mark_waiting_for_user(
         pending["tool_input"] = dict(tool_input or {})
     result["pending_user_input"] = pending
     memory = result["memory"]
-    open_questions = list(memory.get("open_questions") or [])
+    open_questions = [
+        item
+        for item in (memory.get("open_questions") or [])
+        if not (
+            isinstance(item, dict)
+            and item.get("step") == step
+            and item.get("run_id") == result.get("workflow_run_id")
+        )
+    ]
     open_questions.append(pending)
     memory["open_questions"] = open_questions
     return result

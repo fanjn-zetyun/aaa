@@ -35,8 +35,8 @@ async def test_workspace_files_lists_owned_workspace(
     workspace = workspace_root / str(conv.id)
     (workspace / "reports").mkdir(parents=True)
     (workspace / "reports" / "result.md").write_text("# result", encoding="utf-8")
-    (workspace / ".openclaw").mkdir()
-    (workspace / ".openclaw" / ".env").write_text("SECRET=1", encoding="utf-8")
+    (workspace / ".lobster").mkdir()
+    (workspace / ".lobster" / ".env").write_text("SECRET=1", encoding="utf-8")
     (workspace / "node_modules").mkdir()
     (workspace / "node_modules" / "pkg.js").write_text("ignored", encoding="utf-8")
 
@@ -58,7 +58,7 @@ async def test_workspace_files_lists_owned_workspace(
     paths = {item["path"] for item in data["files"]}
     assert "reports" in paths
     assert "reports/result.md" in paths
-    assert ".openclaw/.env" not in paths
+    assert ".lobster/.env" not in paths
     assert "node_modules/pkg.js" not in paths
 
 

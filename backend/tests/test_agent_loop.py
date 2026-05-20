@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.services.agent_loop import AgentLoopManager
@@ -128,3 +130,28 @@ async def test_invoke_tool_with_policy_publishes_start_and_completed(test_user, 
     assert [event["type"] for event in events] == ["tool_started", "tool_completed"]
     assert events[0]["tool_name"] == "analyze_repo"
     assert events[1]["message"]["role"] == "tool"
+
+
+async def test_start_queues_restart_when_existing_task_is_finishing(monkeypatch):
+    manager = AgentLoopManager()
+    calls: list[int] = []
+    release = asyncio.Event()
+
+    async def fake_run(conversation_id: int):
+        calls.append(conversation_id)
+        await release.wait()
+
+    monkeypatch.setattr(manager, "_run", fake_run)
+
+    manager.start(42)
+    await asyncio.sleep(0)
+    manager.start(42)
+
+    assert manager._pending_starts == {42}
+    release.set()
+    for _ in range(10):
+        if len(calls) == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert calls == [42, 42]

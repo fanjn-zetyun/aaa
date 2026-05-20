@@ -1,3 +1,3 @@
-"""OpenClaw 多实例管理 Web 应用 - 后端"""
+"""LOBSTER 科研助手平台后端。"""
 
 __version__ = "0.1.0"

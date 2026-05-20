@@ -16,6 +16,12 @@ interface Conversation {
       question: string;
       tool_name?: string;
     } | null;
+    workflow_name?: string;
+    workflow_version?: string;
+    workflow_current_step_id?: string | null;
+    workflow_steps?: WorkflowStep[];
+    workflow_resources?: Record<string, WorkflowResource>;
+    workflow_results?: Record<string, unknown>;
     memory?: {
       decisions?: Array<{ step?: string; outcome?: string; answer?: string }>;
       artifacts?: string[];
@@ -23,6 +29,18 @@ interface Conversation {
   };
   created_at: string;
   updated_at: string;
+}
+
+interface WorkflowStep {
+  id: string;
+  name: string;
+  status: string;
+  output?: string;
+}
+
+interface WorkflowResource {
+  server_id?: string;
+  released?: boolean;
 }
 
 interface WorkspaceFile {
@@ -73,6 +91,7 @@ export default function RightPanel() {
         <PanelHeader title="权限与环境配置" subtitle={conversation?.status || "loading"} />
         <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5">
           <EnvironmentSection conversation={conversation} />
+          <WorkflowSection conversation={conversation} />
           <PermissionSection conversation={conversation} />
         </div>
       </section>
@@ -85,6 +104,74 @@ export default function RightPanel() {
         <WorkspaceFileList data={workspaceFiles} loading={filesLoading} />
       </section>
     </aside>
+  );
+}
+
+function WorkflowSection({ conversation }: { conversation?: Conversation }) {
+  const metadata = conversation?.metadata || {};
+  const steps = metadata.workflow_steps || [];
+  if (!metadata.workflow_name && steps.length === 0) return null;
+
+  const resources = metadata.workflow_resources || {};
+  const results = metadata.workflow_results || {};
+
+  return (
+    <div>
+      <SectionTitle label="复现流水线" />
+      <div className="space-y-2">
+        {metadata.workflow_name && (
+          <InfoRow
+            label="Workflow"
+            value={`${metadata.workflow_name}${metadata.workflow_version ? ` · ${metadata.workflow_version}` : ""}`}
+          />
+        )}
+        {steps.length > 0 && (
+          <div className="space-y-1.5">
+            {steps.map((step, index) => (
+              <WorkflowStepRow key={step.id} step={step} index={index} />
+            ))}
+          </div>
+        )}
+        {resources.cpu?.server_id && (
+          <InfoRow
+            label="CPU"
+            value={`${resources.cpu.server_id} · ${resources.cpu.released ? "已释放" : "占用中"}`}
+            tone={resources.cpu.released ? "ok" : "warning"}
+          />
+        )}
+        {resources.gpu?.server_id && (
+          <InfoRow
+            label="GPU"
+            value={`${resources.gpu.server_id} · ${resources.gpu.released ? "已释放" : "占用中"}`}
+            tone={resources.gpu.released ? "ok" : "warning"}
+          />
+        )}
+        {typeof results.word_report_path === "string" && (
+          <InfoRow label="报告" value={results.word_report_path} tone="ok" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowStepRow({ step, index }: { step: WorkflowStep; index: number }) {
+  return (
+    <div className="rounded-md border border-slate-100 px-3 py-2">
+      <div className="flex items-start gap-2">
+        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${workflowStepDot(step.status)}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="min-w-0 truncate text-ui-small font-medium text-slate-700">
+              {index + 1}. {step.name || step.id}
+            </span>
+            <span className={`shrink-0 text-ui-micro ${toneClass(workflowStepTone(step.status))}`}>
+              {workflowStepLabel(step.status)}
+            </span>
+          </div>
+          {step.output && <div className="mt-1 break-words text-ui-micro text-slate-500">{step.output}</div>}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -300,6 +387,33 @@ function statusLabel(status?: string) {
     stopped: "已停止",
   };
   return status ? labels[status] || status : "-";
+}
+
+function workflowStepLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: "等待",
+    running: "执行中",
+    waiting_for_user: "待确认",
+    completed: "完成",
+    failed: "失败",
+    skipped: "跳过",
+  };
+  return labels[status] || status;
+}
+
+function workflowStepTone(status: string): "neutral" | "ok" | "warning" | "danger" {
+  if (status === "completed") return "ok";
+  if (status === "running" || status === "waiting_for_user") return "warning";
+  if (status === "failed") return "danger";
+  return "neutral";
+}
+
+function workflowStepDot(status: string) {
+  if (status === "completed") return "bg-green-500";
+  if (status === "running") return "bg-blue-500 animate-pulse";
+  if (status === "waiting_for_user") return "bg-amber-500";
+  if (status === "failed") return "bg-red-500";
+  return "bg-slate-300";
 }
 
 function taskTypeLabel(taskType?: string) {

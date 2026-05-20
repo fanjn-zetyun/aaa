@@ -157,12 +157,12 @@ async def agent_loop(conversation: Conversation, llm_config: LLMConfig):
         break
 ```
 
-MVP 当前允许用固定工具链模拟闭环：
+MVP 当前允许用固定工具链推进闭环：
 
 1. 选择 skill / 任务类型。
-2. 模拟或调用 `lab4ai_create_instance`。
-3. 模拟或调用 `ssh_execute`。
-4. 模拟或调用 `lab4ai_stop_instance`。
+2. 调用 `lab4ai_create_instance` 创建真实 Lab4AI 实例。
+3. 调用 `ssh_execute` 执行远程命令（当前 executor 仍待接入真实 SSH）。
+4. 调用 `lab4ai_stop_instance` 释放真实 Lab4AI 实例。
 5. 调用模型生成总结。
 
 后续目标是升级为真正由模型返回 `tool_use`，后端执行后继续循环。
@@ -269,6 +269,90 @@ Skill 执行链路：
   -> LLM 继续下一轮或总结完成
 ```
 
+### 5.5.1 Skill Workflow Runtime（已确认实施）
+
+针对 `lab4ai-auto-reproduct` 这类强流程任务，不能只把 `SKILL.md` 和 `project_reproduce.yaml` 注入模型上下文后让模型自由发挥。后端需要把 workflow 文件解析为可追踪、可恢复、可展示的执行状态机。
+
+用户在页面选择「论文与代码复现」并输入 GitHub URL、论文 URL 后，系统默认选择 `lab4ai-auto-reproduct`，加载同目录 `project_reproduce.yaml`，并按 YAML 中 `tasks` 数组逐步执行。
+
+运行链路：
+
+```text
+页面选择论文与代码复现
+  -> 创建 Conversation(task_type=reproduce, github_url, paper_url)
+  -> SkillSelector 默认选择 lab4ai-auto-reproduct
+  -> SkillLoader 加载 SKILL.md + project_reproduce.yaml
+  -> WorkflowRunner 解析 tasks / depends_on / instruction / expected_output
+  -> WorkflowRunner 按 step 状态机推进
+  -> ToolRegistry 执行每一步需要的后端 Tool
+  -> WebSocket 推送 workflow_step_* / tool_* / ask_user 事件
+  -> 前端以结构化 9 步看板展示执行过程
+```
+
+状态存储在 `Conversation.metadata` 中，建议结构：
+
+```json
+{
+  "selected_skill": "lab4ai-auto-reproduct",
+  "workflow_name": "Lab4AI_Auto_Reproduction_Pipeline",
+  "workflow_version": "lab4ai-workflow/v2.1",
+  "workflow_current_step_id": "step_4_cpu_env_setup",
+  "workflow_steps": [
+    {
+      "id": "step_1_audit",
+      "name": "项目复现可行性分析",
+      "status": "completed",
+      "output": "score=75；已完成仓库与论文审计"
+    }
+  ],
+  "workflow_resources": {
+    "cpu": {"server_id": "xxx", "released": true},
+    "gpu": {"server_id": "yyy", "released": false}
+  },
+  "workflow_results": {
+    "repo_name": "PhotoDoodle",
+    "score": 75,
+    "audit_report_path": "",
+    "word_report_path": ""
+  }
+}
+```
+
+Workflow step 状态：
+
+| 状态 | 含义 |
+|---|---|
+| `pending` | 等待依赖步骤完成 |
+| `running` | 当前正在执行 |
+| `waiting_for_user` | 已暂停，等待用户确认或补充信息 |
+| `completed` | 已完成并记录产出 |
+| `failed` | 执行失败 |
+| `skipped` | 因条件分支或熔断被跳过 |
+
+WebSocket 事件补充：
+
+| 事件 | 用途 |
+|---|---|
+| `workflow_loaded` | 通知前端已加载 workflow 和步骤列表 |
+| `workflow_step_started` | 某一步开始执行 |
+| `workflow_step_progress` | 某一步的中间进展 |
+| `workflow_step_waiting` | 某一步进入 HITL 等待 |
+| `workflow_step_completed` | 某一步完成 |
+| `workflow_step_failed` | 某一步失败 |
+| `workflow_cleanup_started` | 异常或停止后的资源兜底释放开始 |
+| `workflow_cleanup_completed` | 资源兜底释放完成 |
+
+资源释放规则：
+
+- `step_3_deploy_cpu` 创建 CPU 实例后，必须把 `server_id` 写入 `workflow_resources.cpu`。
+- `step_6_deploy_gpu` 创建 GPU 实例后，必须把 `server_id` 写入 `workflow_resources.gpu`。
+- 任意 step 失败、中断或用户停止任务时，后端必须检查 `workflow_resources`：
+  - CPU 未释放且已创建，则执行 `step_5_release_cpu` 对应的释放动作。
+  - GPU 未释放且已创建，则执行 `step_9_release_gpu` 对应的释放动作。
+- 用户发送「停止」「中断」「取消」时，不允许直接丢弃任务；必须进入 `stopping -> cleanup -> stopped` 语义，资源释放是停止流程中的唯一强制例外。
+
+短期实现中，workflow 的步骤状态、事件流、暂停恢复和资源兜底必须按真实执行链路落地。Lab4AI Tool 不再提供 Runner/mock 开关；缺少管理员凭证或平台 API 调用失败时直接失败并进入错误处理。SSH executor 仍需后续接入真实远程执行。
+
 近期最小实现（已完成）：
 
 - 新增 Python `SkillLoader`，支持扫描 `skills/*/SKILL.md`。
@@ -282,6 +366,9 @@ Skill 执行链路：
 - 已新增 `backend/app/services/skills.py`，实现 `SkillDefinition`、`SkillLoader` 和 `select_skill`。
 - 已在 `backend/app/services/agent_loop.py` 中接入 SkillLoader，复现任务会选择 `lab4ai-auto-reproduct` 并注入 skill 正文与 `project_reproduce.yaml`。
 - 已新增 `backend/tests/test_skills.py` 覆盖 skill 解析、workflow 加载和任务选择。
+- 已新增 `backend/app/services/workflow.py` 首版 `SkillWorkflowRunner`，可解析 `project_reproduce.yaml` 的 `tasks / depends_on / instruction / expected_output`，把 step 状态写入 `Conversation.metadata.workflow_steps`，并推送 `workflow_loaded / workflow_step_* / workflow_cleanup_*` 事件。
+- Agent Loop 已在复现任务中接入 WorkflowRunner；用户确认后可从 `waiting_for_user` 恢复继续执行，同一轮执行继续沿用当前 `workflow_run_id`。
+- 前端 `ChatPage` 和 `RightPanel` 已可展示 workflow 加载、step 执行、等待确认、失败和资源兜底释放事件。
 
 ### 5.6 Lab4AI 云实例管理
 
@@ -294,6 +381,7 @@ Lab4AI 云实例是真正消耗费用的资源，必须由后端统一管理。
 - 查询实例时按用户过滤；管理员可查看全部。
 - 关停实例前校验归属。
 - Agent Loop 异常、用户停止任务或后端重启恢复时，必须检查并清理遗留实例。
+- `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI REST API，并写入或更新 `CloudInstance` 归属记录；若管理员未配置 Lab4AI 凭证或平台 API 返回失败，ToolRegistry 直接返回失败，不再通过 Runner/mock 分支绕过真实执行。
 
 ### 5.7 算力限额
 
@@ -444,15 +532,17 @@ CloudInstance
 ├── user_id
 ├── conversation_id
 ├── server_id
-├── name
+├── instance_id
+├── instance_type
+├── gpu_count
+├── ssh_host / ssh_port / ssh_user
 ├── status
-├── gpu_type
 ├── start_time
 ├── stop_time
 └── raw_payload
 ```
 
-旧的 `ClawInstance` 命名属于历史遗留。后续迁移时应改为 `Conversation` 和 `CloudInstance`，旧接口只作为兼容层保留或删除。
+历史遗留的旧实例命名已迁移到 `Conversation` 和 `CloudInstance`。后续清理重点是删除旧接口文档、兼容测试和前端引用，避免继续出现 `claw-instances` 相关命名。
 
 ## 7. API 设计
 
@@ -530,27 +620,29 @@ CloudInstance
 - ChatPage 已支持 Agent Markdown 渲染，消息底部显示时间和复制按钮；Tool Events 已移动到右侧栏展示。
 - 配额查询和前端展示。
 - SkillLoader 最小实现：扫描 `skills/*/SKILL.md`、解析 frontmatter、加载 `lab4ai-auto-reproduct/project_reproduce.yaml` 并注入 Agent Loop system prompt。
-- MVP 模拟 Tool：创建实例、SSH 执行、停止实例。
+- Skill Workflow Runtime 首版：解析 `project_reproduce.yaml`，持久化 step 状态，推送 workflow step 事件，并在失败、异常或停止时根据 `workflow_resources` 兜底释放 CPU/GPU 实例。
+- Lab4AI Tool 真实 API：`lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI API，并写入 `CloudInstance` 归属记录；不再保留 Runner/mock 路径。
 
 当前限制：
 
-- Lab4AI 创建 / 停止实例仍未接入真实 API。
+- Lab4AI 创建 / 停止 / 查询已走真实 API 代码路径，仍需要真实凭证与线上环境联调；缺少凭证时会失败，不再自动模拟计费实例。
 - SSH 执行仍是模拟。
 - Agent Loop 仍以固定工具链为主，尚未升级为完整 tool-use 循环。
 - `api_key_encrypted` 字段尚未接入真实加密。
 - `skills/` 目录已支持最小解析和注入，但仍需继续标准化元数据、`allowed_tools` 和任务类型映射。
+- `Skill Workflow Runtime` 仍是首版状态机：step executor 目前按已知 9 步映射到后端 Tool，后续需要把更多 step 内部逻辑替换为真实 SSH、文件写入、报告生成和更细粒度进度。
 - memory 仍是基于 `Conversation.metadata` 的轻量结构化实现，尚未接入向量检索或跨对话长期记忆。
 - HITL 已接入统一 Tool 确认管线，但还不是完整权限系统，后续需要覆盖真实 Lab4AI、真实 SSH、文件写入等更多动作。
-- 旧 `claw-instances` 接口和相关命名仍有历史遗留，后续需要迁移或删除。
+- 旧 `claw-instances` 接口、文档和相关命名仍需优先清理，当前主链路只保留 `cloud-instances` 与 `conversations`。
 
 ## 10. 下一步
 
-1. 接入真实 Lab4AI API，完成实例创建、停止、查询和归属记录。
-2. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
-3. 将 Agent Loop 升级为模型驱动的 tool-use 循环。
-4. 继续标准化 `skills/` 元数据、`allowed_tools` 和 prompt 模板。
-5. 把 HITL 权限系统扩展到真实 Lab4AI、真实 SSH、文件写入等高风险 Tool，并补齐审计记录。
-6. 为对话 memory 增加跨对话长期记忆和检索策略。
-7. 为用户 LLM API Key 接入加密存储。
-8. 清理旧 `claw-instances` API、模型命名和测试。
+1. 优先清理旧 `claw-instances` 相关接口、文档、测试和前端引用，只保留 `cloud-instances` 与 `conversations` 主链路。
+2. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
+3. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
+4. 将 Agent Loop 升级为模型驱动的 tool-use 循环。
+5. 深化 `Skill Workflow Runtime`：把 step 内部的 SSH、文件写入、报告生成和更细粒度 `workflow_step_progress` 接到真实 executor。
+6. 把 HITL 权限系统扩展到真实 Lab4AI、真实 SSH、文件写入等高风险 Tool，并补齐审计记录。
+7. 为对话 memory 增加跨对话长期记忆和检索策略。
+8. 为用户 LLM API Key 接入加密存储。
 9. 完成管理员前端页面。

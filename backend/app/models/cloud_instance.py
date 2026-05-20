@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -26,11 +26,12 @@ class CloudInstance(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
-    claw_instance_id: Mapped[int | None] = mapped_column(
-        ForeignKey("claw_instances.id"), index=True, nullable=True
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id"), index=True, nullable=True
     )
 
     server_id: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    instance_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     instance_type: Mapped[CloudInstanceType] = mapped_column(
         Enum(CloudInstanceType), nullable=False
     )
@@ -38,10 +39,13 @@ class CloudInstance(Base):
 
     ssh_host: Mapped[str | None] = mapped_column(String(128), nullable=True)
     ssh_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ssh_user: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ssh_pass: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     status: Mapped[CloudInstanceStatus] = mapped_column(
         Enum(CloudInstanceStatus), default=CloudInstanceStatus.RUNNING, nullable=False
     )
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
