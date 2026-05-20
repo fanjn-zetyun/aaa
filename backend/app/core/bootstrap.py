@@ -35,6 +35,7 @@ async def ensure_default_admin() -> None:
 
         admin = User(
             username=settings.default_admin_username,
+            institution="Platform Admin",
             password_hash=hash_password(settings.default_admin_password),
             role=UserRole.ADMIN,
         )

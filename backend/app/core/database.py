@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -49,3 +50,16 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_compatible_schema)
+
+
+def _ensure_compatible_schema(sync_conn) -> None:
+    """Small development migration for SQLite databases created before Alembic."""
+    inspector = inspect(sync_conn)
+    if "users" not in inspector.get_table_names():
+        return
+    user_columns = {column["name"] for column in inspector.get_columns("users")}
+    if "institution" not in user_columns:
+        sync_conn.execute(
+            text("ALTER TABLE users ADD COLUMN institution VARCHAR(128) NOT NULL DEFAULT ''")
+        )

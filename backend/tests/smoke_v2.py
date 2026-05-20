@@ -19,17 +19,21 @@ async def main() -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with app.router.lifespan_context(app):
-            username = f"smoke_v2_{uuid4().hex[:8]}"
+            phone = f"139{str(int(uuid4().hex[:8], 16))[-8:].zfill(8)}"
             password = "secret123"
             r = await client.post(
                 "/api/auth/register",
-                json={"username": username, "password": password},
+                json={
+                    "phone": phone,
+                    "institution": "Smoke Test Lab",
+                    "password": password,
+                },
             )
             assert r.status_code in (201, 409), r.text
 
             r = await client.post(
                 "/api/auth/login",
-                data={"username": username, "password": password},
+                data={"username": phone, "password": password},
             )
             assert r.status_code == 200, r.text
             headers = {"Authorization": f"Bearer {r.json()['access_token']}"}

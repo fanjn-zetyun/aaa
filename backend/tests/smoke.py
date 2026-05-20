@@ -27,7 +27,11 @@ async def main() -> None:
             # 注册新用户
             r = await client.post(
                 "/api/auth/register",
-                json={"username": "smoke_user", "password": "secret123"},
+                json={
+                    "phone": "13800138888",
+                    "institution": "Smoke Test Lab",
+                    "password": "secret123",
+                },
             )
             assert r.status_code in (201, 409), r.text
             print("[ok] register ->", r.status_code)
@@ -35,7 +39,7 @@ async def main() -> None:
             # 登录
             r = await client.post(
                 "/api/auth/login",
-                data={"username": "smoke_user", "password": "secret123"},
+                data={"username": "13800138888", "password": "secret123"},
             )
             assert r.status_code == 200, r.text
             token = r.json()["access_token"]
