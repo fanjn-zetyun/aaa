@@ -519,25 +519,18 @@ class ToolRegistry:
         dependency_cmds = _as_list(payload.get("dependency_cmds"))
         data_cmds = _as_list(payload.get("data_cmds"))
         weight_cmds = _as_list(payload.get("weight_cmds"))
-        commands = [
-            "set -e",
-            f"BASE=/workspace/user-data/codelab/{_safe_remote_name(repo_name)}",
-            "mkdir -p \"$BASE/code\" \"$BASE/data\" \"$BASE/model\"",
-            "cd \"$BASE/code\"",
-            "ln -sfn ../data data",
-            "ln -sfn ../model model",
-        ]
-        commands.extend(dependency_cmds)
-        commands.extend(data_cmds)
-        commands.extend(weight_cmds)
-        if len(commands) == 6:
-            commands.append("echo 'No project prep commands were provided; workspace skeleton is ready.'")
-        command = " && ".join(f"({cmd})" for cmd in commands)
+        command = _remote_project_prep_command(
+            repo_name=repo_name,
+            python_version=str(payload.get("python_version") or "3.10"),
+            dependency_cmds=dependency_cmds,
+            data_cmds=data_cmds,
+            weight_cmds=weight_cmds,
+        )
         result = await self._ssh_execute(
             {
                 **payload,
                 "command": command,
-                "timeout": _as_int(payload.get("timeout"), default=1800),
+                "timeout": _as_int(payload.get("timeout"), default=7200),
             },
             context,
         )
@@ -545,7 +538,13 @@ class ToolRegistry:
             "remote_project_prep",
             result.content,
             ok=result.ok,
-            metadata={**result.metadata, "repo_name": repo_name},
+            metadata={
+                **result.metadata,
+                "repo_name": repo_name,
+                "dependency_cmds_count": len(dependency_cmds),
+                "data_cmds_count": len(data_cmds),
+                "weight_cmds_count": len(weight_cmds),
+            },
         )
 
     async def _file_write(
@@ -1139,6 +1138,28 @@ def _build_tool_definitions(skill_runtime: SkillRuntime) -> dict[str, ToolDefini
             audit_category="ssh",
             confirmation_reason="兼容旧 SSH 技能的远程命令执行，必须通过后端 SSH 审计路径。",
         ),
+        "remote_project_prep": ToolDefinition(
+            name="remote_project_prep",
+            description="执行 lab4ai-project-prep 的后端安全适配器：创建或复用 Conda 环境、安装依赖、下载数据和权重。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "repo_name": {"type": "string"},
+                    "python_version": {"type": "string"},
+                    "dependency_cmds": {"type": "array", "items": {"type": "string"}},
+                    "data_cmds": {"type": "array", "items": {"type": "string"}},
+                    "weight_cmds": {"type": "array", "items": {"type": "string"}},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["repo_name", "dependency_cmds"],
+            },
+            confirmation_policy="risky",
+            risk_level="high",
+            audit_category="ssh",
+            confirmation_reason="会在远程实例安装依赖、写入工作区或下载数据/权重。",
+        ),
         "lab4ai_stop_instance": ToolDefinition(
             name="lab4ai_stop_instance",
             description="停止并释放当前对话绑定的 Lab4AI 云实例。",
@@ -1392,6 +1413,125 @@ def _as_list(value: object) -> list[str]:
         return [str(item) for item in value if str(item).strip()]
     text = str(value).strip()
     return [text] if text else []
+
+
+def _remote_project_prep_command(
+    *,
+    repo_name: str,
+    python_version: str,
+    dependency_cmds: list[str],
+    data_cmds: list[str],
+    weight_cmds: list[str],
+) -> str:
+    safe_name = _safe_remote_name(repo_name)
+    base_dir = f"/workspace/user-data/codelab/{safe_name}"
+    code_dir = f"{base_dir}/code"
+    data_dir = f"{base_dir}/data"
+    model_dir = f"{base_dir}/model"
+    conda_env = f"/workspace/envs/{safe_name}"
+    pyver = re.sub(r"[^0-9.]+", "", python_version).strip(".") or "3.10"
+
+    lines = [
+        "set -e",
+        "export http_proxy=${http_proxy:-http://10.201.85.65:1080}",
+        "export https_proxy=${https_proxy:-http://10.201.85.65:1080}",
+        "export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}",
+        "export PATH=$CUDA_HOME/bin:$PATH",
+        f"BASE={_shell_quote(base_dir)}",
+        f"CODE_DIR={_shell_quote(code_dir)}",
+        f"DATA_DIR={_shell_quote(data_dir)}",
+        f"MODEL_DIR={_shell_quote(model_dir)}",
+        f"CONDA_ENV={_shell_quote(conda_env)}",
+        'mkdir -p "$CODE_DIR" "$DATA_DIR" "$MODEL_DIR"',
+        'test -d "$CODE_DIR"',
+        'cd "$CODE_DIR"',
+        'ln -sfn ../data data',
+        'ln -sfn ../model model',
+        "if [ ! -x /opt/conda/bin/conda ]; then echo 'Conda not found at /opt/conda/bin/conda'; exit 127; fi",
+        'if [ -x "$CONDA_ENV/bin/python" ]; then',
+        '  echo "Conda env already exists: $CONDA_ENV"',
+        "else",
+        f"  /opt/conda/bin/conda create --prefix \"$CONDA_ENV\" python={pyver} -y",
+        "fi",
+        'source /opt/conda/bin/activate "$CONDA_ENV"',
+        "python -m pip install --upgrade pip",
+        "python -m pip install gdown",
+        'echo "Active Python: $(python --version)"',
+    ]
+
+    if dependency_cmds:
+        lines.append("echo '[4/8] Installing dependency_cmds'")
+        lines.extend(_retry_command_lines(dependency_cmds, label="dependency", sleep_seconds=5))
+    else:
+        lines.append("echo '[4/8] No dependency_cmds provided'")
+
+    if data_cmds:
+        lines.append("echo '[5/8] Running data_cmds'")
+        lines.extend(_plain_command_lines(data_cmds, label="data"))
+    else:
+        lines.append("echo '[5/8] No data_cmds provided'")
+
+    if weight_cmds:
+        lines.extend(
+            [
+                "echo '[6/8] Running weight_cmds'",
+                "export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}",
+            ]
+        )
+        lines.extend(_retry_command_lines(weight_cmds, label="weight", sleep_seconds=10))
+        lines.extend(
+            [
+                'EMPTY_FILES=$(find "$MODEL_DIR" -type f \\( -name \'*.pt\' -o -name \'*.pth\' -o -name \'*.safetensors\' -o -name \'*.pkl\' -o -name \'*.bin\' -o -name \'*.npz\' \\) -size 0 2>/dev/null || true)',
+                'if [ -n "$EMPTY_FILES" ]; then echo "Zero-byte model files found"; echo "$EMPTY_FILES"; exit 1; fi',
+            ]
+        )
+    else:
+        lines.append("echo '[6/8] No weight_cmds provided'")
+
+    lines.extend(
+        [
+            "echo '[7/8] Import smoke test'",
+            'if [ -f "$CODE_DIR/requirements.txt" ]; then',
+            "  FAILED_IMPORTS=''",
+            "  for PKG in $(grep -v '^#' \"$CODE_DIR/requirements.txt\" | grep -v '^$' | sed 's/[>=<!=].*//' | sed 's/\\[.*//' | tr '-' '_' | head -30); do",
+            '    python -c "import $PKG" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS $PKG"',
+            "  done",
+            '  if [ -n "$FAILED_IMPORTS" ]; then echo "Non-fatal import failures:$FAILED_IMPORTS"; fi',
+            "fi",
+            "echo REMOTE_PROJECT_PREP_SUCCESS",
+        ]
+    )
+    return "bash -lc " + _shell_quote("\n".join(lines))
+
+
+def _retry_command_lines(commands: list[str], *, label: str, sleep_seconds: int) -> list[str]:
+    lines: list[str] = []
+    total = len(commands)
+    for index, command in enumerate(commands, start=1):
+        lines.append(f"echo '[{label} {index}/{total}]'")
+        lines.append(
+            "{ "
+            + command
+            + "; } || { echo 'retry 1/2'; sleep "
+            + str(sleep_seconds)
+            + "; "
+            + command
+            + "; } || { echo 'retry 2/2'; sleep "
+            + str(sleep_seconds)
+            + "; "
+            + command
+            + "; }"
+        )
+    return lines
+
+
+def _plain_command_lines(commands: list[str], *, label: str) -> list[str]:
+    lines: list[str] = []
+    total = len(commands)
+    for index, command in enumerate(commands, start=1):
+        lines.append(f"echo '[{label} {index}/{total}]'")
+        lines.append(command)
+    return lines
 
 
 def _safe_remote_name(value: str) -> str:

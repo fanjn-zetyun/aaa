@@ -97,7 +97,6 @@ TOOL_EFFECTS = {
 TOOL_CONTRACT_ALIASES = {
     "claw_shell_run": "ssh_execute",
     "ssh_essentials_execute": "ssh_execute",
-    "remote_project_prep": "ssh_execute",
     "generate_repro_report": "repro_report",
 }
 
@@ -108,12 +107,14 @@ STEP_COMPLETION_CONTRACTS = {
         required_evidence=("cpu_instance_created",),
     ),
     "step_4_cpu_env_setup": StepCompletionContract(
-        required_tools=("ssh_execute",),
+        required_tools=("ssh_execute", "remote_project_prep"),
         required_effects=("remote_execute", "remote_write"),
         required_evidence=(
+            "clone_completed",
             "remote_workspace_verified",
             "git_repo_verified",
             "dependency_install_attempted",
+            "project_prep_completed",
         ),
     ),
     "step_5_release_cpu": StepCompletionContract(
@@ -546,23 +547,42 @@ class SkillWorkflowRunner:
 
         if step.id == "step_4_cpu_env_setup":
             server_id = workflow_resource_server_id(metadata, "cpu")
-            command = _cpu_prepare_command(metadata, repo_name)
-            result, metadata, paused = await self._invoke_step_tool(
+            clone_result, metadata, paused = await self._invoke_step_tool(
                 metadata,
                 step,
-                "ssh_execute",
+                "claw_shell_run",
                 {
                     "server_id": server_id,
                     "resource_kind": "CPU",
-                    "command": command,
+                    "command": _cpu_clone_command(metadata, repo_name),
                     "timeout": 600,
+                    "connect_retries": 30,
+                    "connect_retry_interval": 10,
                 },
             )
             if paused:
                 return metadata, outputs, True
-            if result:
-                outputs.append(f"{result.name}: {result.content}")
-            if not result or result.ok is False:
+            if clone_result:
+                outputs.append(f"{clone_result.name}: {clone_result.content}")
+            if not clone_result or clone_result.ok is False:
+                return metadata, outputs, False
+
+            prep_result, metadata, paused = await self._invoke_step_tool(
+                metadata,
+                step,
+                "remote_project_prep",
+                {
+                    "server_id": server_id,
+                    "resource_kind": "CPU",
+                    **_project_prep_payload(metadata, repo_name),
+                    "timeout": 7200,
+                },
+            )
+            if paused:
+                return metadata, outputs, True
+            if prep_result:
+                outputs.append(f"{prep_result.name}: {prep_result.content}")
+            if not prep_result or prep_result.ok is False:
                 return metadata, outputs, False
             verify_result, metadata, paused = await self._invoke_step_tool(
                 metadata,
@@ -585,10 +605,12 @@ class SkillWorkflowRunner:
             metadata = set_workflow_step_evidence(
                 metadata,
                 step,
+                clone_completed=True,
                 remote_workspace_verified=True,
                 git_repo_verified=True,
                 dependency_install_attempted=True,
-                completion_source="fixed_executor",
+                project_prep_completed=True,
+                completion_source="skill_contract_executor",
                 verify_stdout_tail=str(verify_result.metadata.get("stdout") or "")[-1000:],
             )
             return (
@@ -1638,7 +1660,7 @@ def _artifact_paths(result: ToolResult | None) -> list[str]:
     return [str(path)] if path else []
 
 
-def _cpu_prepare_command(metadata: dict, repo_name: str) -> str:
+def _cpu_clone_command(metadata: dict, repo_name: str) -> str:
     repo_url = str(metadata.get("github_url") or "").strip()
     if not repo_url:
         raise RuntimeError("缺少 github_url，无法准备远程项目环境")
@@ -1653,15 +1675,7 @@ def _cpu_prepare_command(metadata: dict, repo_name: str) -> str:
         "else git fetch --all --prune; fi; "
         "ln -sfn ../data data; "
         "ln -sfn ../model model; "
-        'PYTHON_BIN="$(command -v python3 || command -v python || true)"; '
-        "if [ -f requirements.txt ]; then "
-        'if [ -n "$PYTHON_BIN" ] && "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; '
-        'then "$PYTHON_BIN" -m pip install -r requirements.txt; '
-        "elif command -v pip3 >/dev/null 2>&1; then pip3 install -r requirements.txt; "
-        "elif command -v pip >/dev/null 2>&1; then pip install -r requirements.txt; "
-        "else echo 'No python/pip executable found for requirements install'; exit 127; fi; "
-        "elif [ -f environment.yml ]; then echo 'environment.yml detected; manual conda solve may be required'; "
-        "else echo 'No requirements.txt or environment.yml found'; fi"
+        "echo CPU_CLONE_READY"
     )
 
 
@@ -1682,6 +1696,46 @@ def _cpu_prepare_verify_command(repo_name: str) -> str:
         "else echo dependency_manifest=none; fi; "
         "echo REMOTE_WORKSPACE_READY"
     )
+
+
+def _project_prep_payload(metadata: dict, repo_name: str) -> dict[str, object]:
+    workflow_results = metadata.get("workflow_results")
+    if not isinstance(workflow_results, dict):
+        workflow_results = {}
+
+    dependency_cmds = _string_list(workflow_results.get("dependency_cmds"))
+    if not dependency_cmds:
+        dependency_cmds = [
+            "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+            "if [ -f requirements.txt ]; then pip install -r requirements.txt; else echo 'No requirements.txt found'; fi",
+        ]
+
+    return {
+        "repo_name": repo_name,
+        "python_version": _python_version_from_results(workflow_results),
+        "dependency_cmds": dependency_cmds,
+        "data_cmds": _string_list(workflow_results.get("data_cmds")),
+        "weight_cmds": _string_list(workflow_results.get("weight_cmds")),
+    }
+
+
+def _python_version_from_results(workflow_results: dict) -> str:
+    for key in ("python_version", "required_python", "python"):
+        value = str(workflow_results.get(key) or "").strip()
+        if value:
+            match = re.search(r"\d+(?:\.\d+){1,2}", value)
+            if match:
+                return match.group(0)
+    return "3.10"
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 def _gpu_smoke_command(repo_name: str) -> str:
