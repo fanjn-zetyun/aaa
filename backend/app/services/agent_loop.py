@@ -1176,6 +1176,15 @@ def _admin_config_step(tool_name: str, tool_input: dict[str, object]) -> str:
 
 
 def _step_tool_use_guidance(metadata: dict, step_id: str) -> str:
+    if step_id == "step_7_gpu_execution":
+        server_id = _workflow_resource_server_id(metadata, "gpu")
+        return (
+            f"当前 GPU 实例 server_id：{server_id or '未记录'}。\n"
+            "Step 7 必须按 skill instruction 的语义执行：先等待 SSH 就绪，再在同一段远程 Bash 中激活 "
+            "Conda、注入 CUDA/Hopper 编译环境、执行 import 预检、动态 smoke test 并写入 env_patches.md。"
+            "`claw_shell_run` 会由后端映射到受控 `ssh_execute`；如果你输出旧式 sshpass wrapper，"
+            "后端只会提取远程 Bash 并使用当前 GPU 实例的受控连接参数执行。不要留下 `{{...}}` 模板变量。"
+        )
     if step_id == "step_4_cpu_env_setup":
         server_id = _workflow_resource_server_id(metadata, "cpu")
         return (

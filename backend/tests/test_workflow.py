@@ -240,7 +240,7 @@ tasks:
 
 
 @pytest.mark.asyncio
-async def test_workflow_runner_gpu_smoke_uses_available_python_binary():
+async def test_workflow_runner_gpu_execution_uses_claw_shell_retry_and_conda():
     workflow = parse_workflow(
         """
 version: demo/v1
@@ -287,16 +287,24 @@ tasks:
     )
 
     assert result.paused is False
-    assert tool_calls[0][0] == "ssh_execute"
+    assert tool_calls[0][0] == "claw_shell_run"
     assert tool_calls[0][1]["server_id"] == "gpu-1"
-    assert "command -v python3 || command -v python" in tool_calls[0][1]["command"]
-    assert "\"$PYTHON_BIN\" - <<'PY'" in tool_calls[0][1]["command"]
+    assert tool_calls[0][1]["connect_retries"] == 30
+    assert tool_calls[0][1]["connect_retry_interval"] == 10
+    assert "source /opt/conda/bin/activate" in tool_calls[0][1]["command"]
+    assert "TORCH_CUDA_ARCH_LIST=\"9.0\"" in tool_calls[0][1]["command"]
+    assert "repro_run.log" in tool_calls[0][1]["command"]
+    assert "env_patches.md" in tool_calls[0][1]["command"]
+    assert "command -v python3 || command -v python" not in tool_calls[0][1]["command"]
     assert tool_calls[1][0] == "ssh_execute"
     assert "git rev-parse --is-inside-work-tree" in tool_calls[1][1]["command"]
     step = workflow_step_state(result.metadata, "step_7_gpu_execution")
     assert step["status"] == "completed"
+    assert step["evidence"]["gpu_ssh_probe_completed"] is True
     assert step["evidence"]["gpu_workspace_verified"] is True
+    assert step["evidence"]["gpu_runtime_env_configured"] is True
     assert step["evidence"]["smoke_test_executed"] is True
+    assert step["evidence"]["env_patches_recorded"] is True
 
 
 @pytest.mark.asyncio
