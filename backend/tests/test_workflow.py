@@ -220,6 +220,8 @@ tasks:
     assert tool_calls[0][0] == "ssh_execute"
     assert tool_calls[0][1]["server_id"] == "cpu-1"
     assert "git clone --recursive" in tool_calls[0][1]["command"]
+    assert "command -v python3 || command -v python" in tool_calls[0][1]["command"]
+    assert '"$PYTHON_BIN" -m pip install -r requirements.txt' in tool_calls[0][1]["command"]
     assert tool_calls[1][0] == "ssh_execute"
     assert "git rev-parse --is-inside-work-tree" in tool_calls[1][1]["command"]
     step = workflow_step_state(result.metadata, "step_4_cpu_env_setup")
@@ -228,6 +230,66 @@ tasks:
     assert step["evidence"]["git_repo_verified"] is True
     assert step["evidence"]["dependency_install_attempted"] is True
     assert step["output"] == "CPU 环境准备命令已真实执行完成。"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_gpu_smoke_uses_available_python_binary():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_7_gpu_execution
+    name: GPU smoke
+"""
+    )
+    events: list[dict] = []
+    tool_calls: list[tuple[str, dict]] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        tool_calls.append((tool_name, tool_input))
+        return (
+            ToolResult(
+                tool_name,
+                "gpu ssh ok",
+                metadata={"exit_code": 0, "stdout": "ok", "stderr": ""},
+            ),
+            metadata,
+            False,
+        )
+
+    async def write(metadata):
+        return None
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+    )
+
+    result = await runner.run(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "github_url": "https://github.com/example/demo",
+                "workflow_resources": {"gpu": {"server_id": "gpu-1"}},
+            }
+        )
+    )
+
+    assert result.paused is False
+    assert tool_calls[0][0] == "ssh_execute"
+    assert tool_calls[0][1]["server_id"] == "gpu-1"
+    assert "command -v python3 || command -v python" in tool_calls[0][1]["command"]
+    assert "\"$PYTHON_BIN\" - <<'PY'" in tool_calls[0][1]["command"]
+    assert tool_calls[1][0] == "ssh_execute"
+    assert "git rev-parse --is-inside-work-tree" in tool_calls[1][1]["command"]
+    step = workflow_step_state(result.metadata, "step_7_gpu_execution")
+    assert step["status"] == "completed"
+    assert step["evidence"]["gpu_workspace_verified"] is True
+    assert step["evidence"]["smoke_test_executed"] is True
 
 
 @pytest.mark.asyncio

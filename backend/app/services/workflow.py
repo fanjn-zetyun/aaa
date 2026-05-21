@@ -1653,7 +1653,13 @@ def _cpu_prepare_command(metadata: dict, repo_name: str) -> str:
         "else git fetch --all --prune; fi; "
         "ln -sfn ../data data; "
         "ln -sfn ../model model; "
-        "if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; "
+        'PYTHON_BIN="$(command -v python3 || command -v python || true)"; '
+        "if [ -f requirements.txt ]; then "
+        'if [ -n "$PYTHON_BIN" ] && "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; '
+        'then "$PYTHON_BIN" -m pip install -r requirements.txt; '
+        "elif command -v pip3 >/dev/null 2>&1; then pip3 install -r requirements.txt; "
+        "elif command -v pip >/dev/null 2>&1; then pip install -r requirements.txt; "
+        "else echo 'No python/pip executable found for requirements install'; exit 127; fi; "
         "elif [ -f environment.yml ]; then echo 'environment.yml detected; manual conda solve may be required'; "
         "else echo 'No requirements.txt or environment.yml found'; fi"
     )
@@ -1683,7 +1689,9 @@ def _gpu_smoke_command(repo_name: str) -> str:
     return (
         "set -e; "
         f"cd {base_dir}; "
-        "python - <<'PY'\n"
+        'PYTHON_BIN="$(command -v python3 || command -v python || true)"; '
+        'if [ -z "$PYTHON_BIN" ]; then echo "No python executable found"; exit 127; fi; '
+        '"$PYTHON_BIN" - <<\'PY\'\n'
         "import os, sys\n"
         "print('python', sys.version.split()[0])\n"
         "try:\n"
