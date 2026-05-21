@@ -52,7 +52,7 @@ tasks:
     audit = workflow_step_state(metadata, "step_1_audit")
     cpu = workflow_step_state(metadata, "step_3_deploy_cpu")
     assert audit["attempts"] == 0
-    assert audit["allowed_tools"] == ["analyze_repo"]
+    assert audit["allowed_tools"] == ["analyze_repo", "analyze_paper"]
     assert audit["tool_calls"] == []
     assert audit["artifacts"] == []
     assert audit["progress"] == []
@@ -85,7 +85,7 @@ tasks:
     async def invoke(metadata, tool_name, tool_input):
         if tool_name == "lab4ai_create_instance":
             return None, metadata, True
-        return ToolResult(tool_name, "ok"), metadata, False
+        return ToolResult(tool_name, "ok", metadata={"score": 80}), metadata, False
 
     async def write(metadata):
         stored.append(metadata)
@@ -138,7 +138,8 @@ tasks:
             return None, metadata, True
         if tool_name == "lab4ai_create_instance":
             create_call_ids.append(str(tool_input["tool_call_id"]))
-        return ToolResult(tool_name, "ok", metadata={"server_id": "server-1"}), metadata, False
+        metadata_payload = {"server_id": "server-1"} if tool_name == "lab4ai_create_instance" else {"score": 80}
+        return ToolResult(tool_name, "ok", metadata=metadata_payload), metadata, False
 
     async def write(metadata):
         return None
@@ -165,7 +166,7 @@ tasks:
 
 
 @pytest.mark.asyncio
-async def test_workflow_runner_allows_step_model_tool_hook():
+async def test_workflow_runner_runs_fixed_executor_after_step_model_tool_hook():
     workflow = parse_workflow(
         """
 version: demo/v1
@@ -177,16 +178,79 @@ tasks:
     )
     events: list[dict] = []
     hook_calls: list[str] = []
+    tool_calls: list[tuple[str, dict]] = []
 
     async def invoke(metadata, tool_name, tool_input):
-        raise AssertionError("fixed executor should not run when hook handles the step")
+        tool_calls.append((tool_name, tool_input))
+        return ToolResult(tool_name, "fixed ssh ok", metadata={"exit_code": 0}), metadata, False
 
     async def write(metadata):
         return None
 
     async def step_hook(metadata, step):
         hook_calls.append(step.id)
-        return metadata, ["ssh_execute: ok"], False, True
+        return metadata, ["file_system_read: ok"], False, True
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+        run_step_model_tools=step_hook,
+    )
+
+    result = await runner.run(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "github_url": "https://github.com/example/demo",
+                "workflow_resources": {"cpu": {"server_id": "cpu-1"}},
+            }
+        )
+    )
+
+    assert result.paused is False
+    assert result.tool_outputs == [
+        "file_system_read: ok",
+        "ssh_execute: fixed ssh ok",
+        "ssh_execute: fixed ssh ok",
+    ]
+    assert hook_calls == ["step_4_cpu_env_setup"]
+    assert tool_calls[0][0] == "ssh_execute"
+    assert tool_calls[0][1]["server_id"] == "cpu-1"
+    assert "git clone --recursive" in tool_calls[0][1]["command"]
+    assert tool_calls[1][0] == "ssh_execute"
+    assert "git rev-parse --is-inside-work-tree" in tool_calls[1][1]["command"]
+    step = workflow_step_state(result.metadata, "step_4_cpu_env_setup")
+    assert step["status"] == "completed"
+    assert step["evidence"]["remote_workspace_verified"] is True
+    assert step["evidence"]["git_repo_verified"] is True
+    assert step["evidence"]["dependency_install_attempted"] is True
+    assert step["output"] == "CPU 环境准备命令已真实执行完成。"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_does_not_fallback_after_model_tool_failure():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_4_cpu_env_setup
+    name: CPU setup
+"""
+    )
+    events: list[dict] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        raise AssertionError("fixed executor must not run after model tool failure")
+
+    async def write(metadata):
+        return None
+
+    async def step_hook(metadata, step):
+        return metadata, ["ssh_execute: 未渲染模板变量"], False, True, True
 
     runner = SkillWorkflowRunner(
         workflow,
@@ -199,10 +263,108 @@ tasks:
 
     result = await runner.run(mark_running({"task_type": "reproduce"}))
 
-    assert result.paused is False
-    assert result.tool_outputs == ["ssh_execute: ok"]
-    assert hook_calls == ["step_4_cpu_env_setup"]
-    assert workflow_step_state(result.metadata, "step_4_cpu_env_setup")["status"] == "completed"
+    assert result.failed is True
+    step = workflow_step_state(result.metadata, "step_4_cpu_env_setup")
+    assert step["status"] == "failed"
+    assert "未渲染模板变量" in step["error"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_rejects_completed_step_without_required_evidence():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_8_generate_report
+    name: Report
+"""
+    )
+    events: list[dict] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        return ToolResult(tool_name, "report ok", metadata={}), metadata, False
+
+    async def write(metadata):
+        return None
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+    )
+
+    result = await runner.run(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "github_url": "https://github.com/example/demo",
+            }
+        )
+    )
+
+    assert result.failed is True
+    step = workflow_step_state(result.metadata, "step_8_generate_report")
+    assert step["status"] == "failed"
+    assert "missing evidence: report_generated" in step["error"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_rejects_previous_completion_without_contract_evidence():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_8_generate_report
+    name: Report
+"""
+    )
+    events: list[dict] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        raise AssertionError("completed step with invalid contract must not be skipped or rerun")
+
+    async def write(metadata):
+        return None
+
+    metadata = ensure_workflow_metadata(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "github_url": "https://github.com/example/demo",
+            }
+        ),
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+    )
+    step = workflow_step_state(metadata, "step_8_generate_report")
+    step["status"] = "completed"
+    step["tool_calls"] = [
+        {
+            "tool_call_id": "toolu_report",
+            "name": "repro_report",
+            "status": "completed",
+            "ok": True,
+        }
+    ]
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+    )
+
+    result = await runner.run(metadata)
+
+    assert result.failed is True
+    step = workflow_step_state(result.metadata, "step_8_generate_report")
+    assert step["status"] == "failed"
+    assert "missing evidence: report_generated" in step["error"]
 
 
 @pytest.mark.asyncio
@@ -221,7 +383,34 @@ tasks:
 
     async def invoke(metadata, tool_name, tool_input):
         calls.append((tool_name, tool_input))
-        return ToolResult(tool_name, "ok", metadata={"repo": "showlab/PhotoDoodle"}), metadata, False
+        if tool_name == "analyze_repo":
+            return (
+                ToolResult(
+                    tool_name,
+                    "repo ok",
+                    metadata={
+                        "repo": "showlab/PhotoDoodle",
+                        "score": 80,
+                        "report_path": "runtime/workspaces/1/PhotoDoodle/repo_audit.md",
+                        "artifact_paths": ["runtime/workspaces/1/PhotoDoodle/repo_audit.md"],
+                    },
+                ),
+                metadata,
+                False,
+            )
+        return (
+            ToolResult(
+                tool_name,
+                "paper ok",
+                metadata={
+                    "score": 90,
+                    "report_path": "runtime/workspaces/1/PhotoDoodle/paper_analysis.md",
+                    "artifact_paths": ["runtime/workspaces/1/PhotoDoodle/paper_analysis.md"],
+                },
+            ),
+            metadata,
+            False,
+        )
 
     async def write(metadata):
         return None
@@ -239,6 +428,7 @@ tasks:
             {
                 "task_type": "reproduce",
                 "github_url": "https://github.com/showlab/PhotoDoodle",
+                "paper_url": "https://arxiv.org/pdf/2502.14397",
             }
         )
     )
@@ -251,8 +441,10 @@ tasks:
         "Start step: Audit",
         "Invoking tool: analyze_repo",
         "Tool completed: analyze_repo",
+        "Invoking tool: analyze_paper",
+        "Tool completed: analyze_paper",
     ]
-    assert len(step["tool_calls"]) == 1
+    assert len(step["tool_calls"]) == 2
     tool_call = step["tool_calls"][0]
     assert tool_call["tool_call_id"].startswith("toolu_")
     assert tool_call["name"] == "analyze_repo"
@@ -263,7 +455,9 @@ tasks:
     assert tool_call["risk_level"] == "low"
     assert calls[0][1]["workflow_step_id"] == "step_1_audit"
     assert calls[0][1]["tool_call_id"] == tool_call["tool_call_id"]
-    assert [event["type"] for event in events].count("workflow_step_progress") == 3
+    assert calls[1][0] == "analyze_paper"
+    assert result.metadata["workflow_results"]["score"] == 84
+    assert [event["type"] for event in events].count("workflow_step_progress") == 5
 
 
 @pytest.mark.asyncio

@@ -19,24 +19,128 @@ WORKFLOW_STEP_FAILED = "failed"
 WORKFLOW_STEP_SKIPPED = "skipped"
 
 STEP_ALLOWED_TOOLS = {
-    "step_1_audit": ["analyze_repo"],
+    "step_1_audit": ["analyze_repo", "analyze_paper"],
     "step_2_condition_check": [],
     "step_3_deploy_cpu": ["lab4ai_create_instance"],
-    "step_4_cpu_env_setup": ["ssh_execute", "file_write"],
+    "step_4_cpu_env_setup": [
+        "ssh_execute",
+        "claw_shell_run",
+        "remote_project_prep",
+        "file_system_read",
+        "file_system_list",
+        "file_write",
+    ],
     "step_5_release_cpu": ["lab4ai_stop_instance"],
     "step_6_deploy_gpu": ["lab4ai_create_instance"],
-    "step_7_gpu_execution": ["ssh_execute", "file_write"],
+    "step_7_gpu_execution": [
+        "ssh_execute",
+        "claw_shell_run",
+        "file_system_read",
+        "file_system_list",
+        "file_write",
+    ],
     "step_8_generate_report": ["repro_report", "file_write"],
     "step_9_release_gpu": ["lab4ai_stop_instance"],
 }
 
 TOOL_AUDIT_METADATA = {
     "analyze_repo": {"audit_category": "general", "risk_level": "low"},
+    "analyze_paper": {"audit_category": "general", "risk_level": "low"},
     "lab4ai_create_instance": {"audit_category": "lab4ai", "risk_level": "high"},
     "lab4ai_stop_instance": {"audit_category": "lab4ai", "risk_level": "medium"},
     "ssh_execute": {"audit_category": "ssh", "risk_level": "high"},
+    "claw_shell_run": {"audit_category": "ssh", "risk_level": "high"},
+    "remote_project_prep": {"audit_category": "ssh", "risk_level": "high"},
+    "file_system_read": {"audit_category": "file", "risk_level": "low"},
+    "file_system_list": {"audit_category": "file", "risk_level": "low"},
     "file_write": {"audit_category": "file", "risk_level": "high"},
     "repro_report": {"audit_category": "workflow", "risk_level": "low"},
+}
+
+FIXED_EXECUTOR_STEPS = {
+    "step_1_audit",
+    "step_2_condition_check",
+    "step_3_deploy_cpu",
+    "step_4_cpu_env_setup",
+    "step_5_release_cpu",
+    "step_6_deploy_gpu",
+    "step_7_gpu_execution",
+    "step_8_generate_report",
+    "step_9_release_gpu",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class StepCompletionContract:
+    required_tools: tuple[str, ...] = ()
+    required_effects: tuple[str, ...] = ()
+    required_evidence: tuple[str, ...] = ()
+
+
+TOOL_EFFECTS = {
+    "analyze_repo": {"analysis"},
+    "analyze_paper": {"analysis"},
+    "lab4ai_create_instance": {"instance_lifecycle"},
+    "lab4ai_stop_instance": {"instance_lifecycle"},
+    "ssh_execute": {"remote_execute", "remote_write"},
+    "claw_shell_run": {"remote_execute", "remote_write"},
+    "ssh_essentials_execute": {"remote_execute", "remote_write"},
+    "remote_project_prep": {"remote_execute", "remote_write"},
+    "file_system_read": {"read_only"},
+    "file_system_list": {"read_only"},
+    "file_write": {"file_write"},
+    "file_system_write": {"file_write"},
+    "repro_report": {"local_artifact"},
+    "generate_repro_report": {"local_artifact"},
+}
+
+TOOL_CONTRACT_ALIASES = {
+    "claw_shell_run": "ssh_execute",
+    "ssh_essentials_execute": "ssh_execute",
+    "remote_project_prep": "ssh_execute",
+    "generate_repro_report": "repro_report",
+}
+
+STEP_COMPLETION_CONTRACTS = {
+    "step_3_deploy_cpu": StepCompletionContract(
+        required_tools=("lab4ai_create_instance",),
+        required_effects=("instance_lifecycle",),
+        required_evidence=("cpu_instance_created",),
+    ),
+    "step_4_cpu_env_setup": StepCompletionContract(
+        required_tools=("ssh_execute",),
+        required_effects=("remote_execute", "remote_write"),
+        required_evidence=(
+            "remote_workspace_verified",
+            "git_repo_verified",
+            "dependency_install_attempted",
+        ),
+    ),
+    "step_5_release_cpu": StepCompletionContract(
+        required_tools=("lab4ai_stop_instance",),
+        required_effects=("instance_lifecycle",),
+        required_evidence=("cpu_instance_released",),
+    ),
+    "step_6_deploy_gpu": StepCompletionContract(
+        required_tools=("lab4ai_create_instance",),
+        required_effects=("instance_lifecycle",),
+        required_evidence=("gpu_instance_created",),
+    ),
+    "step_7_gpu_execution": StepCompletionContract(
+        required_tools=("ssh_execute",),
+        required_effects=("remote_execute",),
+        required_evidence=("gpu_workspace_verified", "smoke_test_executed"),
+    ),
+    "step_8_generate_report": StepCompletionContract(
+        required_tools=("repro_report",),
+        required_effects=("local_artifact",),
+        required_evidence=("report_generated",),
+    ),
+    "step_9_release_gpu": StepCompletionContract(
+        required_tools=("lab4ai_stop_instance",),
+        required_effects=("instance_lifecycle",),
+        required_evidence=("gpu_instance_released",),
+    ),
 }
 
 
@@ -63,7 +167,7 @@ ToolInvoker = Callable[
 ]
 StepModelToolRunner = Callable[
     [dict, WorkflowStep],
-    Awaitable[tuple[dict, list[str], bool, bool]],
+    Awaitable[tuple[dict, list[str], bool, bool] | tuple[dict, list[str], bool, bool, bool]],
 ]
 MetadataWriter = Callable[[dict], Awaitable[None]]
 EventPublisher = Callable[[dict], None]
@@ -115,6 +219,29 @@ class SkillWorkflowRunner:
         for step in self.workflow.steps:
             current = workflow_step_state(metadata, step.id)
             if current and current.get("status") == WORKFLOW_STEP_COMPLETED:
+                contract_error = validate_workflow_step_contract(metadata, step)
+                if contract_error:
+                    metadata = mark_workflow_step(
+                        metadata,
+                        step,
+                        WORKFLOW_STEP_FAILED,
+                        output=contract_error,
+                        error=contract_error,
+                    )
+                    metadata, cleanup_outputs = await cleanup_workflow_resources(
+                        metadata,
+                        self.invoke_tool,
+                        self.write_metadata,
+                        self.publish,
+                    )
+                    tool_outputs.extend(cleanup_outputs)
+                    await self.write_metadata(metadata)
+                    self._publish_step("workflow_step_failed", metadata, step)
+                    return WorkflowRunResult(
+                        metadata=metadata,
+                        tool_outputs=tool_outputs,
+                        failed=True,
+                    )
                 continue
             if not dependencies_completed(metadata, step):
                 metadata = mark_workflow_step(
@@ -210,6 +337,29 @@ class SkillWorkflowRunner:
                     WORKFLOW_STEP_COMPLETED,
                     output=step_output_for(metadata, step.id),
                 )
+            contract_error = validate_workflow_step_contract(metadata, step)
+            if contract_error:
+                metadata = mark_workflow_step(
+                    metadata,
+                    step,
+                    WORKFLOW_STEP_FAILED,
+                    output=contract_error,
+                    error=contract_error,
+                )
+                metadata, cleanup_outputs = await cleanup_workflow_resources(
+                    metadata,
+                    self.invoke_tool,
+                    self.write_metadata,
+                    self.publish,
+                )
+                tool_outputs.extend(cleanup_outputs)
+                await self.write_metadata(metadata)
+                self._publish_step("workflow_step_failed", metadata, step)
+                return WorkflowRunResult(
+                    metadata=metadata,
+                    tool_outputs=tool_outputs,
+                    failed=True,
+                )
             await self.write_metadata(metadata)
             self._publish_step("workflow_step_completed", metadata, step)
 
@@ -225,20 +375,27 @@ class SkillWorkflowRunner:
         repo_name = repo_name_from_url(str(metadata.get("github_url") or "project"))
         outputs: list[str] = []
 
-        metadata, model_outputs, paused, handled = await self._run_model_tools_for_step(
+        metadata, model_outputs, paused, handled, model_failed = await self._run_model_tools_for_step(
             metadata,
             step,
         )
         outputs.extend(model_outputs)
         if paused:
             return metadata, outputs, True
-        if handled:
-            if step.id == "step_7_gpu_execution":
-                metadata = ensure_workflow_results(metadata)
-                metadata["workflow_results"]["smoke_test_metrics"] = {
-                    "status": "passed",
-                    "source": "model_tool_use",
-                }
+        if model_failed:
+            output = "\n".join(model_outputs) or "step 内模型 tool-use 执行失败。"
+            return (
+                mark_workflow_step(
+                    metadata,
+                    step,
+                    WORKFLOW_STEP_FAILED,
+                    output=output,
+                    error=output,
+                ),
+                outputs,
+                False,
+            )
+        if handled and step.id not in FIXED_EXECUTOR_STEPS:
             return (
                 mark_workflow_step(
                     metadata,
@@ -251,7 +408,7 @@ class SkillWorkflowRunner:
             )
 
         if step.id == "step_1_audit":
-            result, metadata, paused = await self._invoke_step_tool(
+            repo_result, metadata, paused = await self._invoke_step_tool(
                 metadata,
                 step,
                 "analyze_repo",
@@ -259,22 +416,59 @@ class SkillWorkflowRunner:
             )
             if paused:
                 return metadata, outputs, True
-            if result:
-                outputs.append(f"{result.name}: {result.content}")
+            if repo_result:
+                outputs.append(f"{repo_result.name}: {repo_result.content}")
+            if not repo_result or repo_result.ok is False:
+                return metadata, outputs, False
+
+            paper_result = None
+            if metadata.get("paper_url"):
+                paper_result, metadata, paused = await self._invoke_step_tool(
+                    metadata,
+                    step,
+                    "analyze_paper",
+                    {
+                        "github_url": metadata.get("github_url"),
+                        "paper_url": metadata.get("paper_url"),
+                    },
+                )
+                if paused:
+                    return metadata, outputs, True
+                if paper_result:
+                    outputs.append(f"{paper_result.name}: {paper_result.content}")
+                if paper_result and paper_result.ok is False:
+                    return metadata, outputs, False
+
+            repo_score = _score_from_tool(repo_result, default=0)
+            paper_score = _score_from_tool(paper_result, default=repo_score)
+            combined_score = _combined_score(repo_score, paper_score, has_paper=bool(paper_result))
             metadata = ensure_workflow_results(metadata)
             metadata["workflow_results"].update(
                 {
                     "repo_name": repo_name,
-                    "score": 75,
-                    "audit_report_path": f"/root/lab4ai/workspace/{repo_name}/{repo_name}_Audit_Report.md",
-                    "baseline_metrics": "MVP 阶段记录论文链接，真实指标待 paper_analysis 接入后提取。",
+                    "score": combined_score,
+                    "repo_score": repo_score,
+                    "paper_score": paper_score if paper_result else None,
+                    "audit_report_path": str(repo_result.metadata.get("report_path") or ""),
+                    "paper_report_path": str(
+                        (paper_result.metadata if paper_result else {}).get("report_path") or ""
+                    ),
+                    "baseline_metrics": (
+                        (paper_result.metadata if paper_result else {}).get("metrics") or {}
+                    ),
+                    "hyperparams": (
+                        (paper_result.metadata if paper_result else {}).get("hyperparams") or {}
+                    ),
+                    "datasets": (
+                        (paper_result.metadata if paper_result else {}).get("datasets") or []
+                    ),
                 }
             )
-            metadata = add_workflow_step_artifact(
-                metadata,
-                step,
-                metadata["workflow_results"]["audit_report_path"],
-            )
+            for artifact in _artifact_paths(repo_result):
+                metadata = add_workflow_step_artifact(metadata, step, artifact)
+            if paper_result:
+                for artifact in _artifact_paths(paper_result):
+                    metadata = add_workflow_step_artifact(metadata, step, artifact)
             metadata = remember_fact(metadata, f"目标仓库：{metadata.get('github_url')}")
             if metadata.get("paper_url"):
                 metadata = remember_fact(metadata, f"论文链接：{metadata.get('paper_url')}")
@@ -283,7 +477,8 @@ class SkillWorkflowRunner:
                     metadata,
                     step,
                     WORKFLOW_STEP_COMPLETED,
-                    output="score=75；已完成项目与论文审计的 MVP 记录。",
+                    output=f"score={combined_score}；已完成仓库审计"
+                    + ("与论文分析。" if paper_result else "。"),
                 ),
                 outputs,
                 False,
@@ -330,6 +525,13 @@ class SkillWorkflowRunner:
                     raw=result.metadata,
                 )
                 metadata = add_workflow_step_artifact(metadata, step, f"lab4ai:cpu:{server_id}")
+                metadata = set_workflow_step_evidence(
+                    metadata,
+                    step,
+                    cpu_instance_created=True,
+                    server_id=server_id,
+                    completion_source="fixed_executor",
+                )
                 metadata = remember_artifact(metadata, f"CPU 实例：{server_id}")
                 return (
                     mark_workflow_step(
@@ -343,23 +545,58 @@ class SkillWorkflowRunner:
                 )
 
         if step.id == "step_4_cpu_env_setup":
-            command = f"prepare CPU workspace and dependencies for {repo_name}"
+            server_id = workflow_resource_server_id(metadata, "cpu")
+            command = _cpu_prepare_command(metadata, repo_name)
             result, metadata, paused = await self._invoke_step_tool(
                 metadata,
                 step,
                 "ssh_execute",
-                {"command": command},
+                {
+                    "server_id": server_id,
+                    "resource_kind": "CPU",
+                    "command": command,
+                    "timeout": 600,
+                },
             )
             if paused:
                 return metadata, outputs, True
             if result:
                 outputs.append(f"{result.name}: {result.content}")
+            if not result or result.ok is False:
+                return metadata, outputs, False
+            verify_result, metadata, paused = await self._invoke_step_tool(
+                metadata,
+                step,
+                "ssh_execute",
+                {
+                    "server_id": server_id,
+                    "resource_kind": "CPU",
+                    "command": _cpu_prepare_verify_command(repo_name),
+                    "timeout": 120,
+                },
+            )
+            if paused:
+                return metadata, outputs, True
+            if verify_result:
+                outputs.append(f"{verify_result.name}: {verify_result.content}")
+            if not verify_result or verify_result.ok is False:
+                return metadata, outputs, False
+            metadata = add_workflow_step_artifact(metadata, step, f"remote:/workspace/user-data/codelab/{repo_name}")
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                remote_workspace_verified=True,
+                git_repo_verified=True,
+                dependency_install_attempted=True,
+                completion_source="fixed_executor",
+                verify_stdout_tail=str(verify_result.metadata.get("stdout") or "")[-1000:],
+            )
             return (
                 mark_workflow_step(
                     metadata,
                     step,
                     WORKFLOW_STEP_COMPLETED,
-                    output="CPU 环境准备已完成（MVP 模拟）。",
+                    output="CPU 环境准备命令已真实执行完成。",
                 ),
                 outputs,
                 False,
@@ -378,6 +615,13 @@ class SkillWorkflowRunner:
             if result:
                 outputs.append(f"{result.name}: {result.content}")
             metadata = set_workflow_resource(metadata, "cpu", released=True)
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                cpu_instance_released=bool(server_id),
+                server_id=server_id or "",
+                completion_source="fixed_executor",
+            )
             return (
                 mark_workflow_step(
                     metadata,
@@ -414,6 +658,13 @@ class SkillWorkflowRunner:
                     raw=result.metadata,
                 )
                 metadata = add_workflow_step_artifact(metadata, step, f"lab4ai:gpu:{server_id}")
+                metadata = set_workflow_step_evidence(
+                    metadata,
+                    step,
+                    gpu_instance_created=True,
+                    server_id=server_id,
+                    completion_source="fixed_executor",
+                )
                 metadata = remember_artifact(metadata, f"GPU 实例：{server_id}")
                 return (
                     mark_workflow_step(
@@ -427,28 +678,63 @@ class SkillWorkflowRunner:
                 )
 
         if step.id == "step_7_gpu_execution":
-            command = f"run GPU smoke test for {repo_name}"
+            server_id = workflow_resource_server_id(metadata, "gpu")
+            command = _gpu_smoke_command(repo_name)
             result, metadata, paused = await self._invoke_step_tool(
                 metadata,
                 step,
                 "ssh_execute",
-                {"command": command},
+                {
+                    "server_id": server_id,
+                    "resource_kind": "GPU",
+                    "command": command,
+                    "timeout": 1800,
+                },
             )
             if paused:
                 return metadata, outputs, True
             if result:
                 outputs.append(f"{result.name}: {result.content}")
+            if not result or result.ok is False:
+                return metadata, outputs, False
+            verify_result, metadata, paused = await self._invoke_step_tool(
+                metadata,
+                step,
+                "ssh_execute",
+                {
+                    "server_id": server_id,
+                    "resource_kind": "GPU",
+                    "command": _gpu_workspace_verify_command(repo_name),
+                    "timeout": 120,
+                },
+            )
+            if paused:
+                return metadata, outputs, True
+            if verify_result:
+                outputs.append(f"{verify_result.name}: {verify_result.content}")
+            if not verify_result or verify_result.ok is False:
+                return metadata, outputs, False
             metadata = ensure_workflow_results(metadata)
             metadata["workflow_results"]["smoke_test_metrics"] = {
-                "status": "passed",
-                "vram": "MVP simulated",
+                "status": "passed" if result.ok else "failed",
+                "exit_code": result.metadata.get("exit_code"),
+                "stdout_tail": str(result.metadata.get("stdout") or "")[-2000:],
+                "stderr_tail": str(result.metadata.get("stderr") or "")[-2000:],
             }
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                gpu_workspace_verified=True,
+                smoke_test_executed=True,
+                completion_source="fixed_executor",
+                verify_stdout_tail=str(verify_result.metadata.get("stdout") or "")[-1000:],
+            )
             return (
                 mark_workflow_step(
                     metadata,
                     step,
                     WORKFLOW_STEP_COMPLETED,
-                    output="GPU Smoke Test 已跑通（MVP 模拟）。",
+                    output="GPU Smoke Test 已真实执行完成。",
                 ),
                 outputs,
                 False,
@@ -459,18 +745,33 @@ class SkillWorkflowRunner:
                 metadata,
                 step,
                 "repro_report",
-                {"repo_name": repo_name},
+                {
+                    "repo_name": repo_name,
+                    "github_url": metadata.get("github_url"),
+                    "paper_url": metadata.get("paper_url"),
+                    "workflow_results": metadata.get("workflow_results") or {},
+                },
             )
             if paused:
                 return metadata, outputs, True
-            report_path = f"/root/lab4ai/workspace/{repo_name}/{repo_name}_Repro_Report.docx"
+            report_path = ""
             if result:
                 outputs.append(f"{result.name}: {result.content}")
                 report_path = str(result.metadata.get("report_path") or report_path)
+            if not result or result.ok is False:
+                return metadata, outputs, False
             metadata = ensure_workflow_results(metadata)
             metadata["workflow_results"]["word_report_path"] = report_path
-            metadata = add_workflow_step_artifact(metadata, step, report_path)
-            metadata = remember_artifact(metadata, f"复现报告：{report_path}")
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                report_generated=bool(report_path),
+                report_path=report_path,
+                completion_source="fixed_executor",
+            )
+            for artifact in _artifact_paths(result):
+                metadata = add_workflow_step_artifact(metadata, step, artifact)
+                metadata = remember_artifact(metadata, f"复现报告：{artifact}")
             return (
                 mark_workflow_step(
                     metadata,
@@ -495,6 +796,13 @@ class SkillWorkflowRunner:
             if result:
                 outputs.append(f"{result.name}: {result.content}")
             metadata = set_workflow_resource(metadata, "gpu", released=True)
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                gpu_instance_released=bool(server_id),
+                server_id=server_id or "",
+                completion_source="fixed_executor",
+            )
             return (
                 mark_workflow_step(
                     metadata,
@@ -653,13 +961,17 @@ class SkillWorkflowRunner:
         self,
         metadata: dict,
         step: WorkflowStep,
-    ) -> tuple[dict, list[str], bool, bool]:
+    ) -> tuple[dict, list[str], bool, bool, bool]:
         if self.run_step_model_tools is None or step.id not in {
             "step_4_cpu_env_setup",
             "step_7_gpu_execution",
         }:
-            return metadata, [], False, False
-        return await self.run_step_model_tools(metadata, step)
+            return metadata, [], False, False, False
+        result = await self.run_step_model_tools(metadata, step)
+        if len(result) == 4:
+            step_metadata, outputs, paused, handled = result
+            return step_metadata, outputs, paused, handled, False
+        return result
 
 
 async def cleanup_workflow_resources(
@@ -1062,6 +1374,70 @@ def add_workflow_step_artifact(metadata: dict, step: WorkflowStep, artifact: str
     return result
 
 
+def set_workflow_step_evidence(metadata: dict, step: WorkflowStep, **evidence: object) -> dict:
+    result = ensure_memory(metadata)
+    steps = []
+    found = False
+    for item in result.get("workflow_steps") or []:
+        current = dict(item)
+        if current.get("id") == step.id:
+            _ensure_step_runtime_fields(current, step.id)
+            current["evidence"] = {**current["evidence"], **evidence}
+            found = True
+        steps.append(current)
+    if not found:
+        current = {
+            "id": step.id,
+            "name": step.name,
+            "status": WORKFLOW_STEP_PENDING,
+            "output": "",
+            "depends_on": step.depends_on,
+            "expected_output": step.expected_output,
+            **_initial_step_runtime_fields(step.id),
+        }
+        current["evidence"] = {**current["evidence"], **evidence}
+        steps.append(current)
+    result["workflow_steps"] = steps
+    return result
+
+
+def validate_workflow_step_contract(metadata: dict, step: WorkflowStep) -> str | None:
+    contract = STEP_COMPLETION_CONTRACTS.get(step.id)
+    if contract is None:
+        return None
+
+    step_state = workflow_step_state(metadata, step.id)
+    tool_calls = [
+        item
+        for item in (step_state.get("tool_calls") or [])
+        if isinstance(item, dict)
+        and item.get("status") == "completed"
+        and item.get("ok") is not False
+    ]
+    completed_tools = {_contract_tool_name(str(item.get("name") or "")) for item in tool_calls}
+    completed_effects: set[str] = set()
+    for item in tool_calls:
+        completed_effects.update(TOOL_EFFECTS.get(str(item.get("name") or ""), set()))
+        completed_effects.update(TOOL_EFFECTS.get(_contract_tool_name(str(item.get("name") or "")), set()))
+
+    evidence = step_state.get("evidence") if isinstance(step_state.get("evidence"), dict) else {}
+    missing_tools = [name for name in contract.required_tools if name not in completed_tools]
+    missing_effects = [name for name in contract.required_effects if name not in completed_effects]
+    missing_evidence = [name for name in contract.required_evidence if not evidence.get(name)]
+
+    if not missing_tools and not missing_effects and not missing_evidence:
+        return None
+
+    details = []
+    if missing_tools:
+        details.append(f"missing required tool(s): {', '.join(missing_tools)}")
+    if missing_effects:
+        details.append(f"missing required effect(s): {', '.join(missing_effects)}")
+    if missing_evidence:
+        details.append(f"missing evidence: {', '.join(missing_evidence)}")
+    return f"Workflow step contract failed for {step.id}: {'; '.join(details)}"
+
+
 def update_workflow_tool_call(
     metadata: dict,
     step_id: str,
@@ -1154,6 +1530,21 @@ def _has_tool_call(metadata: dict, step_id: str, tool_call_id: str) -> bool:
     )
 
 
+def _contract_tool_name(name: str) -> str:
+    return TOOL_CONTRACT_ALIASES.get(name, name)
+
+
+def _step_contract_public(step_id: str) -> dict:
+    contract = STEP_COMPLETION_CONTRACTS.get(step_id)
+    if contract is None:
+        return {}
+    return {
+        "required_tools": list(contract.required_tools),
+        "required_effects": list(contract.required_effects),
+        "required_evidence": list(contract.required_evidence),
+    }
+
+
 def _initial_step_runtime_fields(step_id: str) -> dict:
     return {
         "attempts": 0,
@@ -1162,6 +1553,8 @@ def _initial_step_runtime_fields(step_id: str) -> dict:
         "artifacts": [],
         "progress": [],
         "error": None,
+        "evidence": {},
+        "completion_contract": _step_contract_public(step_id),
     }
 
 
@@ -1177,6 +1570,9 @@ def _ensure_step_runtime_fields(item: dict, step_id: str) -> None:
         if not isinstance(item.get(key), list):
             item[key] = []
     item.setdefault("error", None)
+    if not isinstance(item.get("evidence"), dict):
+        item["evidence"] = {}
+    item["completion_contract"] = _step_contract_public(step_id)
 
 
 def _new_tool_call(tool_call_id: str, tool_name: str, status: str) -> dict:
@@ -1214,6 +1610,118 @@ def repo_name_from_url(url: str) -> str:
     if value.endswith(".git"):
         value = value[:-4]
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "project"
+
+
+def _score_from_tool(result: ToolResult | None, *, default: int) -> int:
+    if not result:
+        return default
+    value = result.metadata.get("score")
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _combined_score(repo_score: int, paper_score: int, *, has_paper: bool) -> int:
+    if not has_paper:
+        return repo_score
+    return round(repo_score * 0.65 + paper_score * 0.35)
+
+
+def _artifact_paths(result: ToolResult | None) -> list[str]:
+    if not result:
+        return []
+    raw_paths = result.metadata.get("artifact_paths")
+    if isinstance(raw_paths, list):
+        return [str(item) for item in raw_paths if str(item).strip()]
+    path = result.metadata.get("report_path")
+    return [str(path)] if path else []
+
+
+def _cpu_prepare_command(metadata: dict, repo_name: str) -> str:
+    repo_url = str(metadata.get("github_url") or "").strip()
+    if not repo_url:
+        raise RuntimeError("缺少 github_url，无法准备远程项目环境")
+    clone_url = _github_clone_url(repo_url)
+    base_dir = f"/workspace/user-data/codelab/{repo_name}"
+    return (
+        "set -e; "
+        f"mkdir -p {base_dir}/code {base_dir}/data {base_dir}/model; "
+        f"cd {base_dir}/code; "
+        "if [ ! -d .git ]; then "
+        f"git clone --recursive {_shell_quote(clone_url)} .; "
+        "else git fetch --all --prune; fi; "
+        "ln -sfn ../data data; "
+        "ln -sfn ../model model; "
+        "if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; "
+        "elif [ -f environment.yml ]; then echo 'environment.yml detected; manual conda solve may be required'; "
+        "else echo 'No requirements.txt or environment.yml found'; fi"
+    )
+
+
+def _cpu_prepare_verify_command(repo_name: str) -> str:
+    base_dir = f"/workspace/user-data/codelab/{repo_name}"
+    return (
+        "set -e; "
+        f"base_dir={_shell_quote(base_dir)}; "
+        'code_dir="$base_dir/code"; '
+        'test -d "$code_dir"; '
+        'test -d "$base_dir/data"; '
+        'test -d "$base_dir/model"; '
+        'cd "$code_dir"; '
+        "test -d .git; "
+        "git rev-parse --is-inside-work-tree >/dev/null; "
+        "if [ -f requirements.txt ]; then echo dependency_manifest=requirements.txt; "
+        "elif [ -f environment.yml ]; then echo dependency_manifest=environment.yml; "
+        "else echo dependency_manifest=none; fi; "
+        "echo REMOTE_WORKSPACE_READY"
+    )
+
+
+def _gpu_smoke_command(repo_name: str) -> str:
+    base_dir = f"/workspace/user-data/codelab/{repo_name}/code"
+    return (
+        "set -e; "
+        f"cd {base_dir}; "
+        "python - <<'PY'\n"
+        "import os, sys\n"
+        "print('python', sys.version.split()[0])\n"
+        "try:\n"
+        "    import torch\n"
+        "    print('torch', torch.__version__)\n"
+        "    print('cuda_available', torch.cuda.is_available())\n"
+        "    if torch.cuda.is_available():\n"
+        "        print('gpu_name', torch.cuda.get_device_name(0))\n"
+        "except Exception as exc:\n"
+        "    print('torch_probe_error', type(exc).__name__, exc)\n"
+        "PY"
+    )
+
+
+def _gpu_workspace_verify_command(repo_name: str) -> str:
+    base_dir = f"/workspace/user-data/codelab/{repo_name}/code"
+    return (
+        "set -e; "
+        f"code_dir={_shell_quote(base_dir)}; "
+        'test -d "$code_dir"; '
+        'cd "$code_dir"; '
+        "test -d .git; "
+        "git rev-parse --is-inside-work-tree >/dev/null; "
+        "echo GPU_WORKSPACE_READY"
+    )
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _github_clone_url(repo_url: str) -> str:
+    prefix = "https://gh-proxy.org/"
+    if repo_url.startswith(prefix):
+        return repo_url
+    if repo_url.startswith("https://github.com/") or repo_url.startswith("http://github.com/"):
+        return prefix + repo_url
+    return repo_url
 
 
 def _cleanup_step(step_id: str, kind: str) -> WorkflowStep:

@@ -24,7 +24,7 @@
 | 智能核心 | 后端自建 Agent Loop |
 | LLM 调用 | 后端直接调用，用户配置 `base_url / api_key / model`；输出 token 预算由 Agent Loop 按阶段控制 |
 | Tool 执行 | 后端 Tool 系统统一调度 |
-| 任务编排 | 先 MVP 固定工具链，后续升级为模型驱动 tool-use 循环 |
+| 任务编排 | Skill 契约驱动 Workflow；`skills/` 内容是执行铁律，后端只能解析、渲染、适配并执行，不能绕开、重写或用固定流程替代 |
 | Lab4AI 凭证 | 平台统一一个账号，管理员配置，所有用户共享算力池 |
 | 云实例归属 | 后端记录 `server_id -> user_id / conversation_id` 映射 |
 | 算力限额 | 按用户统计 GPU/CPU 使用时长并限制 |
@@ -157,22 +157,25 @@ async def agent_loop(conversation: Conversation, llm_config: LLMConfig):
         break
 ```
 
-MVP 当前允许用固定工具链推进闭环：
+过渡期可以用固定工具链推进闭环，但最终状态必须走真实 Tool executor，不允许用“模拟成功”完成 workflow：
 
 1. 选择 skill / 任务类型。
 2. 调用 `lab4ai_create_instance` 创建真实 Lab4AI 实例。
-3. 调用 `ssh_execute` 执行远程命令（当前 executor 仍待接入真实 SSH）。
+3. 调用 `ssh_execute` 通过真实 SSH 在远程实例执行命令。
 4. 调用 `lab4ai_stop_instance` 释放真实 Lab4AI 实例。
 5. 调用模型生成总结。
 
-已确认下一阶段升级为 **Workflow 强约束 + step 内模型 tool-use** 的混合模式，而不是让模型完全自由规划。设计约束如下：
+已确认目标态升级为 **Skill 契约驱动 Workflow + step 内模型 tool-use + SkillRuntime 真实 Tool 注册**。这里的核心不是让模型自由规划，也不是让后端用固定 executor 大概复刻流程，而是把 `skills/` 中声明的内容视为任务契约：后端运行时负责解释、渲染、适配和执行该契约。
 
-- Workflow 仍是复现类强流程任务的主骨架，负责 step 顺序、依赖、状态持久化、前端展示和资源兜底释放。
-- 每个 workflow step 内部可以调用模型，让模型返回 `tool_use`；后端只执行当前 step allowlist 中允许的 Tool。
+- `SKILL.md`、`project_reproduce.yaml`、`tools.yaml`、`manifest.yaml` 是 skill 的执行边界。除非用户明确确认迁移方案，否则不得为了让流程跑通而修改 `skills/` 目录。
+- Workflow 文件是复现类强流程任务的单一执行源，负责 step 顺序、依赖、状态持久化、前端展示和资源兜底释放。后端内置代码只能作为解释器和安全适配层，不能绕开 workflow instruction 另写一套语义不等价的流程。
+- 每个 workflow step 内部可以调用模型，让模型返回 `tool_use`；后端只执行当前 step allowlist 中允许、且符合当前 skill instruction 语义的 Tool。
+- 模型输出的 tool 参数不是最终可信输入。Tool 调用前必须经过 Skill Workflow Runtime 的上下文补齐、模板渲染、工具名适配和安全校验。
 - 第一阶段允许接入 `lab4ai_create_instance`、`lab4ai_stop_instance`、`ssh_execute`、`file_write` 等高风险或计费 Tool，但必须经过 ToolRegistry 权限策略、HITL 确认和归属记录，不允许模型绕过。
 - 每轮 tool-use 循环必须有最大轮数，例如 `max_tool_iterations=8`，防止模型无限调用工具。
 - Tool 默认串行执行；只读 Tool 的并发执行留到后续优化，避免状态竞态。
 - `tool_result` 必须回流为下一轮模型上下文，并同步持久化为 `ConversationMessage(role=tool)` 与 WebSocket 事件。
+- 任何生产态 Tool 不允许返回伪造成功。功能尚未实现、依赖缺失、网络不可达或远程命令失败时，必须返回 `ok=false`、结构化 `error_code` 和可恢复建议，由 WorkflowRunner 决定重试、HITL 或失败收敛。
 - 发生失败、中断或用户停止时，仍必须进入 `stopping -> cleanup -> stopped` 语义，资源释放逻辑优先于模型继续规划。
 
 ### 5.4 Tool 系统
@@ -216,7 +219,7 @@ class ToolRegistry:
 - `always`：创建算力实例等会产生费用或占用资源的动作，必须先确认。
 - `risky`：如 SSH 命令，只有命中高风险模式时才确认。
 
-MVP Tool：
+核心 Tool：
 
 | Tool | 功能 |
 |---|---|
@@ -225,9 +228,11 @@ MVP Tool：
 | `lab4ai_list_instances` | 查询当前用户可见云实例 |
 | `ssh_execute` | 在远程实例执行命令 |
 | `analyze_repo` | 分析 GitHub 仓库结构 |
+| `analyze_paper` | 下载/解析论文并抽取复现实验关键信息 |
 | `read_url` | 读取网页、论文或文档内容 |
 | `web_search` | 检索论文或资料 |
 | `file_write` | 写入远程文件 |
+| `repro_report` | 生成真实复现报告产物 |
 | `ask_user` | 信息不足时向用户追问 |
 
 所有会影响远程资源或产生费用的 Tool 必须：
@@ -237,11 +242,27 @@ MVP Tool：
 - 绑定 `conversation_id`。
 - 失败时返回结构化错误，便于模型继续处理。
 
+真实执行约束：
+
+- `ToolRegistry` 负责统一注册内置 Tool 与 SkillRuntime 生成的 skill Tool；Agent Loop 和 WorkflowRunner 只能通过 `ToolRegistry.invoke()` 执行动作。
+- Tool 的输入应当已经由 Skill Workflow Runtime 渲染完成。模板渲染属于 workflow 解释层职责，ToolRegistry 中的 `{{...}}` 拦截只是最后一道安全网，不应成为正常执行路径。
+- `ssh_execute` 的输入必须是结构化参数，例如 `server_id / command / cwd / timeout / env / step_id`。SSH 主机、端口、用户名和密码从 `CloudInstance` 或凭证服务读取，不能由模型输出，也不能把密码注入 system prompt、前端事件或普通日志。
+- `ssh_execute` 需使用后端 SSH 库执行真实连接，例如 `paramiko` 或 `asyncssh`，并返回 `exit_code / stdout / stderr / started_at / completed_at / timeout / remote_host`。Windows 后端不得依赖 `sshpass`。
+- 如果 skill instruction 中出现 `sshpass ... ssh root@{{step_3.ssh_host}} ...` 这类历史 CLI 写法，后端应按其语义执行：使用当前任务绑定的 `CloudInstance` 和后端 SSH 库执行远程命令；不要求 Windows 后端逐字运行 `sshpass`，也不允许把 SSH 密码泄露给模型或前端。若未来要求逐字执行这些 shell wrapper，必须先修改本文档中的 SSH 安全约束。
+- Tool 执行前必须拒绝未渲染模板变量，凡命令、路径或参数中仍包含 `{{...}}`，直接返回 `ok=false` 与 `error_code=unrendered_template`，不能继续下发远程命令。
+- `file_write` 只能写受控任务 workspace 或通过 SFTP 写入当前任务绑定的远程 workspace；不得写入 `skills/`、系统目录或其他用户目录。
+- `analyze_repo`、`analyze_paper`、`repro_report` 必须调用真实脚本或库并记录 artifact 路径，不能用固定分数、固定文案或“已模拟执行”代替结果。
+
 ### 5.5 Skill 系统
 
 保留 `skills/` 目录作为任务模板和工具组合定义，但不再要求兼容任何外部 CLI。
 
-参考 `claude-code-analysis` 的 Skill 机制时，需要明确：**Skill 不是直接执行器**。Skill 的职责是声明领域流程、触发条件、上下文模板和允许使用的工具；真正创建实例、执行 SSH、写文件、检索资料等动作，必须通过后端 Tool 完成。
+参考 `claude-code-analysis` 的 Skill 机制时，需要明确两点：
+
+- **Skill 内容是执行契约和铁律**。当任务选中某个 skill 后，后端必须以该 skill 的 `SKILL.md`、workflow 文件、工具声明和入口声明为准推进任务，不能因为后端已有固定实现就跳过或改写 skill 中的步骤。
+- **Skill 文件本身不是直接执行器**。真正创建实例、执行 SSH、写文件、检索资料等副作用仍必须通过后端 Tool 完成。后端的职责是把 skill 契约编译为安全、结构化、可审计的 Tool 调用。
+
+因此，`skills/` 目录具有只读契约属性：运行时可以读取、解析、渲染和适配其中内容，但不能在任务执行中擅自修改它。需要标准化或迁移 skill 模板时，必须先更新设计文档并由用户确认。
 
 目标格式：
 
@@ -268,10 +289,10 @@ allowed_tools:
 1. 启动时扫描 `skills/`。
 2. 解析 frontmatter 或 YAML 元数据。
 3. 读取 `SKILL.md` 正文，必要时读取同目录的 `project_reproduce.yaml` 等工作流文件。
-4. 把 skill 摘要注入 system prompt，用于模型选择。
+4. 把 skill 摘要注入 system prompt，用于模型选择；选中后，完整 skill 契约由 Skill Workflow Runtime 执行，不只作为提示词。
 5. 根据用户输入、前端 intent hint、`triggers` / `when_to_use` 选择 skill。
-6. 将选中 skill 的正文、工作流文件摘要和 `allowed_tools` 注入 Agent Loop。
-7. Agent Loop 驱动模型规划，模型通过 Tool 调用落地执行动作。
+6. 将选中 skill 的正文、workflow、工具声明和 `allowed_tools` 交给 Skill Workflow Runtime，生成可追踪的 step 状态机和当前 step 的 Tool 白名单。
+7. Agent Loop 在当前 step 内调用模型时，只允许模型补充决策、组装参数或请求 allowlist 内 Tool；最终 Tool 调用仍需由 runtime 渲染、适配、校验后执行。
 
 Skill 执行链路：
 
@@ -279,18 +300,70 @@ Skill 执行链路：
 用户消息
   -> SkillLoader 扫描并解析 skills/<name>/SKILL.md
   -> SkillSelector 选择合适 skill
-  -> SkillContext 注入 system prompt
-  -> LLM 根据 skill 流程产生计划或 tool_use
+  -> Skill Workflow Runtime 解析 workflow / instruction / tool mapping
+  -> LLM 在当前 step 内产生受控 tool_use 或决策补充
+  -> Runtime 渲染模板、解析 step 输出、映射历史工具名
   -> ToolRegistry 执行具体 Tool
   -> tool_result 回流到 Conversation
   -> LLM 继续下一轮或总结完成
 ```
 
-### 5.5.1 Skill Workflow Runtime（已确认实施）
+### 5.5.1 SkillRuntime（目标态：所有 skill 真实可执行）
+
+当前问题的根因不是单个 step 漏调用，而是 `skills/` 目录仍主要被当成 prompt 模板注入，`tools.yaml`、`manifest.yaml` 和脚本入口没有被统一注册为后端 Tool。因此长期正确方案是新增 `SkillRuntime`，把每个 skill 的声明式工具变成 `ToolRegistry` 中可校验、可审计、可真实执行的 Tool。
+
+`SkillRuntime` 启动时扫描：
+
+- `SKILL.md`：作为任务说明、选择条件和上下文模板。
+- `tools.yaml`：声明一个 skill 下的多个工具，例如 `repo_audit`、`paper_analyze`。
+- `manifest.yaml`：声明单入口可执行 skill，例如远程项目准备、报告生成。
+- `skill.json`：声明触发词、展示元数据和前端可见能力。
+
+入口规范：
+
+- Python 入口统一写成 `relative/path.py:function_name`，路径相对 skill 目录解析。
+- 启动时必须 import-test 每个入口，缺失函数、依赖缺失、签名不匹配都要在健康检查中暴露，不能等用户任务执行到一半才发现。
+- 入口函数接收结构化参数并返回 `dict` 或标准 `ToolResult`。异常必须被转换成 `ok=false`、`error_code`、`message`、`retryable` 和 `artifact_paths`。
+- 脚本不得在请求处理中动态安装依赖；依赖应写入后端运行环境或 skill 依赖清单，启动健康检查负责报错。
+- 网络访问必须使用系统代理/镜像配置，不能在 skill 脚本里硬编码代理地址。
+
+当前 Lab4AI skills 的目标映射：
+
+| Skill | 声明文件 | 后端 Tool | 真实入口与要求 |
+|---|---|---|---|
+| `lab4ai-project-analysis` | `tools.yaml` | `analyze_repo` / `repo_audit` | 调用 `scripts/main.py:audit_repo`，真实 clone 或读取仓库，输出依赖、启动命令、风险、评分和 audit artifact |
+| `lab4ai-paper-analysis` | `tools.yaml` | `analyze_paper` / `paper_analyze` | 补齐 `scripts/analyze_paper.py:analyze_paper_tool`，复用现有解析逻辑，返回方法、数据集、指标、超参、baseline 和 markdown artifact |
+| `lab4ai-project-prep` | `manifest.yaml` | `remote_project_prep` | 调用 `prep_runner.py:run_remote_prep` 或等价后端服务，通过 `ssh_execute` / SFTP 上传和执行脚本，不直接依赖 `sshpass` |
+| `lab4ai-repro-report` | `manifest.yaml` | `repro_report` | 调用 `report_generator.py:generate_report`，生成真实 `.docx` 并记录 artifact |
+| `lab4ai-image-manage` | `manifest.yaml` | `lab4ai_image_*` | 查询、筛选和确认镜像时返回结构化候选，不让模型猜镜像名称 |
+| `lab4ai-instance-manage` | `manifest.yaml` | `lab4ai_create_instance` / `lab4ai_stop_instance` / `lab4ai_list_instances` | 以当前后端 Lab4AI API Tool 为权威实现，skill 脚本只能作为适配层或测试参考 |
+
+历史兼容策略：
+
+- `claw-shell`、`file-system`、`ssh-essentials` 这类 CLI/本地机 skill 不直接在 Web 后端执行，只映射为受控的 `ssh_execute`、`file_write`、workspace 读取等后端 Tool。
+- `skills/` 中出现的 `openclaw`、`claw-workflow`、`/root/.openclaw` 等历史命名应通过兼容层转换为当前 LOBSTER runtime 语义；迁移模板本身需要另行确认，避免擅自改动 `skills/`。
+- 本地分析 artifact 统一写入 `runtime/workspaces/<conversation_id>/<repo_name>/...`；远程实验 artifact 统一写入 `/workspace/user-data/codelab/<repo_name>/...`，并通过 metadata 记录。
+- 旧 OpenClaw / vendor skill 的完整适配矩阵、优先级和验收标准见 [docs/skill-adapter-plan.md](skill-adapter-plan.md)。实施顺序按 P0（复现 workflow 安全闭环）→ P1（阻断任意 shell 与文件越界）→ P2（旧路径与脚本入口收敛）推进。
+- P0/P1 适配完成前，模型即使读到 `claw-shell`、`sshpass`、`ssh-essentials` 或 `file-system` 指令，也只能通过当前 step allowlist 触发后端 Tool；不得直接运行 vendor `handler.js`、本机 `tmux`、本机 `sshpass` 或任意 shell。
+
+依赖与健康检查：
+
+- 后端运行环境至少需要补齐 `requests`、`pyyaml`、`pymupdf`、`python-docx`、`paramiko` 或 `asyncssh`。
+- 启动健康检查输出每个 skill 的 `loaded / failed / missing_dependency / missing_entrypoint` 状态，管理员页面可查看。
+- CI 必须包含 skill entrypoint import 测试、工具 schema 测试和最小 dry-run 测试，确保新增 skill 不会破坏现有 workflow。
+
+### 5.5.2 Skill Workflow Runtime（已确认实施）
 
 针对 `lab4ai-auto-reproduct` 这类强流程任务，不能只把 `SKILL.md` 和 `project_reproduce.yaml` 注入模型上下文后让模型自由发挥。后端需要把 workflow 文件解析为可追踪、可恢复、可展示的执行状态机。
 
 用户在页面选择「论文与代码复现」并输入 GitHub URL、论文 URL 后，系统默认选择 `lab4ai-auto-reproduct`，加载同目录 `project_reproduce.yaml`，并按 YAML 中 `tasks` 数组逐步执行。
+
+本 Runtime 的执行原则：
+
+- `project_reproduce.yaml` 是当前复现 workflow 的单一真源。`tasks[*].instruction` 和 `expected_output` 是 step 执行契约，不能被固定后端流程替代。
+- Runtime 负责把 instruction 中的历史工具名、模板变量和 shell 片段编译为当前后端 Tool 调用。编译结果必须语义等价，并保留 HITL、审计和资源归属约束。
+- Step 内模型 tool-use 可以参与分析和组装参数，但不能越过 workflow 顺序，也不能把未渲染模板变量、SSH 密码或平台凭证直接交给 Tool。
+- 如果某条 instruction 无法被安全适配，Runtime 必须返回结构化错误或进入 HITL，说明缺失的上下文或适配器，而不是悄悄执行另一条固定命令。
 
 运行链路：
 
@@ -320,7 +393,7 @@ Skill 执行链路：
       "name": "项目复现可行性分析",
       "status": "completed",
       "attempts": 1,
-      "allowed_tools": ["analyze_repo", "read_url", "ask_user"],
+      "allowed_tools": ["analyze_repo", "analyze_paper", "read_url", "ask_user"],
       "tool_calls": [
         {
           "tool_call_id": "toolu_01...",
@@ -328,12 +401,19 @@ Skill 执行链路：
           "status": "completed",
           "started_at": "2026-05-20T10:00:00Z",
           "completed_at": "2026-05-20T10:00:03Z"
+        },
+        {
+          "tool_call_id": "toolu_02...",
+          "name": "analyze_paper",
+          "status": "completed",
+          "started_at": "2026-05-20T10:00:03Z",
+          "completed_at": "2026-05-20T10:00:08Z"
         }
       ],
-      "artifacts": ["runtime/workspaces/.../audit.md"],
-      "progress": ["已读取 README", "已提取依赖文件"],
+      "artifacts": ["runtime/workspaces/.../repo_audit.md", "runtime/workspaces/.../paper_analysis.md"],
+      "progress": ["已读取 README", "已提取依赖文件", "已解析论文方法和实验指标"],
       "error": null,
-      "output": "score=75；已完成仓库与论文审计"
+      "output": "已完成仓库与论文审计；评分来自真实分析脚本输出"
     }
   ],
   "workflow_resources": {
@@ -342,8 +422,9 @@ Skill 执行链路：
   },
   "workflow_results": {
     "repo_name": "PhotoDoodle",
-    "score": 75,
-    "audit_report_path": "",
+    "score": 82,
+    "audit_report_path": "runtime/workspaces/.../repo_audit.md",
+    "paper_report_path": "runtime/workspaces/.../paper_analysis.md",
     "word_report_path": ""
   }
 }
@@ -359,6 +440,31 @@ Workflow step metadata 需要比首版状态机更细：
 - `error`：结构化错误，至少包含 `type / message / retryable / tool_call_id`。
 
 这些字段必须写入 `Conversation.metadata.workflow_steps[*]`，不能只存在内存中。恢复执行时，WorkflowRunner 先读取 metadata 判断上次停在何处，再决定继续、重试或进入 cleanup。
+
+模板渲染与上下文解析：
+
+- Runtime 维护当前 workflow 的渲染上下文，至少包含 `parameters.github_url / parameters.paper_url / repo_name / repo_name_underscore / workflow_results / workflow_resources`。
+- 每个 step 的 ToolResult 必须保存结构化输出，供后续模板引用。例如 `step_3_deploy_cpu` 输出应至少提供 `serverId / server_id / ssh_host / ssh_port / ssh_user`，其中敏感的 `ssh_pass` 只能作为后端 secret 引用，不进入模型上下文或前端事件。
+- 历史模板别名必须兼容。`{{step_3.ssh_host}}` 应解析到 `step_3_deploy_cpu` 的结构化输出；`{{step_6.ssh_port}}` 应解析到 `step_6_deploy_gpu` 的输出。Runtime 不应要求 skill 模板立刻改成新 step id。
+- 模板渲染应发生在 ToolRegistry 调用之前。无法解析的变量要返回 `error_code=unresolved_template_variable`，并明确变量名和所在 step；不能把 `{{...}}` 原样传给 `ssh_execute`。
+- `{{repo_name}}`、`{{repo_name_underscore}}` 等派生变量必须由 Runtime 从 `github_url` 或上游分析结果稳定生成，且经过路径安全过滤。
+
+工具名与执行适配：
+
+- `lab4ai-instance-manage (创建)` 映射为 `lab4ai_create_instance`；`lab4ai-instance-manage (关闭)` 映射为 `lab4ai_stop_instance`；查询类动作映射为 `lab4ai_list_instances`。
+- `claw-shell`、`ssh-essentials`、包含 SSH wrapper 的 instruction 映射为受控 `ssh_execute`。Runtime 提取远程要执行的命令内容，连接信息由 `CloudInstance` 解析，不由模型或 skill 文本直接提供。
+- `file-system` 映射为受控 workspace 读写能力；不得读取或写入 `skills/`、系统目录或其他用户目录。
+- `lab4ai-project-prep` 映射为 `remote_project_prep` 或等价后端适配器，参数来自渲染上下文和模型组装结果，执行仍通过后端 SSH/SFTP 管线。
+- `lab4ai-repro-report` 映射为 `repro_report`，报告内容来自前序 step 的结构化结果、artifact 和日志。
+
+复现 workflow 的真实执行要求：
+
+- `step_1_audit` 必须执行真实 `analyze_repo`；当用户提供论文 URL 时还必须执行真实 `analyze_paper`，并把仓库审计与论文可行性分析合并成 step 产物。不得再写死 `score=75`、`baseline_metrics` 或固定 MVP 文案。
+- `step_3_deploy_cpu` 和 `step_6_deploy_gpu` 必须把 Lab4AI 返回的 `server_id / ssh_host / ssh_port / ssh_user` 写入 `CloudInstance` 与 `workflow_resources`。`ssh_pass` 等敏感字段只能保存在后端加密存储或受控 secret 字段，不能进入模型上下文和前端事件。
+- `step_4_cpu_env_setup` 必须通过 `remote_project_prep` 或 `ssh_execute` 的结构化输入执行。后端负责渲染 `repo_url / repo_name / workspace / proxy` 等变量；如果命令中仍包含 `{{step_...}}`，必须失败并提示模板未渲染。
+- `step_7_reproduce_on_gpu` 必须基于真实 GPU 实例执行训练、推理或最小 smoke test，并记录远程日志、退出码和结果 artifact。
+- `step_8_generate_report` 必须调用 `repro_report` 生成真实 `.docx` 或同等报告 artifact，报告内容来自前序 step 的结构化结果和日志，不由模型凭空补写。
+- step 是否完成只能依据 `ToolResult.ok`、退出码和 artifact 记录判断，不能依据模型自然语言“看起来完成了”判断。
 
 Workflow step 状态：
 
@@ -393,7 +499,9 @@ WebSocket 事件补充：
   - GPU 未释放且已创建，则执行 `step_9_release_gpu` 对应的释放动作。
 - 用户发送「停止」「中断」「取消」时，不允许直接丢弃任务；必须进入 `stopping -> cleanup -> stopped` 语义，资源释放是停止流程中的唯一强制例外。
 
-短期实现中，workflow 的步骤状态、事件流、暂停恢复和资源兜底必须按真实执行链路落地。Lab4AI Tool 不再提供 Runner/mock 开关；缺少管理员凭证或平台 API 调用失败时直接失败并进入错误处理。SSH executor 仍需后续接入真实远程执行。
+目标态中，workflow 的步骤状态、事件流、暂停恢复和资源兜底必须按真实执行链路落地。Lab4AI、SSH、文件写入、项目分析、论文分析和报告生成都必须走真实 executor；缺少管理员凭证、依赖缺失、平台 API 失败、网络不可达或远程命令失败时，直接进入结构化错误处理或 HITL，不允许用 mock 成功继续推进。
+
+后端固定 executor 的定位需要收敛：它可以作为 Skill Workflow Runtime 的内置适配器实现某个 instruction 的语义，但不能在 skill step 内模型 tool-use 失败时无条件改走语义不同的固定流程。凡是 fallback，都必须证明仍在执行同一条 skill 契约；否则应标记 step failed / waiting_for_user，并暴露缺失的模板变量、工具适配器或执行上下文。
 
 近期最小实现（已完成）：
 
@@ -423,7 +531,7 @@ Lab4AI 云实例是真正消耗费用的资源，必须由后端统一管理。
 - 查询实例时按用户过滤；管理员可查看全部。
 - 关停实例前校验归属。
 - Agent Loop 异常、用户停止任务或后端重启恢复时，必须检查并清理遗留实例。
-- `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI REST API，并写入或更新 `CloudInstance` 归属记录；若管理员未配置 Lab4AI 凭证或平台 API 返回失败，ToolRegistry 直接返回失败，不再通过 Runner/mock 分支绕过真实执行。
+- `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI REST API，并写入或更新 `CloudInstance` 归属记录；若管理员未配置 Lab4AI 凭证，ToolRegistry 触发 `lab4ai_credentials_required` 人工介入并暂停当前 `tool_call_id`，由前端弹出管理员凭证配置弹窗；若平台 API 返回失败，则返回结构化错误并进入重试、HITL 或失败处理，不再通过 Runner/mock 分支绕过真实执行。
 
 ### 5.7 算力限额
 
@@ -704,26 +812,56 @@ CloudInstance
 - ToolRegistry 已补齐 `risk_level / audit_category`、Anthropic tool schema 输出、`workflow_run_id + tool_call_id` 审批绑定，并新增保守模拟的 `file_write` Tool（不写本地文件，不允许指向 `skills/`）。
 - Skill Workflow Runtime 已深化 step metadata：`attempts / allowed_tools / tool_calls / artifacts / progress / error` 会持久化到 `Conversation.metadata.workflow_steps[*]`，并推送 `workflow_step_progress`。
 - 已新增 `UserMemory` 和 `long_term_memory` 服务，第一阶段按数据库关键词/内容检索召回跨对话长期记忆，不引入向量库。
+- 已确认长期方向：新增 `SkillRuntime`，把 `tools.yaml`、`manifest.yaml` 和脚本入口注册为真实后端 Tool；所有 skill 能力必须通过 `ToolRegistry` 执行、审计和返回结构化结果。
+- 已确认架构原则：`skills/` 内容是执行契约和铁律。后端运行时必须解析、渲染、适配并执行 skill，不得通过修改 `skills/` 或绕过 workflow instruction 来“修复”任务。
+- P0/P1 旧 OpenClaw / vendor skill 适配首轮已落地：`claw_shell_run` 与 `ssh_essentials_execute` 会规范化到 `ssh_execute`；`sshpass ... ssh ... "<remote command>"` wrapper 会被编译为远程命令；`file_system_read / file_system_list / file_system_write` 映射到受控 workspace 或当前任务绑定实例的 SFTP 路径。
 
 当前限制：
 
-- Lab4AI 创建 / 停止 / 查询已走真实 API 代码路径，仍需要真实凭证与线上环境联调；缺少凭证时会失败，不再自动模拟计费实例。
-- SSH 执行仍是模拟。
+- Lab4AI 创建 / 停止 / 查询已走真实 API 代码路径，仍需要真实凭证与线上环境联调；缺少凭证时应触发 `lab4ai_credentials_required` 弹窗介入，不再自动模拟计费实例。
+- SSH 执行已接入真实 executor：后端从 `CloudInstance` 读取 SSH 连接信息，通过 `paramiko` 执行命令；缺少实例、SSH 凭证、依赖、超时或非零退出码都会返回结构化错误。仍需要真实 Lab4AI 线上实例做端到端联调。
+- Workflow 已接入 SkillRuntime 适配层：`tools.yaml` / `manifest.yaml` 中的关键能力已注册为可执行 Tool；`lab4ai-paper-analysis` 的声明入口虽仍指向缺失包装函数，但后端适配器会复用现有脚本函数完成真实论文分析，暂不修改 `skills/` 目录。
+- `step_1_audit` 已同时执行仓库分析和论文分析真实脚本，不再使用固定审计值。
 - Agent Loop 已具备 step 内模型 tool-use 基础能力，但当前仅在 Workflow 受控 step 中启用；真实效果仍依赖所配置模型是否支持 Anthropic-compatible `tool_use`。
+- Skill Workflow Runtime 已补齐 P0/P1 首轮历史工具名适配和 `sshpass` wrapper 编译；仍需继续完善更完整的 step 输出别名映射、长脚本日志流和真实远程服务器集成测试。
 - `api_key_encrypted` 字段尚未接入真实加密。
 - `skills/` 目录已支持最小解析和注入，但仍需继续标准化元数据、`allowed_tools` 和任务类型映射。
-- `Skill Workflow Runtime` 已补齐 step metadata 和部分 step 内模型 tool-use，但真实 SSH、真实文件写入和真实报告生成 executor 仍待接入。
+- `Skill Workflow Runtime` 已补齐 step metadata、部分 step 内模型 tool-use，以及真实 SSH、受控文件写入、真实论文分析和真实报告生成 executor；仍需补充真实远程服务器集成测试。
+- GitHub、arXiv、Hugging Face 等外部访问仍缺少统一代理/镜像配置；网络不可达时应结构化失败或进入 HITL，而不是继续模拟。
 - memory 已新增数据库关键词检索的跨对话长期记忆基础服务，但用户级查看/删除/禁用 API 与前端入口仍待实现。
 - HITL 已支持 `tool_call_id` 级审批绑定和 Tool 审计 metadata，但还不是独立管理员审计系统。
 - `skills/` 原始模板仍包含历史 `claw-workflow` / `openclaw` / `claw-shell` 命名。根据当前协作约束，暂不直接修改 `skills/` 目录；若后续需要标准化模板，需要先确认迁移方案并同步更新 workflow 文档。
 
-## 10. 下一步
+## 10. Workflow 强约束完成机制
 
-1. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
-2. 实现真实 `ssh_execute`，支持凭证、超时、日志流和失败处理。
-3. 将 `file_write` 从保守模拟升级为受控远程文件写入，限定任务 workspace，不允许修改 `skills/`。
-4. 把报告生成从模拟 `repro_report` 升级为真实产物生成与 artifact 记录。
-5. 为长期记忆补齐用户级查看、删除、禁用 API 与前端入口。
-6. 为 Tool 审计补齐管理员检索视图；如 `ConversationMessage.message_metadata` 不够用，再迁移到独立 `AuditLog`。
-7. 为用户 LLM API Key 接入加密存储。
-8. 完成管理员前端页面。
+Workflow step 的完成条件不能由模型自然语言或单次探活类工具调用决定。后端运行时必须把每个关键 step 编译为可验证合约，并在完成前校验以下内容：
+
+- `required_tools`：该 step 必须出现并成功完成的真实 Tool，例如 `step_4_cpu_env_setup` 必须执行 `ssh_execute`。
+- `required_effects`：该 step 必须产生的能力效果，例如远程执行、远程写入、实例生命周期管理或本地产物生成。
+- `required_evidence`：该 step 必须写入 `workflow_steps[*].evidence` 的验收证据，例如远程 workspace 存在、Git 仓库可识别、依赖安装流程已尝试、报告文件路径已生成。
+- `postconditions`：涉及远程状态的 step 必须在主命令后执行独立验收命令；只读探活、目录列表、模型总结不能替代后置验收。
+
+当前落地规则：
+
+- `step_4_cpu_env_setup` 在远程 CPU 实例执行项目准备命令后，必须再次通过 `ssh_execute` 验证 `/workspace/user-data/codelab/<repo>/code`、`data`、`model` 目录存在，且 `code` 是 Git 仓库。
+- `step_7_gpu_execution` 在远程 GPU 实例执行 smoke test 后，必须再次通过 `ssh_execute` 验证共享项目 workspace 和 Git 仓库存在。
+- `step_8_generate_report` 必须由 `repro_report` 返回真实 `report_path`，否则即使工具返回 `ok=true` 也不能标记为完成。
+- 对于有固定 executor 的关键 step，模型 tool-use 只能提供辅助信息或提前发现错误，不能单独使 step 完成；固定 executor 和合约验收仍必须执行。
+
+## 11. 下一步
+
+1. 用真实 Lab4AI CPU/GPU 实例验证 P0/P1 适配：`claw_shell_run -> ssh_execute`、`sshpass` wrapper 编译、`remote_project_prep`、远程 SFTP 读写和 cleanup 都必须在真实环境中通过。
+2. 继续按 [docs/skill-adapter-plan.md](skill-adapter-plan.md) 处理 P1 剩余 workflow：为 `lab4ai-auto-research` 和 `lab4ai-lf-data-preprocess` 增加专用 runner，复用已落地的安全 Tool 映射。
+3. 收敛固定 executor fallback：只有当 fallback 仍执行同一条 skill 契约时才允许继续；否则返回结构化错误或 HITL，不再用语义不同的固定命令掩盖模板/适配器缺失。
+4. 继续完善 `SkillRuntime`：扫描 `SKILL.md`、`tools.yaml`、`manifest.yaml`、`skill.json`，把 skill 入口注册为 `ToolRegistry` 中的真实 Tool，并提供启动健康检查。
+5. 补齐 skill 入口与依赖：为 `lab4ai-paper-analysis` 增加 `analyze_paper_tool`，导入测试 `repo_audit / analyze_paper / run_remote_prep / generate_report`，并把 `requests / pyyaml / pymupdf / python-docx / paramiko 或 asyncssh` 写入后端运行依赖。
+6. 完善真实 `ssh_execute`：从 `CloudInstance` 获取连接信息，使用后端 SSH 库执行命令，支持超时、日志流、退出码、SFTP、敏感信息脱敏和 `{{...}}` 未渲染模板兜底拦截。
+7. 改造 Workflow step：`step_1_audit` 执行真实仓库分析与论文分析；`step_4_cpu_env_setup` 通过真实远程准备工具执行；`step_7_reproduce_on_gpu` 记录真实训练/推理日志；`step_8_generate_report` 生成真实报告 artifact。
+8. 将 `file_write` 从保守模拟升级为受控 workspace 写入，支持本地任务 workspace 与当前任务绑定远程 workspace，不允许修改 `skills/`。
+9. 增加外部网络配置：管理员可配置 GitHub、arXiv、Hugging Face 的代理或镜像；网络失败返回结构化错误并可触发 HITL。
+10. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
+11. 增加自动化验收：skill entrypoint import 测试、Tool schema/权限测试、假 SSH server 集成测试，以及 PhotoDoodle dry-run，要求没有 `已模拟执行`、没有未渲染 `{{step_...}}`、没有固定 `score=75`。
+12. 为长期记忆补齐用户级查看、删除、禁用 API 与前端入口。
+13. 为 Tool 审计补齐管理员检索视图；如 `ConversationMessage.message_metadata` 不够用，再迁移到独立 `AuditLog`。
+14. 为用户 LLM API Key 接入加密存储。
+15. 完成管理员前端页面。
