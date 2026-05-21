@@ -176,6 +176,79 @@ async def test_invoke_tool_with_policy_scopes_confirmation_to_tool_call_id(
     assert ask_event["risk_level"] == "high"
 
 
+async def test_lab4ai_missing_credentials_pauses_for_admin_intervention(
+    monkeypatch,
+    test_user,
+    db_session,
+):
+    from app.models import Conversation
+    from app.models.conversation import ConversationStatus, ConversationTaskType
+    from app.services.conversation_memory import (
+        mark_running,
+        mark_waiting_for_user,
+        resolve_pending_user_input,
+    )
+
+    async def fake_credentials(session):
+        return None
+
+    monkeypatch.setattr("app.services.tools.load_lab4ai_credentials", fake_credentials)
+    manager = AgentLoopManager()
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.REPRODUCE,
+        title="missing credential test",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+    metadata = mark_running({"task_type": "reproduce"})
+    tool_input = {
+        "resource_kind": "CPU",
+        "workflow_step_id": "step_3_deploy_cpu",
+        "tool_call_id": "toolu-lab4ai",
+        "workflow_run_id": metadata["workflow_run_id"],
+    }
+    confirmation = manager._tools.confirmation_for("lab4ai_create_instance", tool_input)
+    assert confirmation is not None
+    metadata = mark_waiting_for_user(
+        metadata,
+        question=confirmation.question,
+        options=list(confirmation.options),
+        step=confirmation.step,
+        tool_name="lab4ai_create_instance",
+        tool_input=tool_input,
+        tool_call_id=confirmation.tool_call_id,
+        workflow_step_id=confirmation.workflow_step_id,
+    )
+    metadata = resolve_pending_user_input(metadata, answer="继续执行")
+
+    result, metadata, paused = await manager._invoke_tool_with_policy(
+        conversation.id,
+        metadata,
+        "lab4ai_create_instance",
+        tool_input,
+    )
+
+    assert result is None
+    assert paused is True
+    pending = metadata["pending_user_input"]
+    assert pending["intervention"]["type"] == "lab4ai_credentials_required"
+    assert pending["tool_call_id"] == "toolu-lab4ai"
+    assert pending["workflow_step_id"] == "step_3_deploy_cpu"
+    event_types = [event["type"] for event in manager._streams[conversation.id].history]
+    assert event_types == ["tool_started", "tool_completed", "ask_user", "status"]
+    ask_event = next(
+        event for event in manager._streams[conversation.id].history if event["type"] == "ask_user"
+    )
+    assert ask_event["intervention"]["type"] == "lab4ai_credentials_required"
+
+    resumed = resolve_pending_user_input(metadata, answer="已完成配置，继续执行")
+    assert resumed["memory"]["decisions"][-1]["outcome"] == "approved"
+
+
 async def test_step_model_tool_use_executes_allowed_tool(monkeypatch):
     manager = AgentLoopManager()
     seen_tools: list[list[dict]] = []

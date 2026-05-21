@@ -109,6 +109,26 @@ def test_tool_confirmation_decisions_can_be_scoped_to_tool_call_id():
     )
 
 
+def test_waiting_question_can_carry_structured_intervention():
+    metadata = mark_running(ensure_memory({"task_type": "reproduce"}))
+    metadata = mark_waiting_for_user(
+        metadata,
+        question="Lab4AI 凭证未配置，请先由管理员配置平台账号。",
+        options=["已完成配置，继续执行", "停止任务"],
+        step="admin_config:lab4ai:lab4ai_create_instance",
+        tool_name="lab4ai_create_instance",
+        tool_input={"workflow_step_id": "step_3_deploy_cpu"},
+        intervention={"type": "lab4ai_credentials_required"},
+    )
+
+    pending = metadata["pending_user_input"]
+
+    assert pending["intervention"]["type"] == "lab4ai_credentials_required"
+    assert metadata["memory"]["open_questions"][0]["intervention"]["type"] == (
+        "lab4ai_credentials_required"
+    )
+
+
 def test_memory_compaction_summarizes_old_messages():
     metadata = ensure_memory({"task_type": "reproduce"})
     messages = [

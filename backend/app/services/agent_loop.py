@@ -59,6 +59,7 @@ AGENT_PLAN_MAX_TOKENS = 2048
 AGENT_REPLY_MAX_TOKENS = 8192
 AGENT_REPLY_FALLBACK_MAX_TOKENS = 4096
 AGENT_TOOL_USE_MAX_ITERATIONS = 8
+LAB4AI_CREDENTIAL_ERROR_PREFIX = "Lab4AI 凭证未配置"
 
 
 @dataclass
@@ -696,6 +697,26 @@ class AgentLoopManager:
                 )
                 result = await self._tools.invoke(tool_name, tool_input, context=context)
         except Exception as exc:
+            if _is_lab4ai_credentials_missing(tool_name, exc):
+                metadata = await self._ask_user(
+                    conversation_id,
+                    metadata=metadata,
+                    question="Lab4AI 凭证未配置，请先由管理员配置平台账号。",
+                    options=["已完成配置，继续执行", "停止任务"],
+                    step=_admin_config_step(tool_name, tool_input),
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    risk_level=tool_definition.risk_level,
+                    audit_category=tool_definition.audit_category,
+                    tool_call_id=str(tool_input.get("tool_call_id") or ""),
+                    workflow_step_id=str(tool_input.get("workflow_step_id") or ""),
+                    intervention={
+                        "type": "lab4ai_credentials_required",
+                        "title": "需要配置 Lab4AI 平台账号",
+                        "admin_endpoint": "/api/admin/settings/lab4ai",
+                    },
+                )
+                return None, metadata, True
             self._publish(
                 conversation_id,
                 {
@@ -740,6 +761,7 @@ class AgentLoopManager:
         audit_category: str | None = None,
         tool_call_id: str | None = None,
         workflow_step_id: str | None = None,
+        intervention: dict[str, object] | None = None,
     ) -> dict:
         result = await self._tools.ask_user(question)
         metadata = mark_waiting_for_user(
@@ -751,6 +773,7 @@ class AgentLoopManager:
             tool_input=tool_input,
             tool_call_id=tool_call_id,
             workflow_step_id=workflow_step_id,
+            intervention=intervention,
         )
         await self._set_status_and_metadata(conversation_id, ConversationStatus.ACTIVE, metadata)
         await self._tool(
@@ -767,13 +790,8 @@ class AgentLoopManager:
                 "risk_level": risk_level,
                 "audit_category": audit_category,
                 "confirmation_required": True,
+                "intervention": intervention,
             },
-        )
-        await self._system(
-            conversation_id,
-            "需要你确认后再继续执行：\n"
-            f"{question}\n\n"
-            "可回复：继续执行 / 先修改方案 / 停止任务，或直接输入你的具体要求。",
         )
         self._publish(
             conversation_id,
@@ -787,6 +805,7 @@ class AgentLoopManager:
                 "workflow_step_id": workflow_step_id,
                 "risk_level": risk_level,
                 "audit_category": audit_category,
+                "intervention": intervention,
             },
         )
         self._publish(conversation_id, {"type": "status", "status": WORKFLOW_WAITING_FOR_USER})
@@ -1077,6 +1096,19 @@ def _format_exception(exc: Exception) -> str:
     if message:
         return f"{type(exc).__name__}: {message}"
     return type(exc).__name__
+
+
+def _is_lab4ai_credentials_missing(tool_name: str, exc: Exception) -> bool:
+    return tool_name.startswith("lab4ai_") and str(exc).startswith(LAB4AI_CREDENTIAL_ERROR_PREFIX)
+
+
+def _admin_config_step(tool_name: str, tool_input: dict[str, object]) -> str:
+    parts = ["admin_config", "lab4ai", tool_name]
+    for key in ("workflow_run_id", "tool_call_id", "workflow_step_id"):
+        value = str(tool_input.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    return ":".join(parts)
 
 
 def _assistant_tool_message(response: LLMToolResponse) -> dict:

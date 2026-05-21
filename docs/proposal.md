@@ -487,7 +487,12 @@ WebSocket 推送内容：
     "tool_call_id": "toolu_01...",
     "workflow_step_id": "step_3_deploy_cpu",
     "tool_input": {},
-    "run_id": "当前 workflow_run_id"
+    "run_id": "当前 workflow_run_id",
+    "intervention": {
+      "type": "lab4ai_credentials_required",
+      "title": "需要配置 Lab4AI 平台账号",
+      "admin_endpoint": "/api/admin/settings/lab4ai"
+    }
   }
 }
 ```
@@ -522,14 +527,16 @@ HITL 不是单独一个页面，而是对话流程中的“等待用户决策”
 
 1. Agent 通过 `ask_user` 生成问题。
 2. 后端把 `workflow_state` 置为 `waiting_for_user`，并写入 `pending_user_input`。
-3. WebSocket 推送 `ask_user` 事件，前端展示问题和可选操作。
-4. 输入框保持可用，用户直接回复文字或点击快捷按钮。
+3. WebSocket 推送 `ask_user` 事件，前端展示问题和可选操作；需要明确人参与决策或配置时，同时弹出决策弹窗。
+4. 输入框保持可用，用户直接回复文字、点击快捷按钮，或在专用弹窗中填写必要配置。
 5. 用户回复后，`POST /api/conversations/{id}/messages` 继续推进流程。
 6. 后端读取原始消息历史与 `memory`，从上次暂停点继续执行。
 
 实现约束：
 
 - `ask_user` 不应只是普通文本，它必须能暂停流程。
+- `pending_user_input.intervention` 用于声明专用人工介入 UI，前端按 `type` 分发弹窗；普通确认走通用决策弹窗，`lab4ai_credentials_required` 走 Lab4AI 管理员凭证配置弹窗。
+- Lab4AI 凭证缺失不得直接让 workflow 失败，应暂停当前 `tool_call_id`，提示管理员配置 `/api/admin/settings/lab4ai`，保存后再由用户确认“已完成配置，继续执行”。
 - 被确认过的决策要写进 `memory.decisions`，但审批只对当前 `workflow_run_id + tool_call_id` 生效，避免新一轮对话或同一轮内另一个工具调用误用旧确认。
 - HITL 审批绑定字段为 `workflow_run_id / tool_call_id / workflow_step_id / tool_name`。缺任一关键字段时，高风险或计费 Tool 不能继续执行。
 - 第一阶段审计不新增独立表，确认请求、用户回复、审批结果和 Tool 执行结果写入 `ConversationMessage.message_metadata`；后续管理员审计检索需要增强时，再迁移到独立 `AuditLog`。

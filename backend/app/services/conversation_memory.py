@@ -111,6 +111,7 @@ def mark_waiting_for_user(
     tool_input: dict[str, Any] | None = None,
     tool_call_id: str | None = None,
     workflow_step_id: str | None = None,
+    intervention: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = ensure_memory(metadata)
     result["workflow_state"] = WORKFLOW_WAITING_FOR_USER
@@ -130,6 +131,8 @@ def mark_waiting_for_user(
         pending["tool_call_id"] = str(resolved_tool_call_id)
     if resolved_workflow_step_id:
         pending["workflow_step_id"] = str(resolved_workflow_step_id)
+    if intervention:
+        pending["intervention"] = dict(intervention)
     result["pending_user_input"] = pending
     memory = result["memory"]
     open_questions = [
