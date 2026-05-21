@@ -538,22 +538,28 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
 
 def _build_confirmation_question(tool: ToolDefinition, payload: dict[str, Any]) -> str:
     if tool.name == "lab4ai_create_instance":
+        resource_kind = str(payload.get("resource_kind") or "算力").upper()
         return (
-            "下一步需要调用 `lab4ai_create_instance` 创建 Lab4AI 算力实例。"
-            f"{tool.confirmation_reason}是否继续？"
+            f"接下来需要创建一个 Lab4AI {resource_kind} 实例，用于继续复现流程。"
+            "这会占用远程算力资源并可能产生费用。是否继续？"
         )
     if tool.name == "ssh_execute":
         command = str(payload.get("command") or "").strip() or "(空命令)"
         return (
-            "下一步需要通过 `ssh_execute` 在远程实例执行命令："
-            f"`{command}`。{tool.confirmation_reason}是否继续？"
+            "接下来需要在远程实例执行一条高风险命令："
+            f"`{command}`。该操作可能修改环境或产生较长时间的副作用。是否继续？"
         )
     if tool.name == "lab4ai_stop_instance":
         return (
-            "下一步需要调用 `lab4ai_stop_instance` 停止并释放当前实例。"
-            f"{tool.confirmation_reason}是否继续？"
+            "接下来需要停止并释放当前 Lab4AI 实例。"
+            "释放后实例上的临时运行状态可能不可恢复。是否继续？"
         )
-    return f"下一步需要调用 `{tool.name}`。{tool.confirmation_reason}是否继续？"
+    if tool.name == "file_write":
+        return (
+            "接下来需要写入任务工作区文件。"
+            "该操作可能覆盖已有产物或改变远程工作区状态。是否继续？"
+        )
+    return f"接下来需要执行一步受控操作。{tool.confirmation_reason}是否继续？"
 
 
 def _requires_confirmation(tool: ToolDefinition, payload: dict[str, Any]) -> bool:

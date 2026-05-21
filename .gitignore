@@ -26,6 +26,12 @@ Thumbs.db
 
 # Claude Code
 .claude/
+!.claude/
+!.claude/agents/
+!.claude/agents/*.md
+!.claude/commands/
+!.claude/commands/*.md
+.claude/settings.local.json
 
 # Env / secrets
 .env

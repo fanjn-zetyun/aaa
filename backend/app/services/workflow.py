@@ -553,18 +553,30 @@ class SkillWorkflowRunner:
         tool_name: str,
         tool_input: dict[str, object] | None = None,
     ) -> tuple[ToolResult | None, dict, bool]:
-        tool_call_id = f"toolu_{uuid4().hex}"
         payload = dict(tool_input or {})
         payload.setdefault("workflow_step_id", step.id)
-        payload.setdefault("tool_call_id", tool_call_id)
-
-        metadata = add_workflow_tool_call(
-            metadata,
-            step,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            status="running",
+        tool_call_id = str(
+            payload.get("tool_call_id")
+            or _waiting_tool_call_id(metadata, step.id, tool_name)
+            or f"toolu_{uuid4().hex}"
         )
+        payload["tool_call_id"] = tool_call_id
+
+        if _has_tool_call(metadata, step.id, tool_call_id):
+            metadata = update_workflow_tool_call(
+                metadata,
+                step.id,
+                tool_call_id,
+                status="running",
+            )
+        else:
+            metadata = add_workflow_tool_call(
+                metadata,
+                step,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                status="running",
+            )
         self._latest_metadata = metadata
         metadata = await self._publish_step_progress(
             metadata,
@@ -1119,6 +1131,27 @@ def workflow_resource_server_id(metadata: dict, kind: str) -> str | None:
     resource = (metadata.get("workflow_resources") or {}).get(kind) or {}
     server_id = resource.get("server_id")
     return str(server_id) if server_id else None
+
+
+def _waiting_tool_call_id(metadata: dict, step_id: str, tool_name: str) -> str | None:
+    step = workflow_step_state(metadata, step_id)
+    for item in reversed(step.get("tool_calls") or []):
+        if (
+            isinstance(item, dict)
+            and item.get("name") == tool_name
+            and item.get("status") == "waiting_for_user"
+            and item.get("tool_call_id")
+        ):
+            return str(item["tool_call_id"])
+    return None
+
+
+def _has_tool_call(metadata: dict, step_id: str, tool_call_id: str) -> bool:
+    step = workflow_step_state(metadata, step_id)
+    return any(
+        isinstance(item, dict) and item.get("tool_call_id") == tool_call_id
+        for item in (step.get("tool_calls") or [])
+    )
 
 
 def _initial_step_runtime_fields(step_id: str) -> dict:

@@ -128,12 +128,16 @@ tasks:
     )
     events: list[dict] = []
     paused_once = False
+    create_call_ids: list[str] = []
 
     async def invoke(metadata, tool_name, tool_input):
         nonlocal paused_once
         if tool_name == "lab4ai_create_instance" and not paused_once:
             paused_once = True
+            create_call_ids.append(str(tool_input["tool_call_id"]))
             return None, metadata, True
+        if tool_name == "lab4ai_create_instance":
+            create_call_ids.append(str(tool_input["tool_call_id"]))
         return ToolResult(tool_name, "ok", metadata={"server_id": "server-1"}), metadata, False
 
     async def write(metadata):
@@ -156,6 +160,8 @@ tasks:
     assert workflow_step_state(second.metadata, "step_3_deploy_cpu")["status"] == "completed"
     assert workflow_step_state(second.metadata, "step_5_release_cpu")["status"] == "completed"
     assert second.metadata["workflow_resources"]["cpu"]["released"] is True
+    assert len(create_call_ids) == 2
+    assert create_call_ids[0] == create_call_ids[1]
 
 
 @pytest.mark.asyncio

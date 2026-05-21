@@ -23,7 +23,12 @@ interface Conversation {
     workflow_resources?: Record<string, WorkflowResource>;
     workflow_results?: Record<string, unknown>;
     memory?: {
-      decisions?: Array<{ step?: string; outcome?: string; answer?: string }>;
+      decisions?: Array<{
+        step?: string;
+        outcome?: string;
+        answer?: string;
+        tool_name?: string;
+      }>;
       artifacts?: string[];
     };
   };
@@ -197,7 +202,11 @@ function PermissionSection({ conversation }: { conversation?: Conversation }) {
   const pendingTool = metadata.pending_user_input?.tool_name;
   const decisions = metadata.memory?.decisions || [];
   const resourceApproved = decisions.some(
-    (item) => item.step === "confirm_resource_creation" && item.outcome === "approved"
+    (item) =>
+      item.outcome === "approved" &&
+      (item.tool_name === "lab4ai_create_instance" ||
+        item.step === "confirm_resource_creation" ||
+        item.step?.startsWith("tool_confirm:lab4ai_create_instance"))
   );
   const isWaiting = metadata.workflow_state === "waiting_for_user";
 
