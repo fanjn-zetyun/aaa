@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from pathlib import Path
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -23,8 +25,14 @@ from app.services.lab4ai.client import (
     stop_instance_details,
 )
 from app.services.lab4ai.credentials import load_lab4ai_credentials
+from app.services.skill_runtime import SkillRuntime
+from app.core.config import get_settings
 
 TOOL_CONFIRM_STEP_PREFIX = "tool_confirm:"
+SSH_EXECUTE_TOOL_NAMES = {"ssh_execute", "claw_shell_run", "ssh_essentials_execute"}
+FILE_WRITE_TOOL_NAMES = {"file_write", "file_system_write", "workspace_write"}
+FILE_READ_TOOL_NAMES = {"file_system_read", "workspace_read"}
+FILE_LIST_TOOL_NAMES = {"file_system_list", "workspace_list"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +130,12 @@ class ToolExecutionContext:
 
 class ToolRegistry:
     def __init__(self) -> None:
-        self._definitions = _build_tool_definitions()
+        settings = get_settings()
+        self._skill_runtime = SkillRuntime(
+            settings.skills_dir_path,
+            settings.workspace_root_path,
+        )
+        self._definitions = _build_tool_definitions(self._skill_runtime)
 
     def definition(self, name: str) -> ToolDefinition:
         try:
@@ -186,22 +199,44 @@ class ToolRegistry:
     ) -> ToolResult:
         self.definition(name)
         payload = dict(tool_input or {})
-        if name == "analyze_repo":
-            return await self._analyze_repo(payload.get("github_url"))
-        if name == "lab4ai_create_instance":
+        if _contains_unrendered_template(payload):
+            return ToolResult(
+                name,
+                "工具参数中包含未渲染模板变量 `{{...}}`，已拒绝执行。",
+                ok=False,
+                metadata={"error_code": "unrendered_template"},
+            )
+        if name in {"analyze_repo", "repo_audit"}:
+            return await self._analyze_repo(payload, context, result_name=name)
+        if name in {"analyze_paper", "paper_analyze"}:
+            return await self._analyze_paper(payload, context, result_name=name)
+        if name in {"lab4ai_create_instance", "instance_create"}:
             return await self._lab4ai_create_instance(payload, context)
-        if name == "lab4ai_stop_instance":
+        if name in {"lab4ai_stop_instance", "instance_stop"}:
             return await self._lab4ai_stop_instance(payload, context)
         if name == "lab4ai_list_instances":
             return await self._lab4ai_list_instances(context)
-        if name == "ssh_execute":
-            return await self._ssh_execute(str(payload.get("command") or ""))
-        if name == "file_write":
-            return await self._file_write(payload)
-        if name == "repro_report":
-            return await self._repro_report(payload)
+        if name in SSH_EXECUTE_TOOL_NAMES:
+            return await self._ssh_execute(payload, context, result_name=name)
+        if name == "remote_project_prep":
+            return await self._remote_project_prep(payload, context)
+        if name in FILE_WRITE_TOOL_NAMES:
+            return await self._file_write(payload, context, result_name=name)
+        if name in FILE_READ_TOOL_NAMES:
+            return await self._file_read(payload, context, result_name=name)
+        if name in FILE_LIST_TOOL_NAMES:
+            return await self._file_list(payload, context, result_name=name)
+        if name in {"repro_report", "generate_repro_report"}:
+            return await self._repro_report(payload, context, result_name=name)
         if name == "ask_user":
             return await self._ask_user(str(payload.get("question") or ""))
+        if self._skill_runtime.spec(name):
+            return ToolResult(
+                name,
+                f"skill tool `{name}` 已被识别，但当前没有安全的后端执行适配器。",
+                ok=False,
+                metadata={"error_code": "missing_adapter"},
+            )
         raise ValueError(f"未知工具：{name}")
 
     async def analyze_repo(self, github_url: str | None) -> ToolResult:
@@ -219,15 +254,47 @@ class ToolRegistry:
     async def ask_user(self, question: str) -> ToolResult:
         return await self.invoke("ask_user", {"question": question})
 
-    async def _analyze_repo(self, github_url: str | None) -> ToolResult:
-        await asyncio.sleep(0.1)
+    async def _analyze_repo(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "analyze_repo",
+    ) -> ToolResult:
+        github_url = payload.get("github_url") or payload.get("repo_url")
         if not github_url:
-            return ToolResult("analyze_repo", "未提供 GitHub URL，无法分析仓库。", ok=False)
-        repo = github_url.rstrip("/").split("github.com/")[-1]
+            return ToolResult(result_name, "未提供 GitHub URL，无法分析仓库。", ok=False)
+        runtime_payload = {
+            **payload,
+            "repo_url": github_url,
+            "github_url": github_url,
+        }
+        if context:
+            runtime_payload.setdefault("conversation_id", context.conversation_id)
+        result = await self._skill_runtime.invoke("repo_audit", runtime_payload)
         return ToolResult(
-            "analyze_repo",
-            f"已识别仓库 {repo}。MVP 阶段先生成复现计划，并把后续环境准备交给 Lab4AI/SSH 工具。",
-            metadata={"repo": repo},
+            result_name,
+            result.content,
+            ok=result.ok,
+            metadata=result.metadata,
+        )
+
+    async def _analyze_paper(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "analyze_paper",
+    ) -> ToolResult:
+        runtime_payload = dict(payload)
+        if context:
+            runtime_payload.setdefault("conversation_id", context.conversation_id)
+        result = await self._skill_runtime.invoke("paper_analyze", runtime_payload)
+        return ToolResult(
+            result_name,
+            result.content,
+            ok=result.ok,
+            metadata=result.metadata,
         )
 
     async def _lab4ai_create_instance(
@@ -291,37 +358,560 @@ class ToolRegistry:
             },
         )
 
-    async def _ssh_execute(self, command: str) -> ToolResult:
-        await asyncio.sleep(0.1)
+    async def _ssh_execute(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "ssh_execute",
+    ) -> ToolResult:
+        command = str(payload.get("command") or "")
         if not command.strip():
-            return ToolResult("ssh_execute", "未提供远程命令，SSH 工具未执行。", ok=False)
+            return ToolResult(result_name, "未提供远程命令，SSH 工具未执行。", ok=False)
+        if context is None:
+            return ToolResult(
+                result_name,
+                "缺少 Tool 执行上下文，无法解析当前对话绑定的远程实例。",
+                ok=False,
+                metadata={"error_code": "missing_context", "command": command},
+            )
+        instance = await _resolve_cloud_instance(payload, context)
+        if instance is None:
+            return ToolResult(
+                result_name,
+                "未找到当前任务可用的 Lab4AI 实例，无法执行 SSH 命令。",
+                ok=False,
+                metadata={"error_code": "missing_cloud_instance", "command": command},
+            )
+        if not instance.ssh_host or not instance.ssh_port or not instance.ssh_pass:
+            return ToolResult(
+                result_name,
+                "Lab4AI 实例缺少 SSH 连接信息，无法执行远程命令。",
+                ok=False,
+                metadata={
+                    "error_code": "missing_ssh_credentials",
+                    "server_id": instance.server_id,
+                    "command": command,
+                },
+            )
+        try:
+            import paramiko
+        except ImportError:
+            return ToolResult(
+                result_name,
+                "后端缺少 paramiko 依赖，无法执行真实 SSH。",
+                ok=False,
+                metadata={"error_code": "missing_dependency", "dependency": "paramiko"},
+            )
+
+        timeout = _as_int(payload.get("timeout"), default=300)
+        connect_retries = max(1, _as_int(payload.get("connect_retries"), default=1))
+        connect_retry_interval = max(
+            1,
+            _as_int(payload.get("connect_retry_interval"), default=10),
+        )
+        started = datetime.now(UTC)
+
+        def _run_ssh() -> dict[str, Any]:
+            for attempt in range(1, connect_retries + 1):
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                try:
+                    client.connect(
+                        hostname=str(instance.ssh_host),
+                        port=int(instance.ssh_port or 22),
+                        username=instance.ssh_user or "root",
+                        password=instance.ssh_pass,
+                        timeout=min(timeout, 30),
+                        banner_timeout=min(timeout, 30),
+                        auth_timeout=min(timeout, 30),
+                    )
+                except Exception:
+                    client.close()
+                    if attempt >= connect_retries:
+                        raise
+                    time.sleep(connect_retry_interval)
+                    continue
+                try:
+                    stdin, stdout, stderr = client.exec_command(
+                        command,
+                        timeout=timeout,
+                        get_pty=bool(payload.get("pty", False)),
+                    )
+                    if stdin:
+                        stdin.close()
+                    stdout_text = stdout.read().decode("utf-8", errors="replace")
+                    stderr_text = stderr.read().decode("utf-8", errors="replace")
+                    exit_code = stdout.channel.recv_exit_status()
+                    return {
+                        "exit_code": exit_code,
+                        "stdout": stdout_text,
+                        "stderr": stderr_text,
+                    }
+                finally:
+                    client.close()
+            raise RuntimeError("SSH connect retry loop exhausted")
+
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_run_ssh), timeout=timeout + 10)
+        except TimeoutError:
+            return ToolResult(
+                result_name,
+                f"SSH 命令执行超时：{command}",
+                ok=False,
+                metadata={
+                    "error_code": "ssh_timeout",
+                    "server_id": instance.server_id,
+                    "command": command,
+                    "timeout": timeout,
+                    "connect_retries": connect_retries,
+                    "started_at": started.isoformat(),
+                    "completed_at": datetime.now(UTC).isoformat(),
+                },
+            )
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"SSH 命令执行失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={
+                    "error_code": "ssh_execute_failed",
+                    "server_id": instance.server_id,
+                    "command": command,
+                    "connect_retries": connect_retries,
+                    "started_at": started.isoformat(),
+                    "completed_at": datetime.now(UTC).isoformat(),
+                },
+            )
+
+        completed = datetime.now(UTC)
+        ok = int(result["exit_code"]) == 0
+        content = (
+            f"SSH 命令执行完成，exit_code={result['exit_code']}。\n"
+            f"stdout:\n{_tail(result['stdout'])}\n"
+            f"stderr:\n{_tail(result['stderr'])}"
+        )
         return ToolResult(
-            "ssh_execute",
-            f"已模拟执行远程命令：{command}",
-            metadata={"command": command, "simulated": True},
+            result_name,
+            content.strip(),
+            ok=ok,
+            metadata={
+                "error_code": None if ok else "nonzero_exit",
+                "server_id": instance.server_id,
+                "remote_host": instance.ssh_host,
+                "remote_port": instance.ssh_port,
+                "command": command,
+                "exit_code": result["exit_code"],
+                "stdout": result["stdout"],
+                "stderr": result["stderr"],
+                "connect_retries": connect_retries,
+                "started_at": started.isoformat(),
+                "completed_at": completed.isoformat(),
+            },
         )
 
-    async def _file_write(self, payload: dict[str, Any]) -> ToolResult:
-        await asyncio.sleep(0.1)
+    async def _remote_project_prep(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        repo_name = str(payload.get("repo_name") or "project").strip() or "project"
+        dependency_cmds = _as_list(payload.get("dependency_cmds"))
+        data_cmds = _as_list(payload.get("data_cmds"))
+        weight_cmds = _as_list(payload.get("weight_cmds"))
+        commands = [
+            "set -e",
+            f"BASE=/workspace/user-data/codelab/{_safe_remote_name(repo_name)}",
+            "mkdir -p \"$BASE/code\" \"$BASE/data\" \"$BASE/model\"",
+            "cd \"$BASE/code\"",
+            "ln -sfn ../data data",
+            "ln -sfn ../model model",
+        ]
+        commands.extend(dependency_cmds)
+        commands.extend(data_cmds)
+        commands.extend(weight_cmds)
+        if len(commands) == 6:
+            commands.append("echo 'No project prep commands were provided; workspace skeleton is ready.'")
+        command = " && ".join(f"({cmd})" for cmd in commands)
+        result = await self._ssh_execute(
+            {
+                **payload,
+                "command": command,
+                "timeout": _as_int(payload.get("timeout"), default=1800),
+            },
+            context,
+        )
+        return ToolResult(
+            "remote_project_prep",
+            result.content,
+            ok=result.ok,
+            metadata={**result.metadata, "repo_name": repo_name},
+        )
+
+    async def _file_write(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "file_write",
+    ) -> ToolResult:
         path = str(payload.get("path") or payload.get("remote_path") or "").strip()
+        content = str(payload.get("content") or "")
         if not path:
             return ToolResult(
-                "file_write",
+                result_name,
                 "No target path was provided; file_write did not run.",
                 ok=False,
-                metadata={"simulated": True, "written": False, **payload},
+                metadata={"error_code": "missing_path", "written": False, **payload},
             )
         if _is_skills_path(path):
             return ToolResult(
-                "file_write",
+                result_name,
                 "Refused to target the skills directory; no file was written.",
                 ok=False,
-                metadata={"simulated": True, "written": False, "path": path, **payload},
+                metadata={"error_code": "forbidden_path", "written": False, "path": path, **payload},
+            )
+        if _is_remote_path(path) and not payload.get("local_only"):
+            return await self._remote_file_write(payload, context, result_name=result_name)
+
+        try:
+            target = _resolve_workspace_path(path, context)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"文件写入失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={"error_code": "file_write_failed", "path": path, "written": False},
             )
         return ToolResult(
-            "file_write",
-            f"Simulated remote file write to {path}; no local file was written.",
-            metadata={"simulated": True, "written": False, "path": path, **payload},
+            result_name,
+            f"已写入任务工作区文件：{target}",
+            metadata={"written": True, "path": str(target), "artifact_paths": [str(target)]},
+        )
+
+    async def _remote_file_write(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "file_write",
+    ) -> ToolResult:
+        path = str(payload.get("path") or payload.get("remote_path") or "").strip()
+        content = str(payload.get("content") or "")
+        if context is None:
+            return ToolResult(
+                result_name,
+                "缺少 Tool 执行上下文，无法写入远程文件。",
+                ok=False,
+                metadata={"error_code": "missing_context", "path": path, "written": False},
+            )
+        instance = await _resolve_cloud_instance(payload, context)
+        if instance is None or not instance.ssh_host or not instance.ssh_port or not instance.ssh_pass:
+            return ToolResult(
+                result_name,
+                "当前任务没有可用 SSH 实例，无法写入远程文件。",
+                ok=False,
+                metadata={"error_code": "missing_cloud_instance", "path": path, "written": False},
+            )
+        try:
+            import paramiko
+        except ImportError:
+            return ToolResult(
+                result_name,
+                "后端缺少 paramiko 依赖，无法通过 SFTP 写入远程文件。",
+                ok=False,
+                metadata={"error_code": "missing_dependency", "dependency": "paramiko"},
+            )
+
+        def _write_remote() -> None:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(
+                    hostname=str(instance.ssh_host),
+                    port=int(instance.ssh_port or 22),
+                    username=instance.ssh_user or "root",
+                    password=instance.ssh_pass,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                )
+                parent = str(Path(path).parent).replace("\\", "/")
+                client.exec_command(f"mkdir -p {_shell_quote(parent)}")
+                sftp = client.open_sftp()
+                try:
+                    with sftp.open(path, "w") as handle:
+                        handle.write(content)
+                finally:
+                    sftp.close()
+            finally:
+                client.close()
+
+        try:
+            await asyncio.to_thread(_write_remote)
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"远程文件写入失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={"error_code": "remote_file_write_failed", "path": path, "written": False},
+            )
+        return ToolResult(
+            result_name,
+            f"已通过 SFTP 写入远程文件：{path}",
+            metadata={"written": True, "remote": True, "path": path},
+        )
+
+    async def _file_read(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "file_system_read",
+    ) -> ToolResult:
+        path = str(payload.get("path") or payload.get("remote_path") or "").strip()
+        if not path:
+            return ToolResult(
+                result_name,
+                "未提供读取路径。",
+                ok=False,
+                metadata={"error_code": "missing_path"},
+            )
+        if _is_skills_path(path):
+            return ToolResult(
+                result_name,
+                "拒绝读取 skills 目录内容。",
+                ok=False,
+                metadata={"error_code": "forbidden_path", "path": path},
+            )
+        max_chars = max(1, _as_int(payload.get("max_chars"), default=12000))
+        if _is_remote_path(path) and not payload.get("local_only"):
+            return await self._remote_file_read(
+                payload,
+                context,
+                result_name=result_name,
+                max_chars=max_chars,
+            )
+
+        try:
+            target = _resolve_workspace_path(path, context)
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"文件读取失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={"error_code": "file_read_failed", "path": path},
+            )
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars]
+        return ToolResult(
+            result_name,
+            content,
+            metadata={"path": str(target), "truncated": truncated},
+        )
+
+    async def _remote_file_read(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str,
+        max_chars: int,
+    ) -> ToolResult:
+        path = str(payload.get("path") or payload.get("remote_path") or "").strip()
+        if context is None:
+            return ToolResult(
+                result_name,
+                "缺少 Tool 执行上下文，无法读取远程文件。",
+                ok=False,
+                metadata={"error_code": "missing_context", "path": path},
+            )
+        instance = await _resolve_cloud_instance(payload, context)
+        if instance is None or not instance.ssh_host or not instance.ssh_port or not instance.ssh_pass:
+            return ToolResult(
+                result_name,
+                "当前任务没有可用 SSH 实例，无法读取远程文件。",
+                ok=False,
+                metadata={"error_code": "missing_cloud_instance", "path": path},
+            )
+        try:
+            import paramiko
+        except ImportError:
+            return ToolResult(
+                result_name,
+                "后端缺少 paramiko 依赖，无法通过 SFTP 读取远程文件。",
+                ok=False,
+                metadata={"error_code": "missing_dependency", "dependency": "paramiko"},
+            )
+
+        def _read_remote() -> str:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(
+                    hostname=str(instance.ssh_host),
+                    port=int(instance.ssh_port or 22),
+                    username=instance.ssh_user or "root",
+                    password=instance.ssh_pass,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                )
+                sftp = client.open_sftp()
+                try:
+                    with sftp.open(path, "r") as handle:
+                        data = handle.read(max_chars + 1)
+                finally:
+                    sftp.close()
+            finally:
+                client.close()
+            if isinstance(data, bytes):
+                return data.decode("utf-8", errors="replace")
+            return str(data)
+
+        try:
+            content = await asyncio.to_thread(_read_remote)
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"远程文件读取失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={"error_code": "remote_file_read_failed", "path": path},
+            )
+        truncated = len(content) > max_chars
+        if truncated:
+            content = content[:max_chars]
+        return ToolResult(
+            result_name,
+            content,
+            metadata={"remote": True, "path": path, "truncated": truncated},
+        )
+
+    async def _file_list(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "file_system_list",
+    ) -> ToolResult:
+        path = str(payload.get("path") or payload.get("remote_path") or ".").strip() or "."
+        if _is_skills_path(path):
+            return ToolResult(
+                result_name,
+                "拒绝列出 skills 目录内容。",
+                ok=False,
+                metadata={"error_code": "forbidden_path", "path": path},
+            )
+        max_entries = max(1, _as_int(payload.get("max_entries"), default=200))
+        if _is_remote_path(path) and not payload.get("local_only"):
+            return await self._remote_file_list(
+                payload,
+                context,
+                result_name=result_name,
+                max_entries=max_entries,
+            )
+
+        try:
+            target = _resolve_workspace_path(path, context)
+            entries = sorted(target.iterdir(), key=lambda item: item.name.lower())
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"目录读取失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={"error_code": "file_list_failed", "path": path},
+            )
+        rows = [
+            f"{'d' if entry.is_dir() else '-'} {entry.name}"
+            for entry in entries[:max_entries]
+        ]
+        return ToolResult(
+            result_name,
+            "\n".join(rows),
+            metadata={
+                "path": str(target),
+                "entries": [entry.name for entry in entries[:max_entries]],
+                "truncated": len(entries) > max_entries,
+            },
+        )
+
+    async def _remote_file_list(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str,
+        max_entries: int,
+    ) -> ToolResult:
+        path = str(payload.get("path") or payload.get("remote_path") or ".").strip() or "."
+        if context is None:
+            return ToolResult(
+                result_name,
+                "缺少 Tool 执行上下文，无法列出远程目录。",
+                ok=False,
+                metadata={"error_code": "missing_context", "path": path},
+            )
+        instance = await _resolve_cloud_instance(payload, context)
+        if instance is None or not instance.ssh_host or not instance.ssh_port or not instance.ssh_pass:
+            return ToolResult(
+                result_name,
+                "当前任务没有可用 SSH 实例，无法列出远程目录。",
+                ok=False,
+                metadata={"error_code": "missing_cloud_instance", "path": path},
+            )
+        try:
+            import paramiko
+        except ImportError:
+            return ToolResult(
+                result_name,
+                "后端缺少 paramiko 依赖，无法通过 SFTP 列出远程目录。",
+                ok=False,
+                metadata={"error_code": "missing_dependency", "dependency": "paramiko"},
+            )
+
+        def _list_remote() -> list[dict[str, Any]]:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(
+                    hostname=str(instance.ssh_host),
+                    port=int(instance.ssh_port or 22),
+                    username=instance.ssh_user or "root",
+                    password=instance.ssh_pass,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                )
+                sftp = client.open_sftp()
+                try:
+                    attrs = sftp.listdir_attr(path)
+                finally:
+                    sftp.close()
+            finally:
+                client.close()
+            return [
+                {"name": item.filename, "size": int(getattr(item, "st_size", 0) or 0)}
+                for item in sorted(attrs, key=lambda attr: attr.filename.lower())[:max_entries]
+            ]
+
+        try:
+            entries = await asyncio.to_thread(_list_remote)
+        except Exception as exc:
+            return ToolResult(
+                result_name,
+                f"远程目录读取失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={"error_code": "remote_file_list_failed", "path": path},
+            )
+        rows = [f"- {item['name']} {item['size']}B" for item in entries]
+        return ToolResult(
+            result_name,
+            "\n".join(rows),
+            metadata={"remote": True, "path": path, "entries": entries},
         )
 
     async def _lab4ai_stop_instance(
@@ -416,14 +1006,23 @@ class ToolRegistry:
             },
         )
 
-    async def _repro_report(self, payload: dict[str, Any]) -> ToolResult:
-        await asyncio.sleep(0.1)
+    async def _repro_report(
+        self,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+        *,
+        result_name: str = "repro_report",
+    ) -> ToolResult:
         repo_name = str(payload.get("repo_name") or "project")
-        report_path = f"/root/lab4ai/workspace/{repo_name}/{repo_name}_Repro_Report.docx"
+        report_payload = _build_report_kwargs(repo_name, payload)
+        if context:
+            report_payload["conversation_id"] = context.conversation_id
+        result = await self._skill_runtime.invoke("generate_repro_report", report_payload)
         return ToolResult(
-            "repro_report",
-            f"已模拟生成工业级复现报告：{report_path}",
-            metadata={"simulated": True, "report_path": report_path, **payload},
+            result_name,
+            result.content,
+            ok=result.ok,
+            metadata={**payload, **result.metadata},
         )
 
     async def _ask_user(self, question: str) -> ToolResult:
@@ -444,14 +1043,30 @@ def infer_task_type(text: str, fallback: str = "general") -> str:
     return fallback
 
 
-def _build_tool_definitions() -> dict[str, ToolDefinition]:
-    return {
+def _build_tool_definitions(skill_runtime: SkillRuntime) -> dict[str, ToolDefinition]:
+    definitions = {
         "analyze_repo": ToolDefinition(
             name="analyze_repo",
             description="分析 GitHub 仓库结构和复现入口。",
             input_schema={
                 "type": "object",
                 "properties": {"github_url": {"type": ["string", "null"]}},
+            },
+            read_only=True,
+            risk_level="low",
+            audit_category="workflow",
+        ),
+        "analyze_paper": ToolDefinition(
+            name="analyze_paper",
+            description="解析论文 PDF，提取复现实验相关的方法、数据集、指标和超参数。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "github_url": {"type": ["string", "null"]},
+                    "paper_url": {"type": ["string", "null"]},
+                    "paper_path": {"type": ["string", "null"]},
+                    "output_dir": {"type": ["string", "null"]},
+                },
             },
             read_only=True,
             risk_level="low",
@@ -471,13 +1086,58 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
             description="在远程实例上执行 SSH 命令。",
             input_schema={
                 "type": "object",
-                "properties": {"command": {"type": "string"}},
+                "properties": {
+                    "command": {"type": "string"},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                    "timeout": {"type": "integer"},
+                    "connect_retries": {"type": "integer"},
+                    "connect_retry_interval": {"type": "integer"},
+                },
                 "required": ["command"],
             },
             confirmation_policy="risky",
             risk_level="high",
             audit_category="ssh",
             confirmation_reason="检测到命令可能破坏环境或产生长时间副作用。",
+        ),
+        "claw_shell_run": ToolDefinition(
+            name="claw_shell_run",
+            description="兼容旧 claw-shell 技能入口；底层映射为受控 ssh_execute，不执行本机 tmux。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                    "timeout": {"type": "integer"},
+                    "connect_retries": {"type": "integer"},
+                    "connect_retry_interval": {"type": "integer"},
+                },
+                "required": ["command"],
+            },
+            confirmation_policy="risky",
+            risk_level="high",
+            audit_category="ssh",
+            confirmation_reason="兼容旧 shell 技能的远程命令执行，必须通过后端 SSH 审计路径。",
+        ),
+        "ssh_essentials_execute": ToolDefinition(
+            name="ssh_essentials_execute",
+            description="兼容 ssh-essentials 中的远程命令语义；底层映射为受控 ssh_execute。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["command"],
+            },
+            confirmation_policy="risky",
+            risk_level="high",
+            audit_category="ssh",
+            confirmation_reason="兼容旧 SSH 技能的远程命令执行，必须通过后端 SSH 审计路径。",
         ),
         "lab4ai_stop_instance": ToolDefinition(
             name="lab4ai_stop_instance",
@@ -495,9 +1155,60 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
             risk_level="low",
             audit_category="lab4ai",
         ),
+        "file_system_read": ToolDefinition(
+            name="file_system_read",
+            description="读取受控任务 workspace 或当前任务远程 workspace 中的文件。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                    "max_chars": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+            read_only=True,
+            risk_level="low",
+            audit_category="file",
+        ),
+        "file_system_list": ToolDefinition(
+            name="file_system_list",
+            description="列出受控任务 workspace 或当前任务远程 workspace 中的目录。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                    "max_entries": {"type": "integer"},
+                },
+            },
+            read_only=True,
+            risk_level="low",
+            audit_category="file",
+        ),
+        "file_system_write": ToolDefinition(
+            name="file_system_write",
+            description="兼容 file-system 写入语义；底层映射为受控 file_write。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "server_id": {"type": "string"},
+                    "resource_kind": {"type": "string", "enum": ["CPU", "GPU"]},
+                },
+                "required": ["path", "content"],
+            },
+            confirmation_policy="always",
+            confirmation_reason="写入文件可能覆盖任务产物或改变远程工作区状态。",
+            risk_level="high",
+            audit_category="file",
+        ),
         "file_write": ToolDefinition(
             name="file_write",
-            description="Simulate writing content to a remote task file.",
+            description="写入受控任务 workspace 或当前任务远程 workspace 文件。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -534,27 +1245,59 @@ def _build_tool_definitions() -> dict[str, ToolDefinition]:
             audit_category="workflow",
         ),
     }
+    for spec in skill_runtime.list_specs():
+        definitions.setdefault(
+            spec.name,
+            ToolDefinition(
+                name=spec.name,
+                description=spec.description,
+                input_schema=spec.input_schema,
+            read_only=spec.name in {"repo_audit", "paper_analyze", "autoresearch_pipeline"},
+            confirmation_policy=_skill_confirmation_policy(spec.name),
+            confirmation_reason=_skill_confirmation_reason(spec.name),
+            risk_level=_skill_risk_level(spec.name),
+            audit_category=_skill_audit_category(spec.name),
+            ),
+        )
+        for alias in spec.aliases:
+            definitions.setdefault(
+                alias,
+                ToolDefinition(
+                    name=alias,
+                    description=spec.description,
+                    input_schema=spec.input_schema,
+                    read_only=alias in {"analyze_repo", "analyze_paper"},
+                    risk_level="low",
+                    audit_category="workflow",
+                ),
+            )
+    return definitions
 
 
 def _build_confirmation_question(tool: ToolDefinition, payload: dict[str, Any]) -> str:
-    if tool.name == "lab4ai_create_instance":
+    if tool.name in {"lab4ai_create_instance", "instance_create"}:
         resource_kind = str(payload.get("resource_kind") or "算力").upper()
         return (
             f"接下来需要创建一个 Lab4AI {resource_kind} 实例，用于继续复现流程。"
             "这会占用远程算力资源并可能产生费用。是否继续？"
         )
-    if tool.name == "ssh_execute":
+    if tool.name in SSH_EXECUTE_TOOL_NAMES:
         command = str(payload.get("command") or "").strip() or "(空命令)"
         return (
             "接下来需要在远程实例执行一条高风险命令："
             f"`{command}`。该操作可能修改环境或产生较长时间的副作用。是否继续？"
         )
-    if tool.name == "lab4ai_stop_instance":
+    if tool.name in {"lab4ai_stop_instance", "instance_stop"}:
         return (
             "接下来需要停止并释放当前 Lab4AI 实例。"
             "释放后实例上的临时运行状态可能不可恢复。是否继续？"
         )
-    if tool.name == "file_write":
+    if tool.name == "remote_project_prep":
+        return (
+            "接下来需要在远程实例执行项目准备命令。"
+            "该操作会安装依赖、写入工作区或下载数据/权重。是否继续？"
+        )
+    if tool.name in FILE_WRITE_TOOL_NAMES:
         return (
             "接下来需要写入任务工作区文件。"
             "该操作可能覆盖已有产物或改变远程工作区状态。是否继续？"
@@ -562,16 +1305,52 @@ def _build_confirmation_question(tool: ToolDefinition, payload: dict[str, Any]) 
     return f"接下来需要执行一步受控操作。{tool.confirmation_reason}是否继续？"
 
 
+def _skill_confirmation_policy(name: str) -> str:
+    if name == "instance_create":
+        return "always"
+    if name in {"instance_stop", "remote_project_prep"}:
+        return "risky"
+    return "never"
+
+
+def _skill_confirmation_reason(name: str) -> str:
+    return {
+        "instance_create": "会占用远程算力资源并可能产生费用。",
+        "instance_stop": "会释放远程算力资源。",
+        "remote_project_prep": "会在远程实例安装依赖、写入工作区或下载数据。",
+    }.get(name, "")
+
+
+def _skill_risk_level(name: str) -> str:
+    if name == "instance_create":
+        return "critical"
+    if name in {"instance_stop", "remote_project_prep"}:
+        return "high"
+    return "low"
+
+
+def _skill_audit_category(name: str) -> str:
+    if name in {"instance_create", "instance_stop"}:
+        return "lab4ai"
+    if name == "remote_project_prep":
+        return "ssh"
+    return "workflow"
+
+
 def _requires_confirmation(tool: ToolDefinition, payload: dict[str, Any]) -> bool:
     if tool.name == "lab4ai_stop_instance" and payload.get("force_cleanup"):
+        return False
+    if tool.name == "instance_stop" and payload.get("force_cleanup"):
         return False
     if tool.confirmation_policy == "never":
         return False
     if tool.confirmation_policy == "always":
         return True
-    if tool.confirmation_policy == "risky" and tool.name == "ssh_execute":
+    if tool.confirmation_policy == "risky" and tool.name in SSH_EXECUTE_TOOL_NAMES:
         return _is_risky_ssh_command(str(payload.get("command") or ""))
-    if tool.confirmation_policy == "risky" and tool.name == "file_write":
+    if tool.confirmation_policy == "risky" and tool.name == "remote_project_prep":
+        return True
+    if tool.confirmation_policy == "risky" and tool.name in FILE_WRITE_TOOL_NAMES:
         return True
     return False
 
@@ -592,6 +1371,144 @@ def _is_skills_path(path: str) -> bool:
     normalized = path.replace("\\", "/").lower().strip()
     parts = [part for part in normalized.split("/") if part not in ("", ".")]
     return "skills" in parts
+
+
+def _contains_unrendered_template(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(re.search(r"\{\{\s*[^}]+\s*\}\}", value))
+    if isinstance(value, dict):
+        return any(_contains_unrendered_template(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_unrendered_template(item) for item in value)
+    return False
+
+
+def _as_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _safe_remote_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "project"
+
+
+async def _resolve_cloud_instance(
+    payload: dict[str, Any],
+    context: ToolExecutionContext,
+) -> CloudInstance | None:
+    server_id = str(payload.get("server_id") or "").strip()
+    resource_kind = str(payload.get("resource_kind") or "").strip().upper()
+    query = select(CloudInstance).where(
+        CloudInstance.user_id == context.user_id,
+        CloudInstance.status == CloudInstanceStatus.RUNNING,
+    )
+    if server_id:
+        query = query.where(CloudInstance.server_id == server_id)
+    elif context.conversation_id:
+        query = query.where(CloudInstance.conversation_id == context.conversation_id)
+    query = query.order_by(CloudInstance.started_at.desc())
+    instances = (await context.session.execute(query)).scalars().all()
+    if resource_kind in {"CPU", "GPU"}:
+        expected = CloudInstanceType.CPU if resource_kind == "CPU" else CloudInstanceType.GPU
+        instances = [item for item in instances if item.instance_type == expected]
+    return instances[0] if instances else None
+
+
+def _is_remote_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized.startswith("/workspace/") or normalized.startswith("/root/")
+
+
+def _resolve_workspace_path(path: str, context: ToolExecutionContext | None) -> Path:
+    settings = get_settings()
+    root = settings.workspace_root_path.resolve()
+    target = Path(path)
+    if target.is_absolute():
+        resolved = target.resolve()
+    else:
+        conversation = str(context.conversation_id if context else "manual")
+        resolved = (root / conversation / target).resolve()
+    if not _is_relative_to(resolved, root):
+        raise ValueError("只能写入 runtime/workspaces 下的任务工作区")
+    return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _tail(text: str, *, max_chars: int = 4000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _build_report_kwargs(repo_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    workflow_results = payload.get("workflow_results") if isinstance(payload.get("workflow_results"), dict) else {}
+    paper_info = payload.get("paper_info") if isinstance(payload.get("paper_info"), dict) else {}
+    audit_info = payload.get("audit_info") if isinstance(payload.get("audit_info"), dict) else {}
+    project_profile = str(
+        payload.get("project_profile")
+        or _join_non_empty(
+            [
+                f"项目名称：{repo_name}",
+                f"GitHub：{payload.get('github_url') or workflow_results.get('github_url') or ''}",
+                f"论文：{payload.get('paper_url') or workflow_results.get('paper_url') or ''}",
+                f"仓库审计：{audit_info.get('summary') or workflow_results.get('audit_report_path') or ''}",
+            ]
+        )
+    )
+    implementation_steps = payload.get("implementation_steps")
+    if not isinstance(implementation_steps, dict):
+        implementation_steps = {
+            "code_fetch": str(payload.get("code_fetch") or "代码由 workflow 拉取到远程 codelab 工作区。"),
+            "env_setup": str(payload.get("env_setup") or "环境准备日志由 step_4_cpu_env_setup 记录。"),
+            "data_params": str(payload.get("data_params") or "数据集、超参数来自论文分析与远程执行日志。"),
+            "core_loop": str(payload.get("core_loop") or "训练/推理命令由 GPU 执行阶段记录。"),
+            "eval_process": str(payload.get("eval_process") or "评估流程由项目 README、论文指标和 smoke test 结果确定。"),
+        }
+    results_comparison = payload.get("results_comparison")
+    if not isinstance(results_comparison, list):
+        metrics = paper_info.get("metrics") or workflow_results.get("metrics") or {}
+        available = metrics.get("available") if isinstance(metrics, dict) else []
+        results_comparison = [
+            {
+                "metric_name": str(metric),
+                "official_value": "待全量复现后补充",
+                "reproduced_value": "当前 smoke test 未产生该指标",
+            }
+            for metric in (available or ["smoke_test"])
+        ]
+    return {
+        "repo_name": repo_name,
+        "project_profile": project_profile,
+        "implementation_steps": implementation_steps,
+        "results_comparison": results_comparison,
+        "optimization_suggestions": str(
+            payload.get("optimization_suggestions")
+            or "建议在真实 GPU 阶段完成全量训练后，用记录的日志和指标更新本报告。"
+        ),
+        "font_english": str(payload.get("font_english") or "Times New Roman"),
+        "font_chinese": str(payload.get("font_chinese") or "微软雅黑"),
+    }
+
+
+def _join_non_empty(parts: list[str]) -> str:
+    return "\n".join(part for part in parts if part.strip())
 
 
 def _is_risky_ssh_command(command: str) -> bool:

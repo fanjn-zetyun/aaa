@@ -110,7 +110,7 @@ tasks:
       **阶段 A:SSH 探活 + 拉取代码(Agent 直接执行)**
 
       请调用 `claw-shell` 技能执行以下探活 + 克隆命令:
-      `RETRY=0; while ! sshpass -p '{{step_3.ssh_pass}}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p {{step_3.ssh_port}} root@{{step_3.ssh_host}} "echo '🎉 SSH 服务已就绪!'"; do RETRY=$((RETRY+1)); if [ $RETRY -ge 30 ]; then echo '❌ SSH 探活超时(5分钟),实例可能异常'; exit 1; fi; echo "⏳ 等待 SSHD 启动... ($RETRY/30)"; sleep 10; done; sshpass -p '{{step_3.ssh_pass}}' ssh -o StrictHostKeyChecking=no -p {{step_3.ssh_port}} root@{{step_3.ssh_host}} "export http_proxy=http://10.201.85.65:1080 && export https_proxy=http://10.201.85.65:1080 && mkdir -p /workspace/user-data/codelab/{{repo_name}}/{code,data,model} && cd /workspace/user-data/codelab/{{repo_name}}/code && git clone --recursive {{parameters.github_url}} . && ln -sf ../data data && ln -sf ../model model"`
+      `RETRY=0; while ! sshpass -p '{{step_3.ssh_pass}}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p {{step_3.ssh_port}} root@{{step_3.ssh_host}} "echo '🎉 SSH 服务已就绪!'"; do RETRY=$((RETRY+1)); if [ $RETRY -ge 30 ]; then echo '❌ SSH 探活超时(5分钟),实例可能异常'; exit 1; fi; echo "⏳ 等待 SSHD 启动... ($RETRY/30)"; sleep 10; done; sshpass -p '{{step_3.ssh_pass}}' ssh -o StrictHostKeyChecking=no -p {{step_3.ssh_port}} root@{{step_3.ssh_host}} "mkdir -p /workspace/user-data/codelab/{{repo_name}}/{code,data,model} && cd /workspace/user-data/codelab/{{repo_name}}/code && git clone --recursive https://gh-proxy.org/{{parameters.github_url}} . && ln -sf ../data data && ln -sf ../model model"`
 
       **阶段 B:智能分析与命令组装(Agent 的大脑工作)**
 

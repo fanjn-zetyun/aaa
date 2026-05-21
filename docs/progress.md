@@ -1,6 +1,6 @@
 # 当前开发进度
 
-更新日期：2026-05-20
+更新日期：2026-05-21
 
 ## 已完成
 
@@ -23,7 +23,7 @@
   - 支持读取对话历史和 metadata。
   - 支持 system prompt 组装。
   - 支持调用 Anthropic-compatible `/v1/messages` 真实模型接口。
-  - 未配置 API Key 或模型调用失败时，会降级为本地 fallback，保证 MVP 可运行。
+  - 未配置 API Key 或模型调用失败时，会降级为本地 fallback，保证基础流程可运行。
   - 支持 tool event 流式推送和对话消息持久化。
 - 前端已切换到 V2 对话入口：
   - WelcomePage 创建 `/api/conversations`。
@@ -62,7 +62,24 @@
 - Lab4AI Tool 已改为真实 API 路径：
   - `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用 Lab4AI REST API，不再依赖 Runner/mock 开关。
   - 创建实例会写入 `CloudInstance.user_id / conversation_id / server_id / instance_id / ssh_host / ssh_port / raw_payload`，停止实例会更新状态和停止时间。
-  - 管理员未配置 Lab4AI 凭证或平台 API 调用失败时，Tool 直接失败，不再回退到 mock 创建计费实例。
+  - 管理员未配置 Lab4AI 凭证时，workflow 进入 `lab4ai_credentials_required` 人工介入状态，由前端弹出管理员凭证配置弹窗；平台 API 调用失败时返回结构化错误，不再回退到 mock 创建计费实例。
+- SkillRuntime 与真实 executor 已落地：
+  - 新增 `backend/app/services/skill_runtime.py`，扫描 `tools.yaml / manifest.yaml`，把 `repo_audit / paper_analyze / generate_repro_report` 等 skill 声明映射为后端真实 Tool 适配器。
+  - `analyze_repo` 调用 `lab4ai-project-analysis` 的真实仓库审计脚本，输出审计报告 artifact 和评分。
+  - `analyze_paper` 通过后端适配器复用 `lab4ai-paper-analysis` 的下载、PDF 解析、结构化抽取和 Markdown 报告逻辑，不修改 `skills/` 目录。
+  - `ssh_execute` 已改为基于 `CloudInstance` 连接信息和 `paramiko` 的真实 SSH executor；缺少实例、SSH 凭证、依赖、超时或非零退出码都会返回结构化失败。
+  - `file_write` 已从模拟改为受控写入 `runtime/workspaces/<conversation_id>/...`，远程路径通过当前任务绑定实例 SFTP 写入，仍禁止写入 `skills/`。
+  - `repro_report` 已生成真实 `.docx` artifact 到任务 workspace。
+  - Workflow step1 已同时执行仓库审计和论文分析，step4/7/8 依据真实 ToolResult 推进，不再写死 `score=75` 或 “MVP simulated”。
+- 旧 OpenClaw / vendor skill 适配方案已文档化：
+  - 新增 [docs/skill-adapter-plan.md](skill-adapter-plan.md)，记录 `claw-shell`、`sshpass`、`ssh-essentials`、`file-system`、`lab4ai-project-prep`、`lab4ai-instance-manage` 等能力到后端 Tool 的映射计划。
+  - [docs/proposal.md](proposal.md) 已增加该计划入口，并明确 P0/P1/P2 推进顺序。
+  - 当前约定仍是不修改 `skills/` 目录，所有适配落在后端 runtime、ToolRegistry 和测试中。
+- P0/P1 适配首轮已落地：
+  - `claw_shell_run` 和 `ssh_essentials_execute` 已注册为兼容 Tool；实际执行统一转入 `ssh_execute`，不运行 vendor `handler.js` 或本机 `tmux`。
+  - step 内模型 tool-use 会把 `claw-shell` / `claw_shell_run` 规范化为 `ssh_execute`，并把 `sshpass ... ssh ... "<remote command>"` wrapper 编译成远程命令；无法提取远程命令或存在未渲染模板时直接失败。
+  - `step_4_cpu_env_setup` 与 `step_7_gpu_execution` 的 allowlist 已加入 `claw_shell_run`、`file_system_read`、`file_system_list` 和安全文件写入能力；`step_4` 同时允许 `remote_project_prep`。
+  - `file_system_read / file_system_list / file_system_write` 已映射到受控任务 workspace 或当前任务绑定远程实例的 SFTP 路径，仍拒绝访问 `skills/`。
 
 ## 当前验证结果
 
@@ -86,23 +103,25 @@ cd frontend && npm run build
 ## 当前限制
 
 - V2 Agent Loop 已能调用真实模型；Lab4AI Tool 已移除 Runner/mock 分支，真实调用还需要管理员凭证和线上环境联调。
-- `ssh_execute` 当前仍是模拟 SSH 命令执行。
+- `ssh_execute` 已是真实 executor，但仍需要真实 Lab4AI 实例与线上 SSH 环境联调；当前单元测试覆盖缺少实例、模板未渲染等失败路径，尚未覆盖真实远程服务器端到端。
 - `api_key` 当前存储在 `LLMConfig.api_key_encrypted` 字段中，但实现上尚未做真正加密；后续需要接入统一加密方案。
 - V2 Agent Loop 目前是“模型规划 + 后端顺序执行固定工具链 + 模型总结”，还不是完整 LLM tool-use 自动循环。
-- Tool 层仍以声明式 registry 和统一确认入口为主；Lab4AI Tool 已走真实 API 路径，SSH、文件写入和报告生成仍需要真实 executor。
-- Skills 目录仍保留原 `SKILL.md` 形态；当前已支持 frontmatter 解析和 workflow 注入，但尚未完全标准化为统一 `SKILL.yaml` + allowed tools 规范。
+- Tool 层仍以声明式 registry 和统一确认入口为主；Lab4AI、SSH、文件写入、仓库/论文分析和报告生成均已接入真实 executor。
+- Skills 目录仍保留原 `SKILL.md` 形态；当前已支持 frontmatter 解析、workflow 注入和 `tools.yaml / manifest.yaml` 后端适配，但尚未完全标准化为统一 `SKILL.yaml` + allowed tools 规范。
 - Memory 当前是轻量 metadata 实现，尚未做跨对话长期记忆。
 - HITL 已覆盖资源创建前确认，并对高风险 SSH 命令做条件确认，但还不是完整权限系统。
 - 管理员前端页面仍未完整实现。
 - `skills/` 原始模板中仍包含历史 `claw-workflow` / `openclaw` / `claw-shell` 命名；根据当前项目约束本轮未修改 `skills/` 目录，后续如需标准化需先单独确认模板迁移方案。
-- 真实 SSH 仍未接入；Lab4AI API 尚未做真实账号联调。
+- P0/P1 适配首轮已完成单元测试覆盖，但仍需真实 Lab4AI 实例联调验证长脚本、远程 SFTP 和实际网络/依赖安装耗时场景。
+- 真实 SSH 代码路径已接入；Lab4AI API 与真实账号、真实远程 SSH 仍需线上联调。
 
 ## 下一步建议
 
-1. 用真实 Lab4AI 账号联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认创建、查询、停止和异常释放的响应字段与错误处理。
-2. 实现真实 `ssh_execute`，包括 SSH 凭证、命令超时、输出流式回传和失败处理。
-3. 将 Agent Loop 从固定工具链升级为模型驱动的 tool-use 循环。
-4. 深化 Skill Workflow Runtime，把 9 步中的 SSH、文件写入、报告生成接到真实 executor，并补充更细粒度进度事件。
-5. 扩展 HITL 到真实 Lab4AI、SSH、文件写入等高风险 Tool。
-6. 为用户 LLM API Key 接入加密存储。
-7. 完成管理员前端页面。
+1. 用真实 Lab4AI 账号联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认创建、查询、停止、SSH 字段和异常释放的响应字段与错误处理。
+2. 用真实 Lab4AI CPU/GPU 实例跑 PhotoDoodle dry-run，验收没有 `已模拟执行`、没有未渲染 `{{step_...}}`、没有固定 `score=75`。
+3. 深化 `ssh_execute` 的日志流式回传和长命令取消机制。
+4. 按 [docs/skill-adapter-plan.md](skill-adapter-plan.md) 继续处理 P1 剩余 workflow：`lab4ai-auto-research` 和 `lab4ai-lf-data-preprocess` 的专用 runner。
+5. 将 Agent Loop 从受控 step tool-use 继续扩展到更多任务类型。
+6. 扩展 HITL 到网络代理/镜像、受限数据集和高风险远程命令等人工决策。
+7. 为用户 LLM API Key 接入加密存储。
+8. 完成管理员前端页面。

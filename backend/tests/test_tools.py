@@ -108,8 +108,78 @@ async def test_tool_registry_prompt_context_filters_by_allowed_tools():
     assert "lab4ai_create_instance" not in context
 
 
-async def test_file_write_requires_confirmation_and_only_simulates():
+async def test_tool_registry_exposes_p0_p1_alias_tools():
     registry = ToolRegistry()
+
+    tools = {tool.name for tool in registry.list_definitions()}
+
+    assert "claw_shell_run" in tools
+    assert "ssh_essentials_execute" in tools
+    assert "file_system_read" in tools
+    assert "file_system_list" in tools
+    assert "file_system_write" in tools
+    assert registry.definition("claw_shell_run").audit_category == "ssh"
+    assert registry.definition("file_system_read").read_only is True
+    assert registry.definition("file_system_list").read_only is True
+
+
+async def test_claw_shell_alias_routes_to_ssh_execute_without_instance(test_user, db_session):
+    registry = ToolRegistry()
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=111,
+        session=db_session,
+    )
+
+    result = await registry.invoke(
+        "claw_shell_run",
+        {"command": "echo ok"},
+        context=context,
+    )
+
+    assert result.ok is False
+    assert result.name == "claw_shell_run"
+    assert result.metadata["error_code"] == "missing_cloud_instance"
+
+
+async def test_file_system_read_and_list_use_workspace(test_user, db_session):
+    registry = ToolRegistry()
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=222,
+        session=db_session,
+    )
+
+    write_result = await registry.invoke(
+        "file_system_write",
+        {"path": "notes/hello.txt", "content": "hello world"},
+        context=context,
+    )
+    read_result = await registry.invoke(
+        "file_system_read",
+        {"path": "notes/hello.txt"},
+        context=context,
+    )
+    list_result = await registry.invoke(
+        "file_system_list",
+        {"path": "notes"},
+        context=context,
+    )
+
+    assert write_result.ok is True
+    assert read_result.ok is True
+    assert read_result.content == "hello world"
+    assert list_result.ok is True
+    assert "hello.txt" in list_result.content
+
+
+async def test_file_write_requires_confirmation_and_writes_workspace_file(test_user, db_session):
+    registry = ToolRegistry()
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=321,
+        session=db_session,
+    )
 
     confirmation = registry.confirmation_for(
         "file_write",
@@ -117,7 +187,8 @@ async def test_file_write_requires_confirmation_and_only_simulates():
     )
     result = await registry.invoke(
         "file_write",
-        {"path": "/tmp/result.md", "content": "ok"},
+        {"path": "result.md", "content": "ok"},
+        context=context,
     )
 
     assert confirmation is not None
@@ -125,8 +196,10 @@ async def test_file_write_requires_confirmation_and_only_simulates():
     assert confirmation.audit_category == "file"
     assert confirmation.step == "tool_confirm:file_write:toolu-file"
     assert result.ok is True
-    assert result.metadata["simulated"] is True
-    assert result.metadata["written"] is False
+    assert result.metadata["written"] is True
+    assert result.metadata["path"].endswith("runtime\\workspaces\\321\\result.md") or result.metadata[
+        "path"
+    ].endswith("runtime/workspaces/321/result.md")
 
 
 async def test_file_write_refuses_skills_path():
@@ -138,8 +211,79 @@ async def test_file_write_refuses_skills_path():
     )
 
     assert result.ok is False
-    assert result.metadata["simulated"] is True
+    assert result.metadata["error_code"] == "forbidden_path"
     assert result.metadata["written"] is False
+
+
+async def test_tool_registry_rejects_unrendered_templates():
+    registry = ToolRegistry()
+
+    result = await registry.invoke(
+        "ssh_execute",
+        {"command": "ssh root@{{step_3.ssh_host}} echo ok"},
+    )
+
+    assert result.ok is False
+    assert result.metadata["error_code"] == "unrendered_template"
+
+
+async def test_ssh_execute_fails_structurally_without_cloud_instance(test_user, db_session):
+    registry = ToolRegistry()
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=999,
+        session=db_session,
+    )
+
+    result = await registry.invoke(
+        "ssh_execute",
+        {"command": "echo ok"},
+        context=context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["error_code"] == "missing_cloud_instance"
+
+
+async def test_skill_runtime_health_exposes_skill_tools():
+    registry = ToolRegistry()
+
+    tools = {tool.name for tool in registry.list_definitions()}
+
+    assert "repo_audit" in tools
+    assert "analyze_repo" in tools
+    assert "paper_analyze" in tools
+    assert "analyze_paper" in tools
+    assert "remote_project_prep" in tools
+    assert registry.definition("analyze_paper").read_only is True
+
+
+async def test_remote_project_prep_uses_real_ssh_path_without_instance(test_user, db_session):
+    registry = ToolRegistry()
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=777,
+        session=db_session,
+    )
+
+    result = await registry.invoke(
+        "remote_project_prep",
+        {"repo_name": "PhotoDoodle", "dependency_cmds": ["python -V"]},
+        context=context,
+    )
+
+    assert result.ok is False
+    assert result.name == "remote_project_prep"
+    assert result.metadata["error_code"] == "missing_cloud_instance"
+
+
+async def test_unadapted_skill_tool_returns_structured_failure():
+    registry = ToolRegistry()
+
+    result = await registry.invoke("autoresearch_pipeline", {})
+
+    assert result.ok is False
+    assert result.metadata["error_code"] == "missing_adapter"
 
 
 async def test_lab4ai_create_instance_requires_credentials(test_user, db_session):

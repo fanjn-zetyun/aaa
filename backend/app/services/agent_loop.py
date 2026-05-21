@@ -6,6 +6,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+import re
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -60,6 +61,17 @@ AGENT_REPLY_MAX_TOKENS = 8192
 AGENT_REPLY_FALLBACK_MAX_TOKENS = 4096
 AGENT_TOOL_USE_MAX_ITERATIONS = 8
 LAB4AI_CREDENTIAL_ERROR_PREFIX = "Lab4AI 凭证未配置"
+SSH_TOOL_ALIASES = {
+    "claw-shell": "ssh_execute",
+    "claw_shell_run": "ssh_execute",
+    "ssh_essentials_execute": "ssh_execute",
+}
+FILE_TOOL_ALIASES = {
+    "file-system": "file_system_read",
+    "file_system_read": "file_system_read",
+    "file_system_list": "file_system_list",
+    "file_system_write": "file_write",
+}
 
 
 @dataclass
@@ -101,6 +113,7 @@ class ModelToolRunResult:
     tool_outputs: list[str]
     paused: bool = False
     used_model_tools: bool = False
+    failed: bool = False
 
 
 class AgentLoopManager:
@@ -258,7 +271,7 @@ class AgentLoopManager:
                 (
                     f"已选择 skill：{skill_name}。"
                     "当前 Lab4AI Tool 会直接调用真实平台 API；"
-                    "SSH executor 仍需后续接入真实远程执行。"
+                    "SSH、文件写入、仓库/论文分析和报告生成均通过后端 ToolRegistry 执行。"
                 ),
                 stage="skill_selection",
             )
@@ -408,7 +421,7 @@ class AgentLoopManager:
             self._active_runs.pop(conversation_id, None)
 
     def _build_reply(self, metadata: dict, latest_user: str) -> str:
-        parts = ["MVP 执行完成。"]
+        parts = ["本轮执行完成。"]
         if github_url := metadata.get("github_url"):
             parts.append(f"仓库：{github_url}")
         if paper_url := metadata.get("paper_url"):
@@ -460,6 +473,7 @@ class AgentLoopManager:
         system: str,
         messages: list[dict],
         allowed_tools: list[str] | None,
+        workflow_step_id: str | None = None,
     ) -> ModelToolRunResult:
         if not config.configured:
             return ModelToolRunResult(metadata=metadata, tool_outputs=[])
@@ -496,8 +510,14 @@ class AgentLoopManager:
             used_model_tools = True
             current_messages.append(_assistant_tool_message(response))
             tool_result_blocks: list[dict] = []
+            prepared_tool_calls: list[tuple[object, dict[str, object]]] = []
+            available_tool_names = {item["name"] for item in available_tools}
             for tool_call in response.tool_calls:
-                if tool_call.name not in {item["name"] for item in available_tools}:
+                canonical_tool_name = _canonical_tool_name(tool_call.name)
+                if (
+                    tool_call.name not in available_tool_names
+                    and canonical_tool_name not in available_tool_names
+                ):
                     tool_result_blocks.append(
                         _tool_result_block(
                             tool_call.id,
@@ -509,10 +529,43 @@ class AgentLoopManager:
 
                 tool_input = dict(tool_call.input or {})
                 tool_input.setdefault("tool_call_id", tool_call.id or f"toolu_{uuid4().hex}")
+                tool_input = _prepare_model_tool_input(
+                    canonical_tool_name,
+                    tool_input,
+                    metadata,
+                    workflow_step_id,
+                )
+                adapter_error = str(tool_input.pop("_adapter_error", "") or "")
+                if adapter_error:
+                    tool_outputs.append(
+                        f"{tool_call.name}: {adapter_error}，已拒绝执行。"
+                    )
+                    return ModelToolRunResult(
+                        metadata=metadata,
+                        tool_outputs=tool_outputs,
+                        used_model_tools=True,
+                        failed=True,
+                    )
+                if _contains_unrendered_template(tool_input):
+                    tool_outputs.append(
+                        (
+                            f"{tool_call.name}: 工具参数中仍包含未渲染模板变量 `{{{{...}}}}`，"
+                            "已回退到后端固定执行链路。"
+                        )
+                    )
+                    return ModelToolRunResult(
+                        metadata=metadata,
+                        tool_outputs=tool_outputs,
+                        used_model_tools=True,
+                        failed=True,
+                    )
+                prepared_tool_calls.append((tool_call, {"_tool_name": canonical_tool_name, **tool_input}))
+            for tool_call, tool_input in prepared_tool_calls:
+                canonical_tool_name = str(tool_input.pop("_tool_name"))
                 result, metadata, paused = await self._invoke_tool_with_policy(
                     conversation_id,
                     metadata,
-                    tool_call.name,
+                    canonical_tool_name,
                     tool_input,
                 )
                 if paused:
@@ -556,7 +609,7 @@ class AgentLoopManager:
         *,
         system: str,
         messages: list[dict],
-    ) -> tuple[dict, list[str], bool, bool]:
+    ) -> tuple[dict, list[str], bool, bool, bool]:
         step_state = next(
             (
                 item
@@ -571,7 +624,7 @@ class AgentLoopManager:
             if isinstance(item, str) and item
         ]
         if not allowed_tools:
-            return metadata, [], False, False
+            return metadata, [], False, False, False
 
         result = await self._run_model_tool_use_or_fallback(
             conversation_id,
@@ -586,17 +639,20 @@ class AgentLoopManager:
                         f"当前 workflow step：{step.id} / {step.name}\n"
                         f"step 指令：{step.instruction or '未提供'}\n"
                         f"期望产出：{step.expected_output or '未提供'}\n"
+                        f"{_step_tool_use_guidance(metadata, step.id)}\n"
                         "你只能调用当前 step allowlist 中的 Tool；不要越过 Workflow 顺序。"
                     ),
                 },
             ],
             allowed_tools=allowed_tools,
+            workflow_step_id=step.id,
         )
         return (
             result.metadata,
             result.tool_outputs,
             result.paused,
             result.used_model_tools,
+            result.failed,
         )
 
     async def _tool(
@@ -1091,6 +1147,14 @@ def _is_stop_request(text: str) -> bool:
     return any(key in lowered for key in ("停止", "中止", "取消", "stop", "cancel"))
 
 
+def _canonical_tool_name(name: str) -> str:
+    if name in SSH_TOOL_ALIASES:
+        return SSH_TOOL_ALIASES[name]
+    if name in FILE_TOOL_ALIASES:
+        return FILE_TOOL_ALIASES[name]
+    return name
+
+
 def _format_exception(exc: Exception) -> str:
     message = str(exc).strip()
     if message:
@@ -1109,6 +1173,264 @@ def _admin_config_step(tool_name: str, tool_input: dict[str, object]) -> str:
         if value:
             parts.append(value)
     return ":".join(parts)
+
+
+def _step_tool_use_guidance(metadata: dict, step_id: str) -> str:
+    if step_id == "step_4_cpu_env_setup":
+        server_id = _workflow_resource_server_id(metadata, "cpu")
+        return (
+            f"当前 CPU 实例 server_id：{server_id or '未记录'}。\n"
+            "`ssh_execute.command` 只填写远程实例内执行的 Bash；"
+            "`claw_shell_run` 只是兼容别名，底层仍会转成 `ssh_execute`；"
+            "不要在 command 中再次写 sshpass/ssh root@...，也不要输出 `{{...}}` 模板变量。"
+        )
+    if step_id == "step_7_gpu_execution":
+        server_id = _workflow_resource_server_id(metadata, "gpu")
+        return (
+            f"当前 GPU 实例 server_id：{server_id or '未记录'}。\n"
+            "`ssh_execute.command` 只填写远程实例内执行的 Bash；"
+            "`claw_shell_run` 只是兼容别名，底层仍会转成 `ssh_execute`；"
+            "不要在 command 中再次写 sshpass/ssh root@...，也不要输出 `{{...}}` 模板变量。"
+        )
+    return "不要输出 `{{...}}` 模板变量。"
+
+
+def _prepare_model_tool_input(
+    tool_name: str,
+    tool_input: dict[str, object],
+    metadata: dict,
+    workflow_step_id: str | None,
+) -> dict[str, object]:
+    tool_name = _canonical_tool_name(tool_name)
+    payload = dict(tool_input)
+    if tool_name in {"ssh_execute", "remote_project_prep"}:
+        payload = _strip_sensitive_skill_connection_fields(payload)
+    if not workflow_step_id:
+        return _render_templates(payload, metadata)
+
+    _set_if_missing_or_template(payload, "workflow_step_id", workflow_step_id)
+    if tool_name not in {
+        "ssh_execute",
+        "remote_project_prep",
+        "file_write",
+        "file_system_read",
+        "file_system_list",
+    }:
+        return _render_templates(payload, metadata)
+
+    if workflow_step_id == "step_4_cpu_env_setup":
+        _set_if_missing_or_template(payload, "resource_kind", "CPU")
+        server_id = _workflow_resource_server_id(metadata, "cpu")
+        if server_id:
+            _set_if_missing_or_template(payload, "server_id", server_id)
+        if tool_name == "ssh_execute":
+            payload = _compile_skill_ssh_payload(payload)
+    elif workflow_step_id == "step_7_gpu_execution":
+        _set_if_missing_or_template(payload, "resource_kind", "GPU")
+        server_id = _workflow_resource_server_id(metadata, "gpu")
+        if server_id:
+            _set_if_missing_or_template(payload, "server_id", server_id)
+        if tool_name == "ssh_execute":
+            payload = _compile_skill_ssh_payload(payload)
+    return _render_templates(payload, metadata)
+
+
+def _strip_sensitive_skill_connection_fields(payload: dict[str, object]) -> dict[str, object]:
+    result = dict(payload)
+    for key in ("ssh_pass", "ssh_password", "password"):
+        result.pop(key, None)
+    return result
+
+
+def _compile_skill_ssh_payload(payload: dict[str, object]) -> dict[str, object]:
+    command = str(payload.get("command") or "")
+    compiled = _remote_command_from_skill_ssh_wrapper(command)
+    if compiled is None and not _looks_like_ssh_wrapper(command):
+        return payload
+    result = dict(payload)
+    if compiled is None:
+        if _contains_unrendered_template(command):
+            return payload
+        result["_adapter_error"] = (
+            "检测到 SSH/sshpass wrapper，但没有可安全提取的远程命令"
+        )
+        return result
+    result["command"] = compiled
+    result.setdefault("connect_retries", 30)
+    result.setdefault("connect_retry_interval", 10)
+    return result
+
+
+def _remote_command_from_skill_ssh_wrapper(command: str) -> str | None:
+    if not _looks_like_ssh_wrapper(command):
+        return None
+    remote_commands = _extract_remote_ssh_commands(command)
+    if not remote_commands:
+        return None
+    meaningful = [
+        item
+        for item in remote_commands
+        if not re.fullmatch(r"\s*echo\b.*", item, flags=re.IGNORECASE | re.DOTALL)
+    ]
+    return (meaningful or remote_commands)[-1].strip()
+
+
+def _looks_like_ssh_wrapper(command: str) -> bool:
+    return bool(re.search(r"\bsshpass\b|\bssh\b[^\n;|&]*@", command))
+
+
+def _extract_remote_ssh_commands(command: str) -> list[str]:
+    results: list[str] = []
+    pattern = re.compile(r"\bssh\b")
+    position = 0
+    while True:
+        match = pattern.search(command, position)
+        if match is None:
+            break
+        at_index = command.find("@", match.end())
+        if at_index == -1:
+            break
+        quote_start = _find_remote_command_quote(command, at_index)
+        if quote_start is None:
+            position = match.end()
+            continue
+        quote = command[quote_start]
+        quote_end = _find_unescaped_quote(command, quote_start + 1, quote)
+        if quote_end is None:
+            break
+        results.append(command[quote_start + 1 : quote_end])
+        position = quote_end + 1
+    return results
+
+
+def _find_remote_command_quote(command: str, start: int) -> int | None:
+    position = start
+    while position < len(command):
+        char = command[position]
+        if char in {'"', "'"}:
+            return position
+        if char in ";&|\n":
+            return None
+        position += 1
+    return None
+
+
+def _find_unescaped_quote(command: str, start: int, quote: str) -> int | None:
+    escaped = False
+    for index in range(start, len(command)):
+        char = command[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == quote:
+            return index
+    return None
+
+
+def _render_templates(value: object, metadata: dict) -> object:
+    context = _template_context(metadata)
+    if isinstance(value, str):
+        return _render_template_string(value, context)
+    if isinstance(value, dict):
+        return {key: _render_templates(item, metadata) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_render_templates(item, metadata) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_render_templates(item, metadata) for item in value)
+    return value
+
+
+def _render_template_string(value: str, context: dict[str, object]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        if key not in context:
+            return match.group(0)
+        return str(context[key])
+
+    return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", replace, value)
+
+
+def _template_context(metadata: dict) -> dict[str, object]:
+    github_url = str(metadata.get("github_url") or "")
+    paper_url = str(metadata.get("paper_url") or "")
+    repo_name = _repo_name_from_url(github_url or "project")
+    context: dict[str, object] = {
+        "github_url": github_url,
+        "paper_url": paper_url,
+        "parameters.github_url": github_url,
+        "parameters.paper_url": paper_url,
+        "repo_name": repo_name,
+        "repo_name_underscore": re.sub(r"\W+", "_", repo_name).strip("_") or "project",
+    }
+    _add_step_resource_context(context, "step_3", metadata, "cpu")
+    _add_step_resource_context(context, "step_3_deploy_cpu", metadata, "cpu")
+    _add_step_resource_context(context, "step_6", metadata, "gpu")
+    _add_step_resource_context(context, "step_6_deploy_gpu", metadata, "gpu")
+    return context
+
+
+def _add_step_resource_context(
+    context: dict[str, object],
+    prefix: str,
+    metadata: dict,
+    kind: str,
+) -> None:
+    resources = metadata.get("workflow_resources")
+    resource = (resources or {}).get(kind) if isinstance(resources, dict) else None
+    if not isinstance(resource, dict):
+        return
+    raw = resource.get("raw") if isinstance(resource.get("raw"), dict) else {}
+    values = {
+        "server_id": resource.get("server_id") or raw.get("server_id"),
+        "serverId": resource.get("server_id") or raw.get("server_id"),
+        "ssh_host": raw.get("ssh_host"),
+        "ssh_port": raw.get("ssh_port"),
+        "ssh_user": raw.get("ssh_user") or "root",
+    }
+    for key, value in values.items():
+        if value not in (None, ""):
+            context[f"{prefix}.{key}"] = value
+
+
+def _repo_name_from_url(url: str) -> str:
+    value = url.rstrip("/").split("/")[-1]
+    if value.endswith(".git"):
+        value = value[:-4]
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "project"
+
+
+def _set_if_missing_or_template(
+    payload: dict[str, object],
+    key: str,
+    value: object | None,
+) -> None:
+    if value is None:
+        return
+    current = payload.get(key)
+    if current is None or str(current).strip() == "" or _contains_unrendered_template(current):
+        payload[key] = value
+
+
+def _workflow_resource_server_id(metadata: dict, kind: str) -> str | None:
+    resources = metadata.get("workflow_resources")
+    resource = (resources or {}).get(kind) if isinstance(resources, dict) else None
+    if not isinstance(resource, dict):
+        return None
+    server_id = resource.get("server_id")
+    return str(server_id) if server_id else None
+
+
+def _contains_unrendered_template(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(re.search(r"\{\{\s*[^}]+\s*\}\}", value))
+    if isinstance(value, dict):
+        return any(_contains_unrendered_template(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_unrendered_template(item) for item in value)
+    return False
 
 
 def _assistant_tool_message(response: LLMToolResponse) -> dict:
