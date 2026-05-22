@@ -178,6 +178,29 @@ async def agent_loop(conversation: Conversation, llm_config: LLMConfig):
 - 任何生产态 Tool 不允许返回伪造成功。功能尚未实现、依赖缺失、网络不可达或远程命令失败时，必须返回 `ok=false`、结构化 `error_code` 和可恢复建议，由 WorkflowRunner 决定重试、HITL 或失败收敛。
 - 发生失败、中断或用户停止时，仍必须进入 `stopping -> cleanup -> stopped` 语义，资源释放逻辑优先于模型继续规划。
 
+Agent 自主排错闭环是 Agent Loop 的一等能力，不是外部脚本或固定 if/else 补丁。其目标是让模型看到真实工具错误、诊断根因、调用受控工具修复、再通过 workflow 验收继续执行。
+
+```text
+assistant tool_use
+  -> ToolRegistry.invoke()
+  -> ToolResult(ok=false 或 postcondition 失败)
+  -> 持久化 tool_result + stdout/stderr/exit_code/error_code/retryable/recovery_suggestion
+  -> 同一 step 内构造诊断上下文并再次调用模型
+  -> 模型只能调用当前 step allowlist 中的 Tool 修复
+  -> 重新执行失败动作或独立验收命令
+  -> 验收通过才推进下一步；否则继续有限次恢复、进入 HITL 或失败收敛
+```
+
+自主排错必须满足以下约束：
+
+- 错误必须以 `tool_result` 形式回流给模型，不能只写后端日志；至少包含 `tool_name / tool_call_id / workflow_step_id / ok / error_code / retryable / stdout / stderr / exit_code / artifact_paths`。
+- 诊断轮必须绑定当前 `workflow_run_id + workflow_step_id`，不得跨 step 修复，也不得跳过 `project_reproduce.yaml` 中的必需 instruction。
+- 模型只能使用当前 step 的 `allowed_tools` 和 Runtime 明确开放的诊断工具；不得为了修复而直接修改 `skills/`、绕过 HITL、泄露凭证或释放不属于当前 step 的资源。
+- 每个 step 必须有 `max_recovery_attempts`，默认 3；每次恢复仍受全局 `max_tool_iterations` 限制，防止无限重试。
+- `retryable=false`、凭证缺失、额度不足、权限不足、用户拒绝、高风险命令需确认等错误，必须进入 HITL 或失败收敛，不能由模型自行绕过。
+- 远程实例启动、镜像拉起、SSH 探活等长耗时动作必须区分 `starting / booting / ready / failed`。实例还在启动中时不得因为一次探活失败就释放实例；只有达到超时阈值或平台返回终态失败后，才进入恢复或 cleanup。
+- 修复动作完成后必须重新跑该 step 的 `postconditions` 或等价验收命令。模型自然语言“已经修复”不能使 step 完成。
+
 ### 5.4 Tool 系统
 
 每个 Tool 是结构化对象：
@@ -197,6 +220,9 @@ class ToolResult:
     name: str
     content: str
     ok: bool
+    error_code: str | None
+    retryable: bool | None
+    recovery_suggestion: str | None
     metadata: dict
 
 class ToolRegistry:
@@ -438,8 +464,18 @@ Workflow step metadata 需要比首版状态机更细：
 - `artifacts`：当前 step 产物路径或远程资源引用，例如审计报告、训练日志、结果图、Word 报告。
 - `progress`：细粒度进展文本，可通过 `workflow_step_progress` 增量推给前端。
 - `error`：结构化错误，至少包含 `type / message / retryable / tool_call_id`。
+- `recovery_attempts`：自主排错记录，至少包含 `attempt / trigger / root_cause / action_summary / tool_call_ids / verification_status / next_decision`。
+- `validation_failures`：强约束验收失败记录，至少包含 `postcondition / expected / actual / evidence / retryable`。
 
 这些字段必须写入 `Conversation.metadata.workflow_steps[*]`，不能只存在内存中。恢复执行时，WorkflowRunner 先读取 metadata 判断上次停在何处，再决定继续、重试或进入 cleanup。
+
+Step 自主排错与修复循环：
+
+- 当 Tool 返回 `ok=false`、SSH 命令非零退出、依赖缺失、路径不存在、模板变量解析失败、报告 artifact 缺失，或 step postcondition 未通过时，WorkflowRunner 不应立即跳过或改用语义不同的固定 executor，而应先把失败信息写成当前 step 的 `tool_result` / `validation_failures`。
+- Runtime 随后构造诊断上下文并再次调用模型，诊断上下文只能包含当前 step instruction、`expected_output`、已执行工具列表、失败工具的结构化输出、关键日志片段、artifact 路径和安全脱敏后的环境信息。
+- 模型在恢复轮中只能选择当前 step `allowed_tools` 内的修复动作。例如远程 `python: command not found` 应引导模型检查 `python3 / conda / venv` 并修改同一 step 的远程命令；远程目录为空应引导模型执行 `git clone`、依赖安装和数据下载，而不是只探活后标记完成。
+- WorkflowRunner 必须记录每次恢复尝试的原因、动作和验收结果。恢复成功后重新执行该 step 的 postconditions；恢复失败但仍可重试时继续下一次恢复；达到 `max_recovery_attempts` 或遇到不可恢复错误时进入 `waiting_for_user` 或 `failed`。
+- 资源释放不能抢跑自主恢复。GPU/CPU 实例处于创建中或启动中时，step7/step4 的一次 SSH 失败只能记录为探活失败并按连接重试策略处理；只有实例终态失败、用户停止、恢复耗尽或进入 cleanup 阶段，才能调用释放 step。
 
 模板渲染与上下文解析：
 
@@ -487,6 +523,9 @@ WebSocket 事件补充：
 | `workflow_step_waiting` | 某一步进入 HITL 等待 |
 | `workflow_step_completed` | 某一步完成 |
 | `workflow_step_failed` | 某一步失败 |
+| `workflow_step_recovery_started` | 某一步进入自主排错/修复循环 |
+| `workflow_step_recovery_progress` | 自主排错过程中的诊断、修复动作和验证进展 |
+| `workflow_step_recovery_exhausted` | 自主修复次数耗尽，需要 HITL 或标记失败 |
 | `workflow_cleanup_started` | 异常或停止后的资源兜底释放开始 |
 | `workflow_cleanup_completed` | 资源兜底释放完成 |
 
@@ -531,7 +570,7 @@ Lab4AI 云实例是真正消耗费用的资源，必须由后端统一管理。
 - 查询实例时按用户过滤；管理员可查看全部。
 - 关停实例前校验归属。
 - Agent Loop 异常、用户停止任务或后端重启恢复时，必须检查并清理遗留实例。
-- `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI REST API，并写入或更新 `CloudInstance` 归属记录；若管理员未配置 Lab4AI 凭证，ToolRegistry 触发 `lab4ai_credentials_required` 人工介入并暂停当前 `tool_call_id`，由前端弹出管理员凭证配置弹窗；若平台 API 返回失败，则返回结构化错误并进入重试、HITL 或失败处理，不再通过 Runner/mock 分支绕过真实执行。
+- `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances` 直接调用真实 Lab4AI REST API，并写入或更新 `CloudInstance` 归属记录；若管理员未配置 Lab4AI 凭证，ToolRegistry 触发 `lab4ai_credentials_required` 人工介入并暂停当前 `tool_call_id`，前端只在对话区展示确认与处理提示，不再使用用户弹窗确认；若平台 API 返回失败，则返回结构化错误并进入重试、HITL 或失败处理，不再通过 Runner/mock 分支绕过真实执行。
 
 ### 5.7 算力限额
 
@@ -635,15 +674,15 @@ HITL 不是单独一个页面，而是对话流程中的“等待用户决策”
 
 1. Agent 通过 `ask_user` 生成问题。
 2. 后端把 `workflow_state` 置为 `waiting_for_user`，并写入 `pending_user_input`。
-3. WebSocket 推送 `ask_user` 事件，前端展示问题和可选操作；需要明确人参与决策或配置时，同时弹出决策弹窗。
-4. 输入框保持可用，用户直接回复文字、点击快捷按钮，或在专用弹窗中填写必要配置。
+3. WebSocket 推送 `ask_user` 事件，前端在对话区展示问题和可选操作；需要明确人参与决策或配置时，也只通过对话区确认卡片和输入框承接，不使用额外用户弹窗。
+4. 输入框保持可用，用户直接回复文字或点击对话区快捷按钮；需要管理员配置时，由对话区提示用户进入相应管理入口或在配置完成后回复确认。
 5. 用户回复后，`POST /api/conversations/{id}/messages` 继续推进流程。
 6. 后端读取原始消息历史与 `memory`，从上次暂停点继续执行。
 
 实现约束：
 
 - `ask_user` 不应只是普通文本，它必须能暂停流程。
-- `pending_user_input.intervention` 用于声明专用人工介入 UI，前端按 `type` 分发弹窗；普通确认走通用决策弹窗，`lab4ai_credentials_required` 走 Lab4AI 管理员凭证配置弹窗。
+- `pending_user_input.intervention` 用于声明人工介入类型，前端按 `type` 调整对话区确认卡片文案和快捷操作；普通确认与 `lab4ai_credentials_required` 都不得再走弹窗确认。
 - Lab4AI 凭证缺失不得直接让 workflow 失败，应暂停当前 `tool_call_id`，提示管理员配置 `/api/admin/settings/lab4ai`，保存后再由用户确认“已完成配置，继续执行”。
 - 被确认过的决策要写进 `memory.decisions`，但审批只对当前 `workflow_run_id + tool_call_id` 生效，避免新一轮对话或同一轮内另一个工具调用误用旧确认。
 - HITL 审批绑定字段为 `workflow_run_id / tool_call_id / workflow_step_id / tool_name`。缺任一关键字段时，高风险或计费 Tool 不能继续执行。
@@ -818,11 +857,12 @@ CloudInstance
 
 当前限制：
 
-- Lab4AI 创建 / 停止 / 查询已走真实 API 代码路径，仍需要真实凭证与线上环境联调；缺少凭证时应触发 `lab4ai_credentials_required` 弹窗介入，不再自动模拟计费实例。
+- Lab4AI 创建 / 停止 / 查询已走真实 API 代码路径，仍需要真实凭证与线上环境联调；缺少凭证时应触发 `lab4ai_credentials_required` 对话区确认介入，不再自动模拟计费实例。
 - SSH 执行已接入真实 executor：后端从 `CloudInstance` 读取 SSH 连接信息，通过 `paramiko` 执行命令；缺少实例、SSH 凭证、依赖、超时或非零退出码都会返回结构化错误。仍需要真实 Lab4AI 线上实例做端到端联调。
 - Workflow 已接入 SkillRuntime 适配层：`tools.yaml` / `manifest.yaml` 中的关键能力已注册为可执行 Tool；`lab4ai-paper-analysis` 的声明入口虽仍指向缺失包装函数，但后端适配器会复用现有脚本函数完成真实论文分析，暂不修改 `skills/` 目录。
 - `step_1_audit` 已同时执行仓库分析和论文分析真实脚本，不再使用固定审计值。
 - Agent Loop 已具备 step 内模型 tool-use 基础能力，但当前仅在 Workflow 受控 step 中启用；真实效果仍依赖所配置模型是否支持 Anthropic-compatible `tool_use`。
+- Agent 自主排错闭环已纳入目标设计，但完整实现仍待补齐：需要把 `ToolResult(ok=false)`、postcondition 失败、诊断轮模型调用、受控修复和复验结果连成持久化状态机。
 - Skill Workflow Runtime 已补齐 P0/P1 首轮历史工具名适配和 `sshpass` wrapper 编译；仍需继续完善更完整的 step 输出别名映射、长脚本日志流和真实远程服务器集成测试。
 - `api_key_encrypted` 字段尚未接入真实加密。
 - `skills/` 目录已支持最小解析和注入，但仍需继续标准化元数据、`allowed_tools` 和任务类型映射。
@@ -848,20 +888,28 @@ Workflow step 的完成条件不能由模型自然语言或单次探活类工具
 - `step_8_generate_report` 必须由 `repro_report` 返回真实 `report_path`，否则即使工具返回 `ok=true` 也不能标记为完成。
 - 对于有固定 executor 的关键 step，模型 tool-use 只能提供辅助信息或提前发现错误，不能单独使 step 完成；固定 executor 和合约验收仍必须执行。
 
+验收失败后的处理顺序：
+
+1. 将失败的 postcondition 写入 `validation_failures`，并把失败原因作为 `tool_result` 或 recovery attachment 回流给模型。
+2. 在当前 step 内启动自主排错循环，允许模型基于真实日志和验收失败信息调用 allowlist 内 Tool 修复。
+3. 修复后必须重新执行同一个 postcondition；通过后才能标记 step `completed`。
+4. 如果恢复次数耗尽或错误不可恢复，进入 `waiting_for_user` 或 `failed`；不得用模型总结、固定成功文案或不等价 fallback 覆盖验收失败。
+
 ## 11. 下一步
 
 1. 用真实 Lab4AI CPU/GPU 实例验证 P0/P1 适配：`claw_shell_run -> ssh_execute`、`sshpass` wrapper 编译、`remote_project_prep`、远程 SFTP 读写和 cleanup 都必须在真实环境中通过。
-2. 继续按 [docs/skill-adapter-plan.md](skill-adapter-plan.md) 处理 P1 剩余 workflow：为 `lab4ai-auto-research` 和 `lab4ai-lf-data-preprocess` 增加专用 runner，复用已落地的安全 Tool 映射。
-3. 收敛固定 executor fallback：只有当 fallback 仍执行同一条 skill 契约时才允许继续；否则返回结构化错误或 HITL，不再用语义不同的固定命令掩盖模板/适配器缺失。
-4. 继续完善 `SkillRuntime`：扫描 `SKILL.md`、`tools.yaml`、`manifest.yaml`、`skill.json`，把 skill 入口注册为 `ToolRegistry` 中的真实 Tool，并提供启动健康检查。
-5. 补齐 skill 入口与依赖：为 `lab4ai-paper-analysis` 增加 `analyze_paper_tool`，导入测试 `repo_audit / analyze_paper / run_remote_prep / generate_report`，并把 `requests / pyyaml / pymupdf / python-docx / paramiko 或 asyncssh` 写入后端运行依赖。
-6. 完善真实 `ssh_execute`：从 `CloudInstance` 获取连接信息，使用后端 SSH 库执行命令，支持超时、日志流、退出码、SFTP、敏感信息脱敏和 `{{...}}` 未渲染模板兜底拦截。
-7. 改造 Workflow step：`step_1_audit` 执行真实仓库分析与论文分析；`step_4_cpu_env_setup` 通过真实远程准备工具执行；`step_7_reproduce_on_gpu` 记录真实训练/推理日志；`step_8_generate_report` 生成真实报告 artifact。
-8. 将 `file_write` 从保守模拟升级为受控 workspace 写入，支持本地任务 workspace 与当前任务绑定远程 workspace，不允许修改 `skills/`。
-9. 增加外部网络配置：管理员可配置 GitHub、arXiv、Hugging Face 的代理或镜像；网络失败返回结构化错误并可触发 HITL。
-10. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
-11. 增加自动化验收：skill entrypoint import 测试、Tool schema/权限测试、假 SSH server 集成测试，以及 PhotoDoodle dry-run，要求没有 `已模拟执行`、没有未渲染 `{{step_...}}`、没有固定 `score=75`。
-12. 为长期记忆补齐用户级查看、删除、禁用 API 与前端入口。
-13. 为 Tool 审计补齐管理员检索视图；如 `ConversationMessage.message_metadata` 不够用，再迁移到独立 `AuditLog`。
-14. 为用户 LLM API Key 接入加密存储。
-15. 完成管理员前端页面。
+2. 实现 Workflow step 自主排错闭环：ToolResult 错误回流、`recovery_attempts` 持久化、诊断轮模型调用、受控修复 Tool 调用、postcondition 复验和恢复次数熔断。
+3. 继续按 [docs/skill-adapter-plan.md](skill-adapter-plan.md) 处理 P1 剩余 workflow：为 `lab4ai-auto-research` 和 `lab4ai-lf-data-preprocess` 增加专用 runner，复用已落地的安全 Tool 映射。
+4. 收敛固定 executor fallback：只有当 fallback 仍执行同一条 skill 契约时才允许继续；否则返回结构化错误或 HITL，不再用语义不同的固定命令掩盖模板/适配器缺失。
+5. 继续完善 `SkillRuntime`：扫描 `SKILL.md`、`tools.yaml`、`manifest.yaml`、`skill.json`，把 skill 入口注册为 `ToolRegistry` 中的真实 Tool，并提供启动健康检查。
+6. 补齐 skill 入口与依赖：为 `lab4ai-paper-analysis` 增加 `analyze_paper_tool`，导入测试 `repo_audit / analyze_paper / run_remote_prep / generate_report`，并把 `requests / pyyaml / pymupdf / python-docx / paramiko 或 asyncssh` 写入后端运行依赖。
+7. 完善真实 `ssh_execute`：从 `CloudInstance` 获取连接信息，使用后端 SSH 库执行命令，支持超时、日志流、退出码、SFTP、敏感信息脱敏和 `{{...}}` 未渲染模板兜底拦截。
+8. 改造 Workflow step：`step_1_audit` 执行真实仓库分析与论文分析；`step_4_cpu_env_setup` 通过真实远程准备工具执行；`step_7_reproduce_on_gpu` 记录真实训练/推理日志；`step_8_generate_report` 生成真实报告 artifact。
+9. 将 `file_write` 从保守模拟升级为受控 workspace 写入，支持本地任务 workspace 与当前任务绑定远程 workspace，不允许修改 `skills/`。
+10. 增加外部网络配置：管理员可配置 GitHub、arXiv、Hugging Face 的代理或镜像；网络失败返回结构化错误并可触发 HITL。
+11. 用真实 Lab4AI 凭证与线上环境联调 `lab4ai_create_instance / lab4ai_stop_instance / lab4ai_list_instances`，确认响应字段、错误码、计费实例释放和 `CloudInstance` 归属记录。
+12. 增加自动化验收：skill entrypoint import 测试、Tool schema/权限测试、假 SSH server 集成测试，以及 PhotoDoodle dry-run，要求没有 `已模拟执行`、没有未渲染 `{{step_...}}`、没有固定 `score=75`。
+13. 为长期记忆补齐用户级查看、删除、禁用 API 与前端入口。
+14. 为 Tool 审计补齐管理员检索视图；如 `ConversationMessage.message_metadata` 不够用，再迁移到独立 `AuditLog`。
+15. 为用户 LLM API Key 接入加密存储。
+16. 完成管理员前端页面。
