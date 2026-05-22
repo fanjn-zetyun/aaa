@@ -4,9 +4,11 @@ import pytest
 
 from app.models import CloudInstance, CloudInstanceStatus, CloudInstanceType
 from app.services.lab4ai.client import Lab4AIInstance, Lab4AIStopResult
+from app.services.skill_runtime import SkillRuntimeResult
 from app.services.tools import ToolDefinition
 from app.services.tools import ToolRegistry
 from app.services.tools import ToolExecutionContext
+from app.services.tools import ToolResult
 
 
 pytestmark = pytest.mark.asyncio
@@ -275,6 +277,71 @@ async def test_remote_project_prep_uses_real_ssh_path_without_instance(test_user
     assert result.ok is False
     assert result.name == "remote_project_prep"
     assert result.metadata["error_code"] == "missing_cloud_instance"
+
+
+async def test_repro_report_maps_final_path_to_remote_codelab(
+    monkeypatch,
+    tmp_path,
+    test_user,
+    db_session,
+):
+    registry = ToolRegistry()
+    local_report = tmp_path / "demo_Final_Repro_Report.docx"
+    local_report.write_bytes(b"docx")
+    published: list[tuple[str, str, dict]] = []
+
+    async def fake_skill_invoke(name, payload):
+        assert name == "generate_repro_report"
+        return SkillRuntimeResult(
+            name,
+            f"报告生成成功：`{local_report}`",
+            metadata={"report_path": str(local_report), "artifact_paths": [str(local_report)]},
+        )
+
+    async def fake_publish(local_path, remote_path, payload, context):
+        published.append((local_path, remote_path, payload))
+        return ToolResult(
+            "repro_report_publish",
+            "uploaded",
+            metadata={"remote_report_path": remote_path, "server_id": "gpu-1"},
+        )
+
+    monkeypatch.setattr(registry._skill_runtime, "invoke", fake_skill_invoke)
+    monkeypatch.setattr(registry, "_publish_report_to_codelab", fake_publish)
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=778,
+        session=db_session,
+    )
+
+    result = await registry.invoke(
+        "repro_report",
+        {
+            "repo_name": "demo",
+            "workflow_results": {},
+            "resource_kind": "GPU",
+            "remote_report_path": "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx",
+        },
+        context=context,
+    )
+
+    assert result.ok is True
+    assert result.metadata["local_report_path"] == str(local_report)
+    assert result.metadata["remote_report_path"] == "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx"
+    assert result.metadata["report_path"] == "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx"
+    assert result.metadata["artifact_paths"][0] == "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx"
+    assert published == [
+        (
+            str(local_report),
+            "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx",
+            {
+                "repo_name": "demo",
+                "workflow_results": {},
+                "resource_kind": "GPU",
+                "remote_report_path": "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx",
+            },
+        )
+    ]
 
 
 async def test_unadapted_skill_tool_returns_structured_failure():

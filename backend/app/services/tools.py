@@ -1017,11 +1017,133 @@ class ToolRegistry:
         if context:
             report_payload["conversation_id"] = context.conversation_id
         result = await self._skill_runtime.invoke("generate_repro_report", report_payload)
+        metadata = {**payload, **result.metadata}
+        if result.ok and context:
+            local_report_path = str(result.metadata.get("report_path") or "")
+            remote_report_path = str(
+                payload.get("remote_report_path") or _remote_codelab_report_path(repo_name)
+            )
+            publish_result = await self._publish_report_to_codelab(
+                local_report_path,
+                remote_report_path,
+                {**payload, "resource_kind": payload.get("resource_kind") or "GPU"},
+                context,
+            )
+            if publish_result.ok is False:
+                return ToolResult(
+                    result_name,
+                    f"{result.content}\n{publish_result.content}",
+                    ok=False,
+                    metadata={**metadata, **publish_result.metadata},
+                )
+            metadata = {
+                **metadata,
+                "local_report_path": local_report_path,
+                "remote_report_path": remote_report_path,
+                "report_path": remote_report_path,
+                "artifact_paths": [remote_report_path, local_report_path],
+                "report_path_mapping": {
+                    "skill_output_path": local_report_path,
+                    "codelab_output_path": remote_report_path,
+                },
+            }
+            return ToolResult(
+                result_name,
+                f"{result.content}\n远程报告已生成：{remote_report_path}",
+                ok=True,
+                metadata=metadata,
+            )
         return ToolResult(
             result_name,
             result.content,
             ok=result.ok,
-            metadata={**payload, **result.metadata},
+            metadata=metadata,
+        )
+
+    async def _publish_report_to_codelab(
+        self,
+        local_report_path: str,
+        remote_report_path: str,
+        payload: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        local_path = Path(local_report_path)
+        if not local_path.exists():
+            return ToolResult(
+                "repro_report_publish",
+                f"本地报告文件不存在，无法映射到远程 codelab 目录：{local_report_path}",
+                ok=False,
+                metadata={"error_code": "local_report_missing", "report_path": local_report_path},
+            )
+        instance = await _resolve_cloud_instance(payload, context)
+        if instance is None or not instance.ssh_host or not instance.ssh_port or not instance.ssh_pass:
+            return ToolResult(
+                "repro_report_publish",
+                "当前任务没有可用 GPU/SSH 实例，无法将报告写入 /workspace/user-data/codelab。",
+                ok=False,
+                metadata={"error_code": "missing_cloud_instance", "remote_report_path": remote_report_path},
+            )
+        try:
+            import paramiko
+        except ImportError:
+            return ToolResult(
+                "repro_report_publish",
+                "后端缺少 paramiko 依赖，无法发布报告到远程实例。",
+                ok=False,
+                metadata={"error_code": "missing_dependency", "dependency": "paramiko"},
+            )
+
+        def _upload() -> None:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(
+                    hostname=str(instance.ssh_host),
+                    port=int(instance.ssh_port or 22),
+                    username=instance.ssh_user or "root",
+                    password=instance.ssh_pass,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                )
+                parent = str(Path(remote_report_path).parent).replace("\\", "/")
+                _stdin, stdout, stderr = client.exec_command(f"mkdir -p {_shell_quote(parent)}")
+                exit_code = stdout.channel.recv_exit_status()
+                if exit_code != 0:
+                    error_text = stderr.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(error_text or f"mkdir failed with exit_code={exit_code}")
+                sftp = client.open_sftp()
+                try:
+                    with local_path.open("rb") as source, sftp.open(remote_report_path, "wb") as target:
+                        while chunk := source.read(1024 * 1024):
+                            target.write(chunk)
+                finally:
+                    sftp.close()
+            finally:
+                client.close()
+
+        try:
+            await asyncio.to_thread(_upload)
+        except Exception as exc:
+            return ToolResult(
+                "repro_report_publish",
+                f"报告发布到远程 codelab 目录失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={
+                    "error_code": "remote_report_publish_failed",
+                    "local_report_path": local_report_path,
+                    "remote_report_path": remote_report_path,
+                },
+            )
+        return ToolResult(
+            "repro_report_publish",
+            f"报告已映射到远程 codelab 目录：{remote_report_path}",
+            metadata={
+                "local_report_path": local_report_path,
+                "remote_report_path": remote_report_path,
+                "server_id": instance.server_id,
+                "remote": True,
+            },
         )
 
     async def _ask_user(self, question: str) -> ToolResult:
@@ -1532,6 +1654,11 @@ def _plain_command_lines(commands: list[str], *, label: str) -> list[str]:
         lines.append(f"echo '[{label} {index}/{total}]'")
         lines.append(command)
     return lines
+
+
+def _remote_codelab_report_path(repo_name: str) -> str:
+    safe_name = _safe_remote_name(repo_name)
+    return f"/workspace/user-data/codelab/{safe_name}/{safe_name}_Final_Repro_Report.docx"
 
 
 def _safe_remote_name(value: str) -> str:

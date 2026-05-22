@@ -782,6 +782,8 @@ class SkillWorkflowRunner:
                     "github_url": metadata.get("github_url"),
                     "paper_url": metadata.get("paper_url"),
                     "workflow_results": metadata.get("workflow_results") or {},
+                    "resource_kind": "GPU",
+                    "remote_report_path": f"/workspace/user-data/codelab/{repo_name}/{repo_name}_Final_Repro_Report.docx",
                 },
             )
             if paused:
