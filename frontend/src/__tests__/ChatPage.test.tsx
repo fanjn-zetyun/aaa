@@ -231,7 +231,7 @@ describe("ChatPage", () => {
 
     expect(await screen.findByText("等待你确认")).toBeInTheDocument();
     fireEvent.click(
-      within(screen.getByRole("dialog", { name: "创建 Lab4AI 实例" })).getByRole("button", {
+      within(screen.getByTestId("inline-human-decision")).getByRole("button", {
         name: "继续执行",
       })
     );
@@ -269,7 +269,7 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
   });
 
-  it("opens Lab4AI credential dialog and continues after saving admin settings", async () => {
+  it("shows Lab4AI credential request inline and continues from chat confirmation", async () => {
     conversationPayload.status = "active";
     conversationPayload.metadata = {
       workflow_state: "waiting_for_user",
@@ -283,13 +283,7 @@ describe("ChatPage", () => {
         },
       },
     };
-    globalThis.fetch = vi.fn().mockImplementation((path: string, options?: RequestInit) => {
-      if (path === "/api/admin/settings/lab4ai" && options?.method === "PUT") {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ configured: true, phone_masked: "138****8000" }),
-        });
-      }
+    globalThis.fetch = vi.fn().mockImplementation(() => {
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve(conversationPayload),
@@ -298,24 +292,14 @@ describe("ChatPage", () => {
 
     renderChat();
 
-    expect(await screen.findByRole("dialog", { name: "需要配置 Lab4AI 平台账号" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Lab4AI 手机号"), {
-      target: { value: "13800138000" },
-    });
-    fireEvent.change(screen.getByLabelText("Lab4AI 密码"), {
-      target: { value: "secret" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存并继续执行" }));
+    const inlineDecision = await screen.findByTestId("inline-human-decision");
+    expect(within(inlineDecision).getByText("Lab4AI 凭证未配置，请先由管理员配置平台账号。")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(globalThis.fetch).toHaveBeenCalledWith(
-        "/api/admin/settings/lab4ai",
-        expect.objectContaining({
-          method: "PUT",
-          body: JSON.stringify({ phone: "13800138000", password: "secret" }),
-        })
-      );
-    });
+    fireEvent.click(
+      within(inlineDecision).getByRole("button", { name: "已完成配置，继续执行" })
+    );
+
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
         "/api/conversations/7/messages",

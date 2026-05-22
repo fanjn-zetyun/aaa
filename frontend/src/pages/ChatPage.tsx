@@ -135,9 +135,6 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [copiedMessageId, setCopiedMessageId] = useState<number | string | null>(null);
-  const [credentialForm, setCredentialForm] = useState({ phone: "", password: "" });
-  const [credentialSaving, setCredentialSaving] = useState(false);
-  const [credentialError, setCredentialError] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastSeqRef = useRef(0);
   const activeAgentMessageIdRef = useRef<number | string | null>(null);
@@ -207,13 +204,6 @@ export default function ChatPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
-
-  useEffect(() => {
-    if (conversation?.metadata?.pending_user_input?.intervention?.type !== "lab4ai_credentials_required") {
-      setCredentialError("");
-      setCredentialSaving(false);
-    }
-  }, [conversation?.metadata?.pending_user_input?.intervention?.type]);
 
   function handleStreamPayload(payload: StreamPayload) {
     if (payload.type === "assistant_started") {
@@ -490,35 +480,6 @@ export default function ChatPage() {
     }
   }
 
-  async function saveLab4AICredentialsAndContinue() {
-    if (!pendingInput || credentialSaving) return;
-    setCredentialError("");
-    const phone = credentialForm.phone.trim();
-    const password = credentialForm.password;
-    if (!phone || !password) {
-      setCredentialError("请填写 Lab4AI 手机号和密码。");
-      return;
-    }
-    try {
-      setCredentialSaving(true);
-      await apiFetch("/api/admin/settings/lab4ai", {
-        method: "PUT",
-        body: JSON.stringify({ phone, password }),
-      });
-      setCredentialForm({ phone: "", password: "" });
-      await submitMessage("已完成配置，继续执行");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "保存失败，请稍后重试。";
-      setCredentialError(
-        message.includes("管理员权限")
-          ? "当前账号没有管理员权限，请使用管理员账号配置 Lab4AI 凭证。"
-          : message
-      );
-    } finally {
-      setCredentialSaving(false);
-    }
-  }
-
   function isStaleRoundMessage(message: ChatMessage) {
     if (!currentRoundStartedAtRef.current) return false;
     return new Date(message.created_at).getTime() < currentRoundStartedAtRef.current;
@@ -600,18 +561,6 @@ export default function ChatPage() {
           <div ref={messagesEndRef} />
         </div>
       </div>
-
-      {isWaitingForUser && pendingInput && (
-        <HumanDecisionModal
-          pendingInput={pendingInput}
-          credentialForm={credentialForm}
-          credentialSaving={credentialSaving}
-          credentialError={credentialError}
-          onCredentialChange={setCredentialForm}
-          onSaveCredentials={saveLab4AICredentialsAndContinue}
-          onOption={(option) => submitMessage(option)}
-        />
-      )}
 
       <div className="shrink-0 p-3 bg-white border-t border-slate-100">
         <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
@@ -1045,138 +994,6 @@ function WorkflowBoard({ workflow }: { workflow: WorkflowState }) {
       {shouldShowFinalDelivery(workflow) && (
         <MarkdownContent content={finalDeliveryMarkdown(workflow)} />
       )}
-    </div>
-  );
-}
-
-function HumanDecisionModal({
-  pendingInput,
-  credentialForm,
-  credentialSaving,
-  credentialError,
-  onCredentialChange,
-  onSaveCredentials,
-  onOption,
-}: {
-  pendingInput: PendingUserInput;
-  credentialForm: { phone: string; password: string };
-  credentialSaving: boolean;
-  credentialError: string;
-  onCredentialChange: (value: { phone: string; password: string }) => void;
-  onSaveCredentials: () => void;
-  onOption: (option: string) => void;
-}) {
-  const isLab4AICredentials =
-    pendingInput.intervention?.type === "lab4ai_credentials_required";
-  const stopOption = pendingInput.options?.find((option) => /停止|取消|stop/i.test(option));
-
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/35 px-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="human-decision-title"
-        className="w-full max-w-lg rounded-xl border border-slate-200 bg-white shadow-xl"
-      >
-        <div className="border-b border-slate-100 px-5 py-4">
-          <div className="text-ui-meta font-bold uppercase text-amber-700">需要用户决策</div>
-          <h2 id="human-decision-title" className="mt-1 text-lg font-semibold text-slate-900">
-            {isLab4AICredentials
-              ? pendingInput.intervention?.title || "需要配置 Lab4AI 平台账号"
-              : pendingInput.tool_name
-                ? toolTitle(pendingInput.tool_name)
-                : "确认下一步"}
-          </h2>
-          {pendingInput.tool_name && (
-            <div className="mt-1 text-ui-small text-slate-500">
-              操作：{toolTitle(pendingInput.tool_name)}
-            </div>
-          )}
-        </div>
-
-        <div className="space-y-4 px-5 py-4">
-          <p className="text-chat-body leading-relaxed text-slate-700">{pendingInput.question}</p>
-
-          {isLab4AICredentials ? (
-            <div className="space-y-3">
-              <label className="block text-ui-small font-medium text-slate-700">
-                Lab4AI 手机号
-                <input
-                  value={credentialForm.phone}
-                  onChange={(event) =>
-                    onCredentialChange({ ...credentialForm, phone: event.target.value })
-                  }
-                  autoComplete="username"
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-chat-body text-slate-800 outline-none focus:border-slate-400"
-                  placeholder="请输入平台账号手机号"
-                />
-              </label>
-              <label className="block text-ui-small font-medium text-slate-700">
-                Lab4AI 密码
-                <input
-                  value={credentialForm.password}
-                  onChange={(event) =>
-                    onCredentialChange({ ...credentialForm, password: event.target.value })
-                  }
-                  type="password"
-                  autoComplete="current-password"
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-chat-body text-slate-800 outline-none focus:border-slate-400"
-                  placeholder="请输入平台账号密码"
-                />
-              </label>
-              {credentialError && (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-ui-small text-red-700">
-                  {credentialError}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-ui-small text-slate-600">
-              当前流程已暂停，确认后会从这一轮的等待点继续执行。
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 px-5 py-4">
-          {isLab4AICredentials ? (
-            <>
-              {stopOption && (
-                <button
-                  type="button"
-                  onClick={() => onOption(stopOption)}
-                  disabled={credentialSaving}
-                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-ui-small text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  {stopOption}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onSaveCredentials}
-                disabled={credentialSaving}
-                className="rounded-lg bg-slate-900 px-4 py-2 text-ui-small font-medium text-white hover:bg-slate-800 disabled:bg-slate-300"
-              >
-                {credentialSaving ? "保存中..." : "保存并继续执行"}
-              </button>
-            </>
-          ) : (
-            (pendingInput.options || ["继续执行"]).map((option) => (
-              <button
-                key={option}
-                type="button"
-                onClick={() => onOption(option)}
-                className={
-                  /停止|取消|拒绝|stop|cancel/i.test(option)
-                    ? "rounded-lg border border-slate-200 bg-white px-3 py-2 text-ui-small text-slate-600 hover:bg-slate-50"
-                    : "rounded-lg bg-slate-900 px-4 py-2 text-ui-small font-medium text-white hover:bg-slate-800"
-                }
-              >
-                {option}
-              </button>
-            ))
-          )}
-        </div>
-      </div>
     </div>
   );
 }
