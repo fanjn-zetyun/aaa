@@ -799,7 +799,7 @@ class SkillWorkflowRunner:
                 step,
                 report_generated=bool(report_path),
                 report_path=report_path,
-                completion_source="fixed_executor",
+                completion_source="skill_contract_executor",
             )
             for artifact in _artifact_paths(result):
                 metadata = add_workflow_step_artifact(metadata, step, artifact)

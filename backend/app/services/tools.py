@@ -1601,6 +1601,14 @@ def _build_report_kwargs(repo_name: str, payload: dict[str, Any]) -> dict[str, A
     workflow_results = payload.get("workflow_results") if isinstance(payload.get("workflow_results"), dict) else {}
     paper_info = payload.get("paper_info") if isinstance(payload.get("paper_info"), dict) else {}
     audit_info = payload.get("audit_info") if isinstance(payload.get("audit_info"), dict) else {}
+    baseline_metrics = workflow_results.get("baseline_metrics")
+    if not isinstance(baseline_metrics, dict):
+        baseline_metrics = {}
+    hyperparams = workflow_results.get("hyperparams")
+    datasets = workflow_results.get("datasets")
+    smoke_metrics = workflow_results.get("smoke_test_metrics")
+    if not isinstance(smoke_metrics, dict):
+        smoke_metrics = {}
     project_profile = str(
         payload.get("project_profile")
         or _join_non_empty(
@@ -1609,30 +1617,50 @@ def _build_report_kwargs(repo_name: str, payload: dict[str, Any]) -> dict[str, A
                 f"GitHub：{payload.get('github_url') or workflow_results.get('github_url') or ''}",
                 f"论文：{payload.get('paper_url') or workflow_results.get('paper_url') or ''}",
                 f"仓库审计：{audit_info.get('summary') or workflow_results.get('audit_report_path') or ''}",
+                f"论文/官方基准：{baseline_metrics or 'N/A'}",
             ]
         )
     )
     implementation_steps = payload.get("implementation_steps")
     if not isinstance(implementation_steps, dict):
         implementation_steps = {
-            "code_fetch": str(payload.get("code_fetch") or "代码由 workflow 拉取到远程 codelab 工作区。"),
-            "env_setup": str(payload.get("env_setup") or "环境准备日志由 step_4_cpu_env_setup 记录。"),
-            "data_params": str(payload.get("data_params") or "数据集、超参数来自论文分析与远程执行日志。"),
-            "core_loop": str(payload.get("core_loop") or "训练/推理命令由 GPU 执行阶段记录。"),
-            "eval_process": str(payload.get("eval_process") or "评估流程由项目 README、论文指标和 smoke test 结果确定。"),
+            "code_fetch": str(
+                payload.get("code_fetch")
+                or f"Step 4 将代码克隆到远程共享目录 /workspace/user-data/codelab/{repo_name}/code。"
+            ),
+            "env_setup": str(
+                payload.get("env_setup")
+                or (
+                    "Step 4 调用 lab4ai-project-prep 创建/复用 Conda 环境并安装依赖；"
+                    "Step 7 激活该环境，注入 CUDA_HOME、CPATH、LD_LIBRARY_PATH、"
+                    "TORCH_CUDA_ARCH_LIST=9.0 和 MAX_JOBS=8，并记录 env_patches.md。"
+                )
+            ),
+            "data_params": str(
+                payload.get("data_params")
+                or f"数据集：{datasets or 'N/A'}；超参数：{hyperparams or 'N/A'}。"
+            ),
+            "core_loop": str(
+                payload.get("core_loop")
+                or (
+                    "Step 7 按优先级探测 scripts/*.sh、examples/demo Python 入口，"
+                    "失败时执行内联 CUDA smoke test；日志写入 repro_run.log。"
+                    f" stdout_tail={smoke_metrics.get('stdout_tail') or 'N/A'}"
+                )
+            ),
+            "eval_process": str(
+                payload.get("eval_process")
+                or (
+                    "评估以 Step 7 捕获的真实 GPU smoke/推理日志为依据；"
+                    f"status={smoke_metrics.get('status') or 'N/A'}，"
+                    f"exit_code={smoke_metrics.get('exit_code') or 'N/A'}。"
+                )
+            ),
         }
     results_comparison = payload.get("results_comparison")
     if not isinstance(results_comparison, list):
-        metrics = paper_info.get("metrics") or workflow_results.get("metrics") or {}
-        available = metrics.get("available") if isinstance(metrics, dict) else []
-        results_comparison = [
-            {
-                "metric_name": str(metric),
-                "official_value": "待全量复现后补充",
-                "reproduced_value": "当前 smoke test 未产生该指标",
-            }
-            for metric in (available or ["smoke_test"])
-        ]
+        metrics = paper_info.get("metrics") or workflow_results.get("metrics") or baseline_metrics
+        results_comparison = _report_results_comparison(metrics, smoke_metrics)
     return {
         "repo_name": repo_name,
         "project_profile": project_profile,
@@ -1645,6 +1673,44 @@ def _build_report_kwargs(repo_name: str, payload: dict[str, Any]) -> dict[str, A
         "font_english": str(payload.get("font_english") or "Times New Roman"),
         "font_chinese": str(payload.get("font_chinese") or "微软雅黑"),
     }
+
+
+def _report_results_comparison(metrics: object, smoke_metrics: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if isinstance(metrics, dict):
+        for key, value in metrics.items():
+            rows.append(
+                {
+                    "metric_name": str(key),
+                    "official_value": str(value or "N/A"),
+                    "reproduced_value": "Pending" if not smoke_metrics else str(smoke_metrics.get(key) or "N/A"),
+                }
+            )
+    elif isinstance(metrics, list):
+        for item in metrics:
+            rows.append(
+                {
+                    "metric_name": str(item),
+                    "official_value": "N/A",
+                    "reproduced_value": "Pending",
+                }
+            )
+    rows.append(
+        {
+            "metric_name": "GPU smoke test status",
+            "official_value": "N/A",
+            "reproduced_value": str(smoke_metrics.get("status") or "Pending"),
+        }
+    )
+    if smoke_metrics.get("exit_code") is not None:
+        rows.append(
+            {
+                "metric_name": "GPU smoke test exit_code",
+                "official_value": "0",
+                "reproduced_value": str(smoke_metrics.get("exit_code")),
+            }
+        )
+    return rows
 
 
 def _join_non_empty(parts: list[str]) -> str:

@@ -264,20 +264,6 @@ async def _run_repro_report(
         "-",
         str(payload.get("repo_name") or "project"),
     ).strip("-") or "project"
-    output_dir = _safe_output_dir(runtime, payload, repo_url=repo_name)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / f"{repo_name}_Final_Repro_Report.docx"
-
-    try:
-        from docx import Document
-    except ImportError:
-        return SkillRuntimeResult(
-            "generate_repro_report",
-            "后端缺少 python-docx 依赖，无法生成 Word 报告。",
-            ok=False,
-            metadata={"error_code": "missing_dependency", "dependency": "python-docx"},
-        )
-
     project_profile = str(payload.get("project_profile") or "未提供项目档案。")
     implementation_steps = payload.get("implementation_steps")
     if not isinstance(implementation_steps, dict):
@@ -287,42 +273,18 @@ async def _run_repro_report(
         results_comparison = []
     optimization_suggestions = str(payload.get("optimization_suggestions") or "暂无。")
 
-    def _build_docx() -> None:
-        doc = Document()
-        doc.add_heading(f"【复现报告】{repo_name} - 自动化复现报告", 0)
-        doc.add_heading("一、项目档案", level=1)
-        doc.add_paragraph(project_profile)
-        doc.add_heading("二、复现实施步骤", level=1)
-        for title, key in [
-            ("2.1 代码获取", "code_fetch"),
-            ("2.2 环境搭建与排坑记录", "env_setup"),
-            ("2.3 数据与参数配置", "data_params"),
-            ("2.4 训练/推理核心流程", "core_loop"),
-            ("2.5 评估流程", "eval_process"),
-        ]:
-            doc.add_heading(title, level=2)
-            doc.add_paragraph(str(implementation_steps.get(key) or "未提供信息"))
-        doc.add_heading("三、结果对比", level=1)
-        if results_comparison:
-            table = doc.add_table(rows=1, cols=3)
-            table.style = "Table Grid"
-            table.rows[0].cells[0].text = "评估维度/指标"
-            table.rows[0].cells[1].text = "官方/原论文基准"
-            table.rows[0].cells[2].text = "本次实际复现值"
-            for item in results_comparison:
-                row = table.add_row().cells
-                if isinstance(item, dict):
-                    row[0].text = str(item.get("metric_name") or "-")
-                    row[1].text = str(item.get("official_value") or "-")
-                    row[2].text = str(item.get("reproduced_value") or "-")
-        else:
-            doc.add_paragraph("本次执行未捕获到可用于对比的量化指标数据。")
-        doc.add_heading("四、后期全量训练与优化建议", level=1)
-        doc.add_paragraph(optimization_suggestions)
-        doc.save(report_path)
-
     try:
-        await asyncio.to_thread(_build_docx)
+        generate_report = _load_entrypoint(spec.base_dir, spec.entry_point)
+        result_text = await asyncio.to_thread(
+            generate_report,
+            repo_name=repo_name,
+            project_profile=project_profile,
+            implementation_steps=implementation_steps,
+            results_comparison=results_comparison,
+            optimization_suggestions=optimization_suggestions,
+            font_english=str(payload.get("font_english") or "Times New Roman"),
+            font_chinese=str(payload.get("font_chinese") or "微软雅黑"),
+        )
     except Exception as exc:
         return SkillRuntimeResult(
             "generate_repro_report",
@@ -331,15 +293,39 @@ async def _run_repro_report(
             metadata={"error_code": "report_generate_failed"},
         )
 
+    report_path = _extract_generated_report_path(str(result_text), repo_name)
+    if not report_path.exists():
+        return SkillRuntimeResult(
+            "generate_repro_report",
+            f"复现报告生成后未找到 Word 文件：{report_path}",
+            ok=False,
+            metadata={
+                "error_code": "report_artifact_missing",
+                "report_path": str(report_path),
+                "skill_output": str(result_text),
+            },
+        )
+
     return SkillRuntimeResult(
         "generate_repro_report",
-        f"复现报告已生成：{report_path}",
+        str(result_text),
         metadata={
             "repo_name": repo_name,
             "report_path": str(report_path),
             "artifact_paths": [str(report_path)],
+            "generation_source": "lab4ai-repro-report",
         },
     )
+
+
+def _extract_generated_report_path(skill_output: str, repo_name: str) -> Path:
+    match = re.search(r"`([^`]+\.docx)`", skill_output)
+    if match:
+        return Path(match.group(1))
+    match = re.search(r"([/\w:.-]+\.docx)", skill_output)
+    if match:
+        return Path(match.group(1))
+    return Path("/root/.openclaw/workspace") / repo_name / f"{repo_name}_Final_Repro_Report.docx"
 
 
 def _adapter_for(name: str):
