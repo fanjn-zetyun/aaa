@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent_runtime.state import RuntimeState
+from app.agent_runtime.workflows.tool_mapping import normalize_allowed_tools
 from app.services.workflow import STEP_ALLOWED_TOOLS, STEP_COMPLETION_CONTRACTS, parse_workflow
 from app.services.tools import ToolResult
 
@@ -13,6 +14,7 @@ class WorkflowContractRuntime:
         steps: dict[str, dict[str, Any]] = {}
         for step in workflow.steps:
             contract = STEP_COMPLETION_CONTRACTS.get(step.id)
+            allowed_tools = normalize_allowed_tools(list(STEP_ALLOWED_TOOLS.get(step.id, [])))
             steps[step.id] = {
                 "id": step.id,
                 "name": step.name,
@@ -20,7 +22,7 @@ class WorkflowContractRuntime:
                 "instruction": step.instruction,
                 "expected_output": step.expected_output,
                 "depends_on": list(step.depends_on),
-                "allowed_tools": list(STEP_ALLOWED_TOOLS.get(step.id, [])),
+                "allowed_tools": allowed_tools,
                 "required_tools": list(contract.required_tools if contract else ()),
                 "required_effects": list(contract.required_effects if contract else ()),
                 "required_evidence": list(contract.required_evidence if contract else ()),
