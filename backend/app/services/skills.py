@@ -39,6 +39,16 @@ class SkillDefinition:
             parts.extend(["", "## Workflow Context", self.workflow_context.strip()])
         return "\n".join(parts).strip()
 
+    def summary_for_selection(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "when_to_use": self.when_to_use,
+            "triggers": list(self.triggers),
+            "allowed_tools": list(self.allowed_tools),
+            "has_workflow": bool(self.workflow_context),
+        }
+
 
 class SkillLoader:
     def __init__(self, skills_dir: Path) -> None:
@@ -78,10 +88,15 @@ class SkillLoader:
         )
 
 
-def select_skill(skills: dict[str, SkillDefinition], metadata: dict) -> SkillDefinition | None:
+def fallback_skill_name(metadata: dict) -> str:
     if metadata.get("task_type") == "reproduce" or metadata.get("github_url"):
-        return skills.get("lab4ai-auto-reproduct")
-    return None
+        return "lab4ai-auto-reproduct"
+    return "general-chat"
+
+
+def select_skill(skills: dict[str, SkillDefinition], metadata: dict) -> SkillDefinition | None:
+    name = fallback_skill_name(metadata)
+    return skills.get(name)
 
 
 def _split_frontmatter(raw: str) -> tuple[dict[str, object], str]:

@@ -48,7 +48,8 @@ from app.services.long_term_memory import (
     search_user_memories,
     store_user_memory,
 )
-from app.services.skills import SkillDefinition, SkillLoader, select_skill
+from app.services.skill_selector import SkillSelector
+from app.services.skills import SkillDefinition, SkillLoader
 from app.services.tools import ToolExecutionContext, ToolRegistry, ToolResult
 from app.services.workflow import (
     SkillWorkflowRunner,
@@ -124,6 +125,7 @@ class AgentLoopManager:
         self._pending_starts: set[int] = set()
         self._tools = ToolRegistry()
         self._skills = SkillLoader(get_settings().skills_dir_path).load_all()
+        self._skill_selector = SkillSelector()
 
     def subscribe(self, conversation_id: int) -> asyncio.Queue[dict | None]:
         return self._streams[conversation_id].subscribe()
@@ -173,6 +175,47 @@ class AgentLoopManager:
         self._publish(conversation_id, {"type": "status", "status": "stopped"})
         self._streams[conversation_id].close()
 
+    async def _select_skill_for_run(
+        self,
+        config: LLMRuntimeConfig,
+        metadata: dict,
+        latest_user: str,
+        reuse_existing: bool = False,
+    ) -> tuple[SkillDefinition | None, str, dict]:
+        updated_metadata = dict(metadata)
+        if reuse_existing:
+            current_selection = metadata.get("skill_selection")
+            existing_name = ""
+            if isinstance(current_selection, dict):
+                existing_name = str(current_selection.get("selected_skill") or "").strip()
+            if not existing_name:
+                existing_name = str(metadata.get("selected_skill") or "").strip()
+            if not existing_name:
+                workflow_name = str(metadata.get("workflow_name") or "").strip()
+                if workflow_name in self._skills:
+                    existing_name = workflow_name
+            if existing_name:
+                if "skill_selection" not in updated_metadata:
+                    updated_metadata["skill_selection"] = {
+                        "selected_skill": existing_name,
+                        "source": "fallback",
+                        "model_choice": None,
+                        "fallback_choice": existing_name,
+                        "reason": "复用当前 workflow 已选 skill。",
+                        "confidence": None,
+                        "error": None,
+                    }
+                return self._skills.get(existing_name), existing_name, updated_metadata
+
+        selection = await self._skill_selector.select(
+            config=config,
+            skills=self._skills,
+            metadata=metadata,
+            latest_user=latest_user,
+        )
+        updated_metadata["skill_selection"] = selection.to_metadata()
+        return self._skills.get(selection.skill_name), selection.skill_name, updated_metadata
+
     async def _run(self, conversation_id: int) -> None:
         metadata: dict = {}
         try:
@@ -183,6 +226,7 @@ class AgentLoopManager:
             decision_outcome: str | None = None
             pending_input: dict | None = None
             memory_compacted = False
+            resuming_workflow = False
             async with SessionLocal() as session:
                 conv = await session.get(Conversation, conversation_id)
                 if conv is None:
@@ -200,7 +244,8 @@ class AgentLoopManager:
                     (m.content for m in reversed(db_messages) if m.role == MessageRole.USER),
                     "",
                 )
-                if metadata.get("workflow_state") == WORKFLOW_WAITING_FOR_USER:
+                resuming_workflow = metadata.get("workflow_state") == WORKFLOW_WAITING_FOR_USER
+                if resuming_workflow:
                     pending_input = dict(metadata.get("pending_user_input") or {})
                     pending_step = pending_input.get("step")
                     metadata = resolve_pending_user_input(metadata, answer=latest_user)
@@ -258,22 +303,32 @@ class AgentLoopManager:
                 return
 
             llm_config = await _load_llm_config(user_id)
-            skill = select_skill(self._skills, metadata)
-            skill_name = skill.name if skill else _select_skill(metadata)
+            skill, skill_name, metadata = await self._select_skill_for_run(
+                llm_config,
+                metadata,
+                latest_user,
+                reuse_existing=resuming_workflow,
+            )
+            await self._set_metadata(conversation_id, metadata)
+            if _requires_workflow_task(metadata) and not (skill and skill.workflow_context):
+                await self._fail_missing_workflow_skill(conversation_id, metadata)
+                return
             system_prompt = _build_system_prompt(metadata, skill_name, skill, self._tools)
             initial_messages = _build_llm_messages(db_messages, metadata)
             long_term_context = await self._long_term_memory_context(user_id, latest_user)
             if long_term_context:
                 system_prompt = f"{system_prompt}\n\n{long_term_context}"
+            selection_source = metadata["skill_selection"].get("source")
 
             await self._progress(
                 conversation_id,
                 (
-                    f"已选择 skill：{skill_name}。"
+                    f"已选择 skill：{skill_name}（来源：{selection_source}）。"
                     "当前 Lab4AI Tool 会直接调用真实平台 API；"
                     "SSH、文件写入、仓库/论文分析和报告生成均通过后端 ToolRegistry 执行。"
                 ),
                 stage="skill_selection",
+                extra={"skill_selection_source": selection_source},
             )
 
             plan = await self._model_or_fallback(
@@ -286,7 +341,7 @@ class AgentLoopManager:
             await self._progress(conversation_id, plan, stage="plan")
 
             tool_outputs: list[str] = []
-            if skill and skill.name == "lab4ai-auto-reproduct" and skill.workflow_context:
+            if skill and skill.workflow_context:
                 workflow = parse_workflow(skill.workflow_context)
                 runner = SkillWorkflowRunner(
                     workflow,
@@ -454,15 +509,32 @@ class AgentLoopManager:
         )
         self._publish(conversation_id, {"type": "message", "message": _message_event(msg)})
 
-    async def _progress(self, conversation_id: int, content: str, *, stage: str) -> None:
-        self._publish(
-            conversation_id,
+    async def _progress(
+        self,
+        conversation_id: int,
+        content: str,
+        *,
+        stage: str,
+        extra: dict | None = None,
+    ) -> None:
+        event = dict(extra or {})
+        event.update(
             {
                 "type": "progress",
                 "stage": stage,
                 "content": content,
-            },
+            }
         )
+        self._publish(conversation_id, event)
+
+    async def _fail_missing_workflow_skill(self, conversation_id: int, metadata: dict) -> None:
+        message = "未找到可执行的复现 workflow skill，无法继续。"
+        failed_metadata = mark_failed(metadata)
+        await self._assistant(conversation_id, message)
+        await self._set_status_and_metadata(
+            conversation_id, ConversationStatus.FAILED, failed_metadata
+        )
+        self._publish(conversation_id, {"type": "status", "status": "failed"})
 
     async def _run_model_tool_use_or_fallback(
         self,
@@ -1117,12 +1189,6 @@ def _build_legacy_system_prompt(metadata: dict) -> str:
     )
 
 
-def _select_skill(metadata: dict) -> str:
-    if metadata.get("task_type") == "reproduce" or metadata.get("github_url"):
-        return "lab4ai-auto-reproduct"
-    return "general-chat"
-
-
 def _refresh_summary(metadata: dict, latest_user: str, tool_outputs: list[str]) -> dict:
     metadata = ensure_memory(metadata)
     memory = metadata["memory"]
@@ -1145,6 +1211,10 @@ def _refresh_summary(metadata: dict, latest_user: str, tool_outputs: list[str]) 
 def _is_stop_request(text: str) -> bool:
     lowered = text.lower()
     return any(key in lowered for key in ("停止", "中止", "取消", "stop", "cancel"))
+
+
+def _requires_workflow_task(metadata: dict) -> bool:
+    return metadata.get("task_type") == "reproduce" or bool(metadata.get("github_url"))
 
 
 def _canonical_tool_name(name: str) -> str:

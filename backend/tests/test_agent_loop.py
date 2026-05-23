@@ -6,10 +6,214 @@ import pytest
 
 from app.services.agent_loop import AgentLoopManager
 from app.services.llm_client import LLMRuntimeConfig, LLMToolResponse, LLMToolUse
+from app.services.skill_selector import SkillSelectionResult
+from app.services.skills import SkillDefinition
 from app.services.tools import ToolResult
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_agent_loop_selects_skill_and_records_metadata():
+    class FakeSelector:
+        async def select(self, *, config, skills, metadata, latest_user):
+            assert config.model == "model"
+            assert "lab4ai-auto-reproduct" in skills
+            assert metadata["task_type"] == "reproduce"
+            assert latest_user == "Please reproduce this repo"
+            return SkillSelectionResult(
+                skill_name="lab4ai-auto-reproduct",
+                reason="Model selected registered skill `lab4ai-auto-reproduct`.",
+                confidence=None,
+                source="model",
+                model_choice="lab4ai-auto-reproduct",
+                fallback_choice="general-chat",
+                error=None,
+            )
+
+    manager = AgentLoopManager()
+    manager._skill_selector = FakeSelector()
+    manager._skills = {
+        "lab4ai-auto-reproduct": SkillDefinition(
+            name="lab4ai-auto-reproduct",
+            workflow_context="steps: []",
+        )
+    }
+    config = LLMRuntimeConfig(
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        model="model",
+        max_tokens=4096,
+    )
+    metadata = {"task_type": "reproduce"}
+
+    skill, skill_name, updated_metadata = await manager._select_skill_for_run(
+        config,
+        metadata,
+        "Please reproduce this repo",
+    )
+
+    assert skill is manager._skills["lab4ai-auto-reproduct"]
+    assert skill_name == "lab4ai-auto-reproduct"
+    assert updated_metadata is not metadata
+    assert updated_metadata["skill_selection"] == {
+        "selected_skill": "lab4ai-auto-reproduct",
+        "source": "model",
+        "model_choice": "lab4ai-auto-reproduct",
+        "fallback_choice": "general-chat",
+        "reason": "Model selected registered skill `lab4ai-auto-reproduct`.",
+        "confidence": None,
+        "error": None,
+    }
+
+
+async def test_agent_loop_reuses_existing_skill_selection_on_resume():
+    class FakeSelector:
+        async def select(self, *, config, skills, metadata, latest_user):
+            raise AssertionError("selector should not run while resuming a workflow")
+
+    manager = AgentLoopManager()
+    manager._skill_selector = FakeSelector()
+    manager._skills = {
+        "lab4ai-auto-reproduct": SkillDefinition(
+            name="lab4ai-auto-reproduct",
+            workflow_context="steps: []",
+        )
+    }
+    config = LLMRuntimeConfig(
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        model="model",
+        max_tokens=4096,
+    )
+    metadata = {
+        "workflow_name": "Lab4AI_Auto_Reproduction_Pipeline",
+        "skill_selection": {
+            "selected_skill": "lab4ai-auto-reproduct",
+            "source": "model",
+            "model_choice": "lab4ai-auto-reproduct",
+            "fallback_choice": None,
+            "reason": "Original model choice.",
+            "confidence": 0.91,
+            "error": None,
+        },
+    }
+
+    skill, skill_name, updated_metadata = await manager._select_skill_for_run(
+        config,
+        metadata,
+        "继续执行",
+        reuse_existing=True,
+    )
+
+    assert skill is manager._skills["lab4ai-auto-reproduct"]
+    assert skill_name == "lab4ai-auto-reproduct"
+    assert updated_metadata["skill_selection"] == metadata["skill_selection"]
+    assert updated_metadata["skill_selection"]["source"] == "model"
+
+
+async def test_agent_loop_reuses_top_level_selected_skill_on_resume():
+    class FakeSelector:
+        async def select(self, *, config, skills, metadata, latest_user):
+            raise AssertionError("selector should not run while resuming a workflow")
+
+    manager = AgentLoopManager()
+    manager._skill_selector = FakeSelector()
+    manager._skills = {
+        "lab4ai-auto-reproduct": SkillDefinition(
+            name="lab4ai-auto-reproduct",
+            workflow_context="steps: []",
+        )
+    }
+    config = LLMRuntimeConfig(
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        model="model",
+        max_tokens=4096,
+    )
+    metadata = {
+        "selected_skill": "lab4ai-auto-reproduct",
+        "workflow_name": "Lab4AI_Auto_Reproduction_Pipeline",
+    }
+
+    skill, skill_name, updated_metadata = await manager._select_skill_for_run(
+        config,
+        metadata,
+        "继续执行",
+        reuse_existing=True,
+    )
+
+    assert skill is manager._skills["lab4ai-auto-reproduct"]
+    assert skill_name == "lab4ai-auto-reproduct"
+    assert updated_metadata["skill_selection"]["selected_skill"] == "lab4ai-auto-reproduct"
+    assert updated_metadata["skill_selection"]["source"] == "fallback"
+    assert updated_metadata["skill_selection"]["fallback_choice"] == "lab4ai-auto-reproduct"
+
+
+async def test_agent_loop_fails_reproduce_without_workflow_skill(
+    monkeypatch,
+):
+    from app.models.conversation import ConversationStatus
+
+    async def fail_invoke(*args, **kwargs):
+        raise AssertionError("legacy fixed tool chain should not run without workflow skill")
+
+    assistant_messages: list[str] = []
+    status_updates: list[tuple[ConversationStatus, dict]] = []
+
+    async def fake_assistant(conversation_id, content):
+        assistant_messages.append(content)
+
+    async def fake_set_status_and_metadata(conversation_id, status, metadata):
+        status_updates.append((status, metadata))
+
+    manager = AgentLoopManager()
+    monkeypatch.setattr(manager, "_invoke_tool_with_policy", fail_invoke)
+    monkeypatch.setattr(manager, "_assistant", fake_assistant)
+    monkeypatch.setattr(manager, "_set_status_and_metadata", fake_set_status_and_metadata)
+    metadata = {
+        "task_type": "reproduce",
+        "github_url": "https://github.com/example/repo",
+        "skill_selection": {
+            "selected_skill": "",
+            "source": "fallback",
+            "fallback_choice": "lab4ai-auto-reproduct",
+        },
+    }
+
+    await manager._fail_missing_workflow_skill(123, metadata)
+
+    assert assistant_messages == ["未找到可执行的复现 workflow skill，无法继续。"]
+    assert status_updates[0][0] == ConversationStatus.FAILED
+    assert status_updates[0][1]["workflow_state"] == "failed"
+    assert status_updates[0][1]["skill_selection"]["selected_skill"] == ""
+    assert manager._streams[123].history[-1]["status"] == "failed"
+
+
+async def test_progress_event_includes_extra_payload():
+    manager = AgentLoopManager()
+    content = "已选择 skill：lab4ai-auto-reproduct（来源：model）。"
+
+    await manager._progress(
+        42,
+        content,
+        stage="skill_selection",
+        extra={
+            "type": "x",
+            "stage": "x",
+            "content": "bad",
+            "skill_selection_source": "model",
+        },
+    )
+
+    event = manager._streams[42].history[-1]
+    assert event["type"] == "progress"
+    assert event["stage"] == "skill_selection"
+    assert event["content"] == content
+    assert event["skill_selection_source"] == "model"
 
 
 async def test_model_or_fallback_retries_with_lower_token_budget(monkeypatch):
