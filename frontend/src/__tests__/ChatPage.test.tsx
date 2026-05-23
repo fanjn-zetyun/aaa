@@ -943,10 +943,11 @@ describe("ChatPage", () => {
     expect(screen.getByText("未发现需要继续释放的实例。")).toBeInTheDocument();
   });
 
-  it("shows a step-level HITL reason on the workflow board", async () => {
+  it("embeds normal human confirmation in the current workflow step", async () => {
     conversationPayload.status = "active";
     conversationPayload.metadata = {
       workflow_state: "waiting_for_user",
+      workflow_current_step_id: "step_3_deploy_cpu",
       selected_skill: "lab4ai-auto-reproduct",
       workflow_name: "lab4ai-auto-reproduct",
       workflow_results: { repo_name: "PhotoDoodle" },
@@ -970,18 +971,30 @@ describe("ChatPage", () => {
         question: "是否继续创建 CPU 实例？",
         options: ["继续执行"],
         tool_name: "lab4ai_create_instance",
+        workflow_step_id: "step_3_deploy_cpu",
       },
     };
 
     renderChat();
 
-    expect(await screen.findByText("等待你确认")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "PhotoDoodle 复现流水线" })).toBeInTheDocument();
-    expect(screen.getAllByText("等待确认").length).toBeGreaterThan(0);
-    expect(screen.getByText("需要你确认后继续。")).toBeInTheDocument();
-    expect(screen.getByText("需要确认后才能创建 CPU 实例。")).toBeInTheDocument();
-    expect(screen.getAllByText("创建 Lab4AI 实例").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
+    const step = await screen.findByTestId("workflow-step-step_3_deploy_cpu");
+    expect(within(step).getByText("等待你确认")).toBeInTheDocument();
+    expect(within(step).getByText("需要你的输入")).toBeInTheDocument();
+    expect(within(step).getByText("是否继续创建 CPU 实例？")).toBeInTheDocument();
+    expect(within(step).getByRole("button", { name: "继续执行" })).toBeInTheDocument();
+    expect(screen.queryByTestId("inline-human-decision")).not.toBeInTheDocument();
+
+    fireEvent.click(within(step).getByRole("button", { name: "继续执行" }));
+
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "/api/conversations/7/messages",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ content: "继续执行" }),
+        })
+      );
+    });
   });
 
   it("shows workflow steps as a vertical run card with the current step expanded", async () => {

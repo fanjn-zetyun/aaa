@@ -23,6 +23,7 @@ interface PendingUserInput {
   question: string;
   options?: string[];
   step?: string;
+  workflow_step_id?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   intervention?: PendingIntervention;
@@ -587,6 +588,10 @@ export default function ChatPage() {
   const isWaitingForUser =
     conversation?.metadata?.workflow_state === "waiting_for_user" && !!pendingInput;
   const isRunning = conversation?.status === "running" && !isWaitingForUser;
+  const pendingInputIsWorkflowScoped =
+    !!pendingInput?.workflow_step_id ||
+    !!conversation?.metadata?.workflow_current_step_id ||
+    !!conversation?.metadata?.workflow_steps?.length;
 
   async function copyMessage(message: ChatMessage) {
     try {
@@ -613,10 +618,12 @@ export default function ChatPage() {
               message={msg}
               copied={copiedMessageId === msg.id}
               onCopy={() => copyMessage(msg)}
+              pendingInput={pendingInput}
+              onSubmit={submitMessage}
             />
           ))}
 
-          {isWaitingForUser && pendingInput && (
+          {isWaitingForUser && pendingInput && !pendingInputIsWorkflowScoped && (
             <div className="flex gap-4">
               <AgentAvatar />
               <div className="w-full max-w-[85%] rounded-xl border border-amber-200 bg-amber-50 p-4" data-testid="inline-human-decision">
@@ -995,6 +1002,18 @@ function workflowPathFromSelection(selection?: SkillSelectionState, payloadPath?
   return null;
 }
 
+function pendingInputForStep(
+  pendingInput: PendingUserInput | null | undefined,
+  step: WorkflowStepState,
+  workflow: WorkflowState
+) {
+  if (!pendingInput) return null;
+  if (pendingInput.workflow_step_id === step.id) return pendingInput;
+  if (pendingInput.step === step.id) return pendingInput;
+  if (!pendingInput.workflow_step_id && workflow.current_step_id === step.id) return pendingInput;
+  return null;
+}
+
 function mergeWorkflowState(
   current: WorkflowState | undefined,
   payload: StreamPayload,
@@ -1170,10 +1189,14 @@ function MessageBubble({
   message,
   copied,
   onCopy,
+  pendingInput,
+  onSubmit,
 }: {
   message: ChatMessage;
   copied: boolean;
   onCopy: () => void;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
 }) {
   if (message.role === "user") {
     return (
@@ -1194,7 +1217,7 @@ function MessageBubble({
         {message.type === "status" ? (
           <StatusMessage content={message.content} />
         ) : (
-          <AgentResponse message={message} />
+          <AgentResponse message={message} pendingInput={pendingInput} onSubmit={onSubmit} />
         )}
         <MessageMeta message={message} copied={copied} onCopy={onCopy} align="left" />
       </div>
@@ -1213,7 +1236,15 @@ function StatusMessage({ content }: { content: string }) {
   );
 }
 
-function AgentResponse({ message }: { message: ChatMessage }) {
+function AgentResponse({
+  message,
+  pendingInput,
+  onSubmit,
+}: {
+  message: ChatMessage;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
+}) {
   const hasProcess = !!message.skillSelection || !!message.workflow || !!message.events?.length;
   const finalAnswer = cleanFinalAnswer(message.content, hasProcess);
   return (
@@ -1229,7 +1260,9 @@ function AgentResponse({ message }: { message: ChatMessage }) {
               workflowPath={message.workflowPath}
             />
           )}
-          {message.workflow && <WorkflowBoard workflow={message.workflow} />}
+          {message.workflow && (
+            <WorkflowBoard workflow={message.workflow} pendingInput={pendingInput} onSubmit={onSubmit} />
+          )}
         </div>
       )}
       {finalAnswer ? (
@@ -1342,7 +1375,15 @@ function EvidenceRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function WorkflowBoard({ workflow }: { workflow: WorkflowState }) {
+function WorkflowBoard({
+  workflow,
+  pendingInput,
+  onSubmit,
+}: {
+  workflow: WorkflowState;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
+}) {
   const steps = workflow.steps || REPRO_WORKFLOW_STEPS;
   const completedCount = steps.filter((step) => step.status === "completed").length;
   return (
@@ -1370,6 +1411,8 @@ function WorkflowBoard({ workflow }: { workflow: WorkflowState }) {
             step={step}
             index={index}
             isCurrent={workflow.current_step_id === step.id}
+            pendingInput={pendingInputForStep(pendingInput, step, workflow)}
+            onSubmit={onSubmit}
           />
         ))}
       </div>
@@ -1381,10 +1424,14 @@ function WorkflowStepRow({
   step,
   index,
   isCurrent,
+  pendingInput,
+  onSubmit,
 }: {
   step: WorkflowStepState;
   index: number;
   isCurrent: boolean;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
 }) {
   const template = REPRO_WORKFLOW_STEPS.find((item) => item.id === step.id);
   const name = step.name || template?.name || step.id;
@@ -1392,10 +1439,10 @@ function WorkflowStepRow({
   const toolCalls = (step.tool_calls || []).slice(0, 4);
   const outcome = workflowStepOutcome(step);
   const startLabel = workflowStepStartLabel(step);
-  const defaultOpen = isCurrent || ["running", "failed", "waiting_for_user"].includes(step.status);
+  const defaultOpen = !!pendingInput || isCurrent || ["running", "failed", "waiting_for_user"].includes(step.status);
 
   return (
-    <details className="group" open={defaultOpen}>
+    <details className="group" open={defaultOpen} data-testid={`workflow-step-${step.id}`}>
       <summary className="flex cursor-pointer list-none gap-3 px-4 py-3 hover:bg-slate-50">
         <span
           className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-ui-micro font-semibold ${workflowStepNumberClass(
@@ -1453,8 +1500,46 @@ function WorkflowStepRow({
         {!startLabel && progressItems.length === 0 && toolCalls.length === 0 && !outcome && (
           <div className="text-slate-500">{workflowStepDetail(step)}</div>
         )}
+        {pendingInput && <HumanInputPanel input={pendingInput} onSubmit={onSubmit} />}
       </div>
     </details>
+  );
+}
+
+function HumanInputPanel({
+  input,
+  onSubmit,
+}: {
+  input: PendingUserInput;
+  onSubmit: (content: string) => Promise<void>;
+}) {
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3" data-testid="step-human-input">
+      <div className="text-ui-meta font-bold uppercase text-amber-700">等待你确认</div>
+      <div className="mt-1 text-ui-small font-semibold text-amber-800">需要你的输入</div>
+      {input.tool_name && (
+        <div className="mt-1 text-ui-micro text-amber-700">
+          操作：{toolTitle(input.tool_name)}
+        </div>
+      )}
+      <div className="mt-2 whitespace-pre-wrap text-chat-body leading-relaxed text-slate-700">
+        {input.question}
+      </div>
+      {input.options && input.options.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {input.options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => void onSubmit(option)}
+              className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-ui-small text-slate-700 hover:bg-amber-100"
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
