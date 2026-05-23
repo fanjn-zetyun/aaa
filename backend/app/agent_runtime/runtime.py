@@ -9,6 +9,7 @@ from app.agent_runtime.context import ContextBuilder
 from app.agent_runtime.events import EventSink, ListEventSink
 from app.agent_runtime.llm import LLMAdapter, ModelRequest
 from app.agent_runtime.messages import MessageStore
+from app.agent_runtime.recovery import RecoveryPolicy
 from app.agent_runtime.state import RuntimeState, save_runtime_state
 from app.agent_runtime.tool_executor import ToolExecutor
 from app.agent_runtime.workflows.contract import WorkflowContractRuntime
@@ -38,6 +39,7 @@ class AgentRuntime:
         self.event_sink = event_sink
         self.context_builder = ContextBuilder()
         self.workflow_runtime = WorkflowContractRuntime()
+        self.recovery_policy = RecoveryPolicy(max_attempts=3)
 
     @classmethod
     def for_test(cls, *, session: AsyncSession, llm, event_sink: EventSink | None = None) -> AgentRuntime:
@@ -110,6 +112,31 @@ class AgentRuntime:
                     break
             if state.active_workflow and turn_results:
                 state = self.workflow_runtime.validate_after_tool_results(state, turn_results)
+                if _current_workflow_step_status(state) == "recovery":
+                    decision = self.recovery_policy.decide(state, retryable=True)
+                    if decision.action == "hitl":
+                        workflow_step_id = (state.active_workflow or {}).get("current_step_id")
+                        state = state.mark_waiting_for_user(
+                            pending_tool_call={
+                                "tool_call_id": f"recovery:{workflow_step_id}",
+                                "tool_name": "workflow_recovery",
+                                "workflow_step_id": workflow_step_id,
+                            },
+                            pending_user_input={
+                                "question": "当前 workflow step 自动恢复次数已耗尽，请补充处理方式。",
+                                "options": ["继续重试", "停止任务"],
+                            },
+                        )
+                        await self.event_sink.publish(
+                            {
+                                "type": "runtime_waiting_for_user",
+                                "run_id": state.run_id,
+                                "workflow_step_id": workflow_step_id,
+                                "reason": decision.reason,
+                            }
+                        )
+                    else:
+                        state = _record_recovery_attempt(state, decision.next_attempt)
             if state.status == "waiting_for_user":
                 break
             state = state.next_turn()
@@ -129,3 +156,24 @@ class AgentRuntime:
 
     def _tool_schemas(self, state: RuntimeState) -> list[dict[str, Any]]:
         return self.tool_executor.registry.list_anthropic_tools(state.allowed_tools)
+
+
+def _current_workflow_step_status(state: RuntimeState) -> str:
+    workflow = state.active_workflow or {}
+    step_id = str(workflow.get("current_step_id") or "")
+    steps = workflow.get("steps") if isinstance(workflow.get("steps"), dict) else {}
+    step = steps.get(step_id) if step_id else None
+    if not isinstance(step, dict):
+        return ""
+    return str(step.get("status") or "")
+
+
+def _record_recovery_attempt(state: RuntimeState, next_attempt: int) -> RuntimeState:
+    workflow = dict(state.active_workflow or {})
+    step_id = str(workflow.get("current_step_id") or "")
+    attempts = dict(workflow.get("recovery_attempts") or {})
+    attempts[step_id] = next_attempt
+    workflow["recovery_attempts"] = attempts
+    updated = state.next_turn()
+    updated.active_workflow = workflow
+    return updated

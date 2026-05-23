@@ -2,6 +2,7 @@ import pytest
 
 from app.agent_runtime.events import ListEventSink
 from app.agent_runtime.llm import ModelResponse
+from app.agent_runtime.recovery import RecoveryPolicy
 from app.agent_runtime.runtime import AgentRuntime
 from app.agent_runtime.skills import SkillInvokeTool
 from app.agent_runtime.tool_executor import ToolExecutor
@@ -134,6 +135,83 @@ class WorkflowRegistry:
         )
 
 
+class ExhaustedRecoveryLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text="加载 workflow skill。",
+                tool_calls=[
+                    LLMToolUse(
+                        id="toolu_skill",
+                        name="skill.invoke",
+                        input={"skill": "workflow-skill"},
+                    )
+                ],
+                stop_reason="tool_use",
+                usage={},
+                raw={},
+            )
+        return ModelResponse(
+            text="执行 GPU smoke。",
+            tool_calls=[
+                LLMToolUse(
+                    id="toolu_gpu",
+                    name="ssh_execute",
+                    input={"command": "python - <<'PY'\nprint('cuda smoke')\nPY"},
+                )
+            ],
+            stop_reason="tool_use",
+            usage={},
+            raw={},
+        )
+
+
+class RecoveryRegistry:
+    def __init__(self):
+        self.definitions = {
+            "ssh_execute": ToolDefinition(
+                name="ssh_execute",
+                description="ssh",
+                input_schema={
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {"command": {"type": "string"}},
+                },
+            ),
+            "ask_user": ToolDefinition(
+                name="ask_user",
+                description="ask",
+                input_schema={"type": "object", "properties": {"question": {"type": "string"}}},
+                read_only=True,
+            ),
+        }
+
+    def definition(self, name):
+        return self.definitions[name]
+
+    def list_definitions(self, allowed_tools=None):
+        allowed = set(allowed_tools or [])
+        return [item for item in self.definitions.values() if not allowed or item.name in allowed]
+
+    def list_anthropic_tools(self, allowed_tools=None):
+        return [item.anthropic_schema() for item in self.list_definitions(allowed_tools)]
+
+    def confirmation_for(self, name, tool_input):
+        return None
+
+    async def invoke(self, name, tool_input, context=None):
+        return ToolResult(
+            name,
+            "inline CUDA smoke completed",
+            ok=True,
+            metadata={"evidence": {"inline_cuda_smoke": True}},
+        )
+
+
 @pytest.mark.asyncio
 async def test_agent_runtime_runs_tool_loop_until_final_answer(db_session, test_user):
     conversation = Conversation(
@@ -227,3 +305,54 @@ tasks:
     step = result.metadata["runtime"]["active_workflow"]["steps"]["step_3_deploy_cpu"]
     assert step["status"] == "completed"
     assert step["tool_calls"][0]["name"] == "lab4ai_create_instance"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_escalates_exhausted_workflow_recovery(db_session, test_user):
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.REPRODUCE,
+        title="runtime recovery",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+    workflow = """
+version: agent-workflow/v1
+name: Demo
+description: Demo workflow
+tasks:
+  - id: step_7_gpu_execution
+    name: GPU
+    instruction: |
+      执行项目复现。
+    expected_output: |
+      项目复现日志。
+"""
+    skill = SkillDefinition(
+        name="workflow-skill",
+        allowed_tools=[],
+        workflow_context=workflow,
+    )
+    events = ListEventSink()
+    runtime = AgentRuntime(
+        session=db_session,
+        llm=ExhaustedRecoveryLLM(),
+        tool_executor=ToolExecutor(
+            registry=RecoveryRegistry(),
+            event_sink=events,
+            runtime_tools={"skill.invoke": SkillInvokeTool({"workflow-skill": skill})},
+        ),
+        event_sink=events,
+    )
+    runtime.recovery_policy = RecoveryPolicy(max_attempts=0)
+
+    result = await runtime.run_conversation(conversation.id, model="claude-test")
+
+    runtime_state = result.metadata["runtime"]
+    assert result.status == "waiting_for_user"
+    assert runtime_state["status"] == "waiting_for_user"
+    assert runtime_state["pending_tool_call"]["tool_name"] == "workflow_recovery"
+    assert "自动恢复次数已耗尽" in runtime_state["pending_user_input"]["question"]
