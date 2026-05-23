@@ -875,6 +875,40 @@ describe("ChatPage", () => {
     expect(finalAnswer).not.toHaveTextContent("score=75");
   });
 
+  it("keeps intermediate workflow logs out of the final answer card", async () => {
+    conversationPayload.messages = [
+      ...conversationPayload.messages,
+      {
+        id: 2,
+        role: "assistant",
+        content:
+          "工具执行结果如下\n| 序号 | 执行步骤 | 当前状态 | 核心产出 / 详情 |\n| --- | --- | --- | --- |\n| 1 | `step_1_audit` | 完成 | score=82 |\n\n最终结论：复现报告已生成。",
+        message_metadata: {},
+        created_at: "2026-05-20T00:00:30Z",
+      },
+    ];
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: { repo_name: "motion-guided-flow" },
+      workflow_steps: [
+        {
+          id: "step_1_audit",
+          name: "项目复现可行性分析",
+          status: "completed",
+          output: "score=82",
+        },
+      ],
+    };
+
+    renderChat();
+
+    const finalAnswer = await screen.findByText("最终回答");
+    const card = finalAnswer.parentElement;
+    expect(card).toHaveTextContent("最终结论：复现报告已生成。");
+    expect(card).not.toHaveTextContent("工具执行结果如下");
+    expect(card).not.toHaveTextContent("| 序号 |");
+  });
+
   it("preserves tool and cleanup timeline events", async () => {
     renderChat();
 
