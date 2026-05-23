@@ -216,6 +216,43 @@ async def test_progress_event_includes_extra_payload():
     assert event["skill_selection_source"] == "model"
 
 
+async def test_skill_selection_progress_exposes_structured_evidence():
+    manager = AgentLoopManager()
+    conversation_id = 123
+    manager._active_runs[conversation_id] = "run-skill"
+
+    metadata = {
+        "skill_selection": {
+            "selected_skill": "lab4ai-auto-reproduct",
+            "source": "model",
+            "model_choice": "lab4ai-auto-reproduct",
+            "fallback_choice": None,
+            "reason": "Model selected registered skill `lab4ai-auto-reproduct`.",
+            "confidence": None,
+            "error": None,
+        }
+    }
+
+    await manager._progress(
+        conversation_id,
+        "已选择 skill：lab4ai-auto-reproduct（来源：model）。",
+        stage="skill_selection",
+        extra={
+            "skill_selection": metadata["skill_selection"],
+            "workflow_path": "skills/lab4ai-auto-reproduct/project_reproduce.yaml",
+        },
+    )
+
+    event = manager._streams[conversation_id].history[-1]
+    assert event["type"] == "progress"
+    assert event["stage"] == "skill_selection"
+    assert event["skill_selection"]["source"] == "model"
+    assert event["skill_selection"]["model_choice"] == "lab4ai-auto-reproduct"
+    assert event["workflow_path"] == "skills/lab4ai-auto-reproduct/project_reproduce.yaml"
+    assert "workflow_context" not in event["skill_selection"]
+    assert "body" not in event["skill_selection"]
+
+
 async def test_model_or_fallback_retries_with_lower_token_budget(monkeypatch):
     seen_tokens: list[int] = []
 

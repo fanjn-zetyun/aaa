@@ -328,7 +328,11 @@ class AgentLoopManager:
                     "SSH、文件写入、仓库/论文分析和报告生成均通过后端 ToolRegistry 执行。"
                 ),
                 stage="skill_selection",
-                extra={"skill_selection_source": selection_source},
+                extra={
+                    "skill_selection_source": selection_source,
+                    "skill_selection": metadata.get("skill_selection"),
+                    "workflow_path": _workflow_display_path_for_skill(skill),
+                },
             )
 
             plan = await self._model_or_fallback(
@@ -1215,6 +1219,14 @@ def _is_stop_request(text: str) -> bool:
 
 def _requires_workflow_task(metadata: dict) -> bool:
     return metadata.get("task_type") == "reproduce" or bool(metadata.get("github_url"))
+
+
+def _workflow_display_path_for_skill(skill: SkillDefinition | None) -> str | None:
+    if not skill or not skill.workflow_context:
+        return None
+    if skill.name == "lab4ai-auto-reproduct":
+        return f"skills/{skill.name}/project_reproduce.yaml"
+    return f"skills/{skill.name}/workflow.yaml"
 
 
 def _canonical_tool_name(name: str) -> str:
