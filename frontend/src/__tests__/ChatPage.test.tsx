@@ -1015,6 +1015,46 @@ describe("ChatPage", () => {
     expect(screen.getByText("未发现需要继续释放的实例。")).toBeInTheDocument();
   });
 
+  it("renders runtime tool activity events in the current agent bubble", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "runtime_started",
+        run_id: "runtime-1",
+      });
+      ws.emit({
+        seq: 2,
+        type: "tool_started",
+        run_id: "runtime-1",
+        tool_name: "ask_user",
+        tool_call_id: "toolu_1",
+      });
+      ws.emit({
+        seq: 3,
+        type: "tool_completed",
+        run_id: "runtime-1",
+        tool_name: "ask_user",
+        tool_call_id: "toolu_1",
+        ok: true,
+      });
+      ws.emit({
+        seq: 4,
+        type: "runtime_completed",
+        run_id: "runtime-1",
+      });
+    });
+
+    expect(await screen.findByText(/ask_user/)).toBeInTheDocument();
+    expect(screen.getByText(/runtime-1/)).toBeInTheDocument();
+  });
+
   it("embeds normal human confirmation in the current workflow step", async () => {
     conversationPayload.status = "active";
     conversationPayload.metadata = {

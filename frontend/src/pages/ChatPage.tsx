@@ -73,6 +73,7 @@ interface StreamPayload {
   stage?: string;
   content?: string;
   tool_name?: string;
+  tool_call_id?: string;
   tool_input?: Record<string, unknown>;
   workflow_step_id?: string;
   ok?: boolean;
@@ -168,6 +169,15 @@ const REPRO_WORKFLOW_STEPS: WorkflowStepState[] = [
   { id: "step_9_release_gpu", name: "释放 GPU 实例", status: "pending" },
 ];
 
+const RUNTIME_LIFECYCLE_EVENT_TYPES = new Set([
+  "runtime_started",
+  "runtime_waiting_for_user",
+  "runtime_completed",
+  "runtime_failed",
+  "runtime_stopped",
+  "permission_requested",
+]);
+
 export default function ChatPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const queryClient = useQueryClient();
@@ -220,7 +230,19 @@ export default function ChatPage() {
           lastSeqRef.current = payload.seq;
         }
         handleStreamPayload(payload);
-        if (["ask_user", "status", "memory_compacted", "assistant_completed"].includes(payload.type)) {
+        if (
+          [
+            "ask_user",
+            "status",
+            "memory_compacted",
+            "assistant_completed",
+            "runtime_waiting_for_user",
+            "runtime_completed",
+            "runtime_failed",
+            "runtime_stopped",
+            "permission_requested",
+          ].includes(payload.type)
+        ) {
           queryClient.invalidateQueries({ queryKey: ["conversation", taskId] });
         }
       } catch {
@@ -316,11 +338,26 @@ export default function ChatPage() {
       });
       return;
     }
+    if (RUNTIME_LIFECYCLE_EVENT_TYPES.has(payload.type)) {
+      appendTimelineEvent(payload, {
+        id: `runtime-${payload.run_id || "current"}`,
+        title: runtimeEventTitle(payload.type),
+        content: runtimeEventContent(payload),
+        created_at: payload.timestamp || new Date().toISOString(),
+        status: runtimeEventStatus(payload.type),
+        kind: "execution",
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
+      });
+      if (["runtime_completed", "runtime_failed", "runtime_stopped"].includes(payload.type)) {
+        freezeActiveAgentMessage();
+      }
+      return;
+    }
     if (payload.type === "tool_started" && payload.tool_name) {
       appendTimelineEvent(payload, {
-        id: `tool-${payload.tool_input?.tool_call_id || payload.seq || Date.now()}`,
+        id: `tool-${payload.tool_call_id || payload.tool_input?.tool_call_id || payload.seq || Date.now()}`,
         title: toolTitle(payload.tool_name),
-        content: toolStartedContent(payload.tool_name, payload.tool_input),
+        content: toolStartedContent(payload.tool_name, payload.tool_input) || runtimeToolContent(payload),
         created_at: payload.timestamp || new Date().toISOString(),
         status: "running",
         kind: "execution",
@@ -343,11 +380,24 @@ export default function ChatPage() {
       });
       return;
     }
+    if (payload.type === "tool_completed" && payload.tool_name) {
+      appendTimelineEvent(payload, {
+        id: `tool-${payload.tool_call_id || payload.seq || Date.now()}`,
+        title: toolTitle(payload.tool_name),
+        content: runtimeToolContent(payload),
+        created_at: payload.timestamp || new Date().toISOString(),
+        status: payload.ok === false ? "error" : "done",
+        kind: "execution",
+        tool_name: payload.tool_name,
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
+      });
+      return;
+    }
     if (payload.type === "tool_error" && payload.tool_name) {
       appendTimelineEvent(payload, {
         id: `tool-error-${payload.seq ?? Date.now()}`,
         title: toolTitle(payload.tool_name),
-        content: payload.error,
+        content: payload.error || runtimeToolContent(payload),
         created_at: payload.timestamp || new Date().toISOString(),
         status: "error",
         kind: "execution",
@@ -1971,6 +2021,41 @@ function progressContent(stage?: string, content?: string) {
     return "已进入项目复现流程，开始按工作流分析仓库并准备后续步骤。";
   }
   return content;
+}
+
+function runtimeEventTitle(type: string) {
+  const labels: Record<string, string> = {
+    runtime_started: "Agent Runtime 启动",
+    runtime_waiting_for_user: "等待人工输入",
+    runtime_completed: "Agent Runtime 完成",
+    runtime_failed: "Agent Runtime 失败",
+    runtime_stopped: "Agent Runtime 已停止",
+    permission_requested: "请求工具权限",
+  };
+  return labels[type] || "Agent Runtime";
+}
+
+function runtimeEventStatus(type: string): TimelineEvent["status"] {
+  if (type === "runtime_started") return "running";
+  if (type === "runtime_failed" || type === "runtime_stopped") return "error";
+  if (type === "runtime_completed") return "done";
+  return "info";
+}
+
+function runtimeEventContent(payload: StreamPayload) {
+  const parts = [];
+  if (payload.run_id) parts.push(String(payload.run_id));
+  if (payload.tool_name) parts.push(String(payload.tool_name));
+  if (payload.tool_call_id) parts.push(String(payload.tool_call_id));
+  if (payload.content) parts.push(payload.content);
+  if (payload.error) parts.push(payload.error);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+function runtimeToolContent(payload: StreamPayload) {
+  const parts = [payload.tool_name].filter(Boolean).map(String);
+  if (payload.tool_call_id) parts.push(String(payload.tool_call_id));
+  return parts.length ? parts.join(" · ") : undefined;
 }
 
 function workflowProgressContent(content?: string) {
