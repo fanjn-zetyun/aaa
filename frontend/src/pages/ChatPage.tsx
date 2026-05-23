@@ -680,11 +680,12 @@ function buildChatMessages(messages: ConversationMessage[], conversation?: Conve
   if (pendingEvents.length > 0) {
     result.push(eventOnlyMessage(pendingEvents, new Date().toISOString()));
   }
+  const skillSelection = skillSelectionFromConversation(conversation);
   return attachRunStateToLastAgent(
     result,
     workflowStateFromConversation(conversation),
-    skillSelectionFromConversation(conversation),
-    workflowPathFromSelection(skillSelectionFromConversation(conversation)),
+    skillSelection,
+    workflowPathFromSelection(skillSelection),
     conversation?.updated_at
   );
 }
@@ -737,7 +738,8 @@ function attachRunStateToLastAgent(
 ) {
   if (!workflow && !skillSelection) return messages;
   const lastAgentIndex = findLastIndex(messages, (item) => item.role === "agent");
-  if (lastAgentIndex >= 0) {
+  const lastUserIndex = findLastIndex(messages, (item) => item.role === "user");
+  if (lastAgentIndex >= 0 && lastAgentIndex > lastUserIndex) {
     return messages.map((item, index) =>
       index === lastAgentIndex
         ? {
@@ -882,7 +884,7 @@ function mergeRunStateIntoMessage(message: ChatMessage, payload: StreamPayload):
     skillSelection: runState.skillSelection
       ? { ...message.skillSelection, ...runState.skillSelection }
       : message.skillSelection,
-    workflowPath: message.workflowPath || runState.workflowPath,
+    workflowPath: payload.workflow_path ?? message.workflowPath ?? runState.workflowPath,
   };
 }
 

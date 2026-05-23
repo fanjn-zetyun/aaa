@@ -122,6 +122,52 @@ describe("ChatPage", () => {
     expect(screen.getByText("model_choice")).toBeInTheDocument();
     expect(screen.getAllByText("lab4ai-auto-reproduct").length).toBeGreaterThan(0);
     expect(screen.queryByText("workflow_context")).not.toBeInTheDocument();
+    expect(screen.queryByText("body")).not.toBeInTheDocument();
+  });
+
+  it("attaches metadata skill evidence to a new agent bubble after the latest user", async () => {
+    conversationPayload.metadata = {
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        confidence: null,
+        error: null,
+      },
+    };
+    conversationPayload.messages = [
+      {
+        id: 1,
+        role: "user",
+        content: "previous user request",
+        message_metadata: {},
+        created_at: "2026-05-20T00:00:00Z",
+      },
+      {
+        id: 2,
+        role: "assistant",
+        content: "previous assistant answer",
+        message_metadata: {},
+        created_at: "2026-05-20T00:00:10Z",
+      },
+      {
+        id: 3,
+        role: "user",
+        content: "current user starts new run",
+        message_metadata: {},
+        created_at: "2026-05-20T00:01:00Z",
+      },
+    ];
+
+    renderChat();
+
+    const currentUser = await screen.findByText("current user starts new run");
+    const skillHeading = await screen.findByText("模型选择了 lab4ai-auto-reproduct");
+
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
+    expect(currentUser.compareDocumentPosition(skillHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("merges streamed skill selection evidence into the active agent bubble", async () => {
@@ -163,6 +209,52 @@ describe("ChatPage", () => {
       screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
     ).toBeInTheDocument();
     expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+  });
+
+  it("updates inferred workflow path when a later stream payload includes explicit workflow path", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "progress",
+        run_id: "run-path",
+        stage: "skill_selection",
+        content: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        skill_selection: {
+          selected_skill: "lab4ai-auto-reproduct",
+          source: "model",
+          model_choice: "lab4ai-auto-reproduct",
+          fallback_choice: null,
+          reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+          confidence: null,
+          error: null,
+        },
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "workflow_loaded",
+        run_id: "run-path",
+        workflow_path: "runtime/workflows/run-path/project_reproduce.yaml",
+        workflow: {
+          name: "Lab4AI_Auto_Reproduction_Pipeline",
+          steps: [],
+        },
+        timestamp: "2026-05-20T00:00:02Z",
+      });
+    });
+
+    expect(
+      await screen.findByText("已加载 runtime/workflows/run-path/project_reproduce.yaml")
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
+    ).not.toBeInTheDocument();
   });
 
   it("uses a neutral label for unknown skill selection source", async () => {
