@@ -244,7 +244,11 @@ export default function ChatPage() {
 
   function handleStreamPayload(payload: StreamPayload) {
     if (payload.type === "assistant_started") {
-      setMessages((prev) => ensureActiveAgentMessage(prev, payload).messages);
+      setMessages((prev) => {
+        const { messages: next, id } = ensureActiveAgentMessage(prev, payload);
+        activeAgentMessageIdRef.current = id;
+        return next.map((msg) => (msg.id === id ? mergeRunStateIntoMessage(msg, payload) : msg));
+      });
       return;
     }
     if (payload.type === "assistant_delta" && payload.delta) {
@@ -252,7 +256,9 @@ export default function ChatPage() {
         const { messages: next, id } = ensureActiveAgentMessage(prev, payload);
         activeAgentMessageIdRef.current = id;
         return next.map((msg) =>
-          msg.id === id ? { ...msg, content: `${msg.content}${payload.delta}` } : msg
+          msg.id === id
+            ? mergeRunStateIntoMessage({ ...msg, content: `${msg.content}${payload.delta}` }, payload)
+            : msg
         );
       });
       return;
@@ -867,7 +873,11 @@ function skillSelectionFromConversation(conversation?: Conversation): SkillSelec
 
 function skillSelectionFromPayload(payload: StreamPayload): SkillSelectionState | undefined {
   if (payload.skill_selection) {
-    return hasSkillSelectionSignal(payload.skill_selection) ? payload.skill_selection : undefined;
+    const selection = {
+      ...payload.skill_selection,
+      source: payload.skill_selection.source || payload.skill_selection_source,
+    };
+    return hasSkillSelectionSignal(selection) ? selection : undefined;
   }
   if (!payload.skill_selection_source) return undefined;
   return undefined;
