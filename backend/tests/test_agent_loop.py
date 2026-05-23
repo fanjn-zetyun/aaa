@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.services.agent_loop import AgentLoopManager
+from app.services.agent_loop import AgentLoopManager, _safe_skill_selection_evidence
 from app.services.llm_client import LLMRuntimeConfig, LLMToolResponse, LLMToolUse
 from app.services.skill_selector import SkillSelectionResult
 from app.services.skills import SkillDefinition
@@ -251,6 +251,33 @@ async def test_skill_selection_progress_exposes_structured_evidence():
     assert event["workflow_path"] == "skills/lab4ai-auto-reproduct/project_reproduce.yaml"
     assert "workflow_context" not in event["skill_selection"]
     assert "body" not in event["skill_selection"]
+
+
+async def test_safe_skill_selection_evidence_removes_private_fields():
+    evidence = _safe_skill_selection_evidence(
+        {
+            "selected_skill": "lab4ai-auto-reproduct",
+            "source": "model",
+            "model_choice": "lab4ai-auto-reproduct",
+            "fallback_choice": None,
+            "reason": "Model selected registered skill `lab4ai-auto-reproduct`.",
+            "confidence": None,
+            "error": None,
+            "workflow_context": "secret yaml",
+            "body": "secret body",
+            "prompt_context": "secret prompt",
+        }
+    )
+
+    assert evidence == {
+        "selected_skill": "lab4ai-auto-reproduct",
+        "source": "model",
+        "model_choice": "lab4ai-auto-reproduct",
+        "fallback_choice": None,
+        "reason": "Model selected registered skill `lab4ai-auto-reproduct`.",
+        "confidence": None,
+        "error": None,
+    }
 
 
 async def test_model_or_fallback_retries_with_lower_token_budget(monkeypatch):

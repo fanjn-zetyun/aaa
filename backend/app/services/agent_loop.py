@@ -330,7 +330,9 @@ class AgentLoopManager:
                 stage="skill_selection",
                 extra={
                     "skill_selection_source": selection_source,
-                    "skill_selection": metadata.get("skill_selection"),
+                    "skill_selection": _safe_skill_selection_evidence(
+                        metadata.get("skill_selection")
+                    ),
                     "workflow_path": _workflow_display_path_for_skill(skill),
                 },
             )
@@ -1227,6 +1229,23 @@ def _workflow_display_path_for_skill(skill: SkillDefinition | None) -> str | Non
     if skill.name == "lab4ai-auto-reproduct":
         return f"skills/{skill.name}/project_reproduce.yaml"
     return f"skills/{skill.name}/workflow.yaml"
+
+
+_SAFE_SKILL_SELECTION_KEYS = {
+    "selected_skill",
+    "source",
+    "model_choice",
+    "fallback_choice",
+    "reason",
+    "confidence",
+    "error",
+}
+
+
+def _safe_skill_selection_evidence(selection: object) -> dict[str, object | None] | None:
+    if not isinstance(selection, dict):
+        return None
+    return {key: selection.get(key) for key in _SAFE_SKILL_SELECTION_KEYS if key in selection}
 
 
 def _canonical_tool_name(name: str) -> str:
