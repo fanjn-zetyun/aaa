@@ -80,6 +80,10 @@
   - step 内模型 tool-use 会把 `claw-shell` / `claw_shell_run` 规范化为 `ssh_execute`，并把 `sshpass ... ssh ... "<remote command>"` wrapper 编译成远程命令；无法提取远程命令或存在未渲染模板时直接失败。
   - `step_4_cpu_env_setup` 与 `step_7_gpu_execution` 的 allowlist 已加入 `claw_shell_run`、`file_system_read`、`file_system_list` 和安全文件写入能力；`step_4` 同时允许 `remote_project_prep`。
   - `file_system_read / file_system_list / file_system_write` 已映射到受控任务 workspace 或当前任务绑定远程实例的 SFTP 路径，仍拒绝访问 `skills/`。
+- Agent Runtime V3 骨架已落地：
+  - 新增 `RuntimeState`、`MessageStore`、`LLMAdapter`、`ToolExecutor`、`SkillInvokeTool`、`ContextBuilder` 和 `WorkflowContractRuntime` compatibility layer。
+  - `agent_runtime_v3_enabled` 默认关闭；开启后 `AgentLoopManager` 会委托 `AgentRuntime`，现有 `SkillWorkflowRunner` 链路在默认配置下保持可用。
+  - V3 已支持 `model -> tool_use -> ToolExecutor -> tool_result -> model` 循环、`skill.invoke` 激活 skill/workflow contract、workflow required tool/evidence 基础验收，以及 ChatPage runtime/tool 事件展示。
 
 ## 当前验证结果
 
