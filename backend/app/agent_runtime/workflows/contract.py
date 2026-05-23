@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent_runtime.state import RuntimeState
+from app.agent_runtime.workflows.postconditions import evaluate_step_postconditions
 from app.agent_runtime.workflows.tool_mapping import normalize_allowed_tools
 from app.services.workflow import STEP_ALLOWED_TOOLS, STEP_COMPLETION_CONTRACTS, parse_workflow
 from app.services.tools import ToolResult
@@ -86,6 +87,14 @@ class WorkflowContractRuntime:
         missing_evidence = [
             str(name) for name in step.get("required_evidence") or [] if not evidence.get(str(name))
         ]
+        postcondition = evaluate_step_postconditions(
+            current_step_id,
+            workflow_state=workflow,
+            step_state={**step, "evidence": evidence},
+        )
+        for item in postcondition.missing_evidence:
+            if item not in missing_evidence:
+                missing_evidence.append(item)
         failures = []
         if missing_tools:
             failures.append(f"missing required tool(s): {', '.join(missing_tools)}")
