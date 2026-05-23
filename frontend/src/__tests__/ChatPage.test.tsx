@@ -93,6 +93,37 @@ describe("ChatPage", () => {
     localStorage.clear();
   });
 
+  it("shows model-selected skill evidence from conversation metadata", async () => {
+    conversationPayload.metadata = {
+      task_type: "reproduce",
+      github_url: "https://github.com/jsnzwu/motion-guided-flow",
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        confidence: null,
+        error: null,
+      },
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_steps: [],
+    };
+
+    renderChat();
+
+    expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    expect(screen.getByText("模型选择")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("查看选择证据"));
+
+    expect(screen.getByText("source")).toBeInTheDocument();
+    expect(screen.getByText("model")).toBeInTheDocument();
+    expect(screen.getByText("model_choice")).toBeInTheDocument();
+    expect(screen.getAllByText("lab4ai-auto-reproduct").length).toBeGreaterThan(0);
+    expect(screen.queryByText("workflow_context")).not.toBeInTheDocument();
+  });
+
   it("renders streamed assistant deltas, tool timeline, and skill workflow board in one round", async () => {
     renderChat();
 

@@ -28,6 +28,16 @@ interface PendingUserInput {
   intervention?: PendingIntervention;
 }
 
+interface SkillSelectionState {
+  selected_skill?: string;
+  source?: "model" | "fallback" | string;
+  model_choice?: string | null;
+  fallback_choice?: string | null;
+  reason?: string | null;
+  confidence?: number | null;
+  error?: string | null;
+}
+
 interface Conversation {
   id: number;
   title: string;
@@ -47,6 +57,7 @@ interface Conversation {
     workflow_resources?: Record<string, WorkflowResource>;
     workflow_results?: Record<string, unknown>;
     pending_user_input?: PendingUserInput | null;
+    skill_selection?: SkillSelectionState;
   };
   messages: ConversationMessage[];
 }
@@ -68,6 +79,9 @@ interface StreamPayload {
   message?: ConversationMessage;
   step?: WorkflowStepState;
   workflow?: WorkflowState;
+  skill_selection?: SkillSelectionState;
+  skill_selection_source?: string;
+  workflow_path?: string | null;
 }
 
 interface WorkflowStepState {
@@ -129,6 +143,8 @@ interface ChatMessage {
   type?: "text" | "status";
   events?: TimelineEvent[];
   workflow?: WorkflowState;
+  skillSelection?: SkillSelectionState;
+  workflowPath?: string | null;
   streaming?: boolean;
   run_id?: string | null;
 }
@@ -359,6 +375,7 @@ export default function ChatPage() {
     }
     const id = `stream-${runId || payload.seq || Date.now()}`;
     activeAgentMessageIdRef.current = id;
+    const skillSelection = skillSelectionFromPayload(payload);
     return {
       id,
       messages: [
@@ -370,6 +387,8 @@ export default function ChatPage() {
           created_at: payload.timestamp || new Date().toISOString(),
           type: "text" as const,
           events: [],
+          skillSelection,
+          workflowPath: workflowPathFromSelection(skillSelection, payload.workflow_path),
           streaming: true,
           run_id: runId,
         },
@@ -653,7 +672,13 @@ function buildChatMessages(messages: ConversationMessage[], conversation?: Conve
   if (pendingEvents.length > 0) {
     result.push(eventOnlyMessage(pendingEvents, new Date().toISOString()));
   }
-  return attachWorkflowToLastAgent(result, workflowStateFromConversation(conversation), conversation?.updated_at);
+  return attachRunStateToLastAgent(
+    result,
+    workflowStateFromConversation(conversation),
+    skillSelectionFromConversation(conversation),
+    workflowPathFromSelection(skillSelectionFromConversation(conversation)),
+    conversation?.updated_at
+  );
 }
 
 function mergePersistedChatMessages(current: ChatMessage[], persistedMessages: ChatMessage[]) {
@@ -669,6 +694,8 @@ function mergePersistedChatMessages(current: ChatMessage[], persistedMessages: C
               created_at: typeof chatMessage.id === "number" ? chatMessage.created_at : item.created_at,
               events: mergeTimelineEvents(item.events, chatMessage.events),
               workflow: chatMessage.workflow || item.workflow,
+              skillSelection: chatMessage.skillSelection || item.skillSelection,
+              workflowPath: chatMessage.workflowPath || item.workflowPath,
               streaming: item.streaming && !chatMessage.content ? item.streaming : false,
             }
           : item
@@ -693,27 +720,38 @@ function mergePersistedChatMessages(current: ChatMessage[], persistedMessages: C
   return next;
 }
 
-function attachWorkflowToLastAgent(
+function attachRunStateToLastAgent(
   messages: ChatMessage[],
   workflow: WorkflowState | undefined,
+  skillSelection: SkillSelectionState | undefined,
+  workflowPath: string | null,
   updatedAt?: string
 ) {
-  if (!workflow) return messages;
+  if (!workflow && !skillSelection) return messages;
   const lastAgentIndex = findLastIndex(messages, (item) => item.role === "agent");
   if (lastAgentIndex >= 0) {
     return messages.map((item, index) =>
-      index === lastAgentIndex ? { ...item, workflow: item.workflow || workflow } : item
+      index === lastAgentIndex
+        ? {
+            ...item,
+            workflow: item.workflow || workflow,
+            skillSelection: item.skillSelection || skillSelection,
+            workflowPath: item.workflowPath || workflowPath,
+          }
+        : item
     );
   }
   return [
     ...messages,
     {
-      id: `workflow-${updatedAt || workflow.name || "board"}`,
+      id: `workflow-${updatedAt || workflow?.name || skillSelection?.selected_skill || "run"}`,
       role: "agent" as const,
       content: "",
       created_at: updatedAt || new Date().toISOString(),
       type: "text" as const,
       workflow,
+      skillSelection,
+      workflowPath,
     },
   ];
 }
@@ -785,6 +823,36 @@ function workflowStateFromConversation(conversation?: Conversation): WorkflowSta
     resources: metadata?.workflow_resources,
     results: metadata?.workflow_results,
   });
+}
+
+function skillSelectionFromConversation(conversation?: Conversation): SkillSelectionState | undefined {
+  const selection = conversation?.metadata?.skill_selection;
+  if (!selection?.selected_skill && !selection?.model_choice && !selection?.fallback_choice) {
+    return undefined;
+  }
+  return selection;
+}
+
+function skillSelectionFromPayload(payload: StreamPayload): SkillSelectionState | undefined {
+  if (payload.skill_selection) return payload.skill_selection;
+  if (!payload.skill_selection_source) return undefined;
+  return {
+    selected_skill: undefined,
+    source: payload.skill_selection_source,
+    model_choice: null,
+    fallback_choice: null,
+    reason: payload.content || null,
+    confidence: null,
+    error: null,
+  };
+}
+
+function workflowPathFromSelection(selection?: SkillSelectionState, payloadPath?: string | null) {
+  if (payloadPath) return payloadPath;
+  if (selection?.selected_skill === "lab4ai-auto-reproduct") {
+    return "skills/lab4ai-auto-reproduct/project_reproduce.yaml";
+  }
+  return null;
 }
 
 function workflowTimelineEvent(payload: StreamPayload): TimelineEvent | undefined {
@@ -1075,7 +1143,7 @@ function StatusMessage({ content }: { content: string }) {
 }
 
 function AgentResponse({ message }: { message: ChatMessage }) {
-  const hasProcess = !!message.workflow || !!message.events?.length;
+  const hasProcess = !!message.skillSelection || !!message.workflow || !!message.events?.length;
   const finalAnswer = cleanFinalAnswer(message.content, hasProcess);
   return (
     <div className="space-y-3">
@@ -1083,6 +1151,12 @@ function AgentResponse({ message }: { message: ChatMessage }) {
         <div className="space-y-3">
           {message.events && message.events.length > 0 && (
             <AgentProcessTimeline events={message.events} />
+          )}
+          {message.skillSelection && (
+            <SkillSelectionCard
+              selection={message.skillSelection}
+              workflowPath={message.workflowPath}
+            />
           )}
           {message.workflow && <WorkflowBoard workflow={message.workflow} />}
         </div>
@@ -1113,6 +1187,69 @@ function RunningState() {
         <span>正在执行...</span>
       </div>
     </div>
+  );
+}
+
+function SkillSelectionCard({
+  selection,
+  workflowPath,
+}: {
+  selection: SkillSelectionState;
+  workflowPath?: string | null;
+}) {
+  const selected = selection.selected_skill || selection.model_choice || selection.fallback_choice || "未选择";
+  const sourceLabel = selection.source === "model" ? "模型选择" : "规则兜底";
+  const sourceClass =
+    selection.source === "model"
+      ? "border-blue-100 bg-blue-50 text-blue-700"
+      : "border-amber-100 bg-amber-50 text-amber-700";
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-100 bg-slate-50 px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+              Skill Selection
+            </div>
+            <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
+              {sourceLabel === "模型选择" ? "模型选择了" : "规则兜底选择了"} {selected}
+            </h3>
+            {workflowPath && (
+              <p className="mt-1 break-words text-ui-small text-slate-500">
+                已加载 {workflowPath}
+              </p>
+            )}
+          </div>
+          <span className={`shrink-0 rounded-full border px-2.5 py-1 text-ui-micro font-medium ${sourceClass}`}>
+            {sourceLabel}
+          </span>
+        </div>
+      </div>
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-ui-small font-medium text-slate-600 hover:bg-slate-50">
+          <span>查看选择证据</span>
+          <ChevronIcon className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-x-3 gap-y-2 border-t border-slate-100 px-4 py-3 text-ui-small">
+          <EvidenceRow label="source" value={selection.source || "-"} />
+          <EvidenceRow label="selected_skill" value={selection.selected_skill || "-"} />
+          <EvidenceRow label="model_choice" value={selection.model_choice || "-"} />
+          <EvidenceRow label="fallback_choice" value={selection.fallback_choice || "-"} />
+          <EvidenceRow label="workflow" value={workflowPath || "-"} />
+          <EvidenceRow label="reason" value={selection.reason || "-"} />
+          {selection.error && <EvidenceRow label="error" value={selection.error} />}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function EvidenceRow({ label, value }: { label: string; value: string }) {
+  return (
+    <>
+      <span className="font-mono text-slate-400">{label}</span>
+      <span className="min-w-0 break-words font-mono text-slate-700">{value}</span>
+    </>
   );
 }
 
