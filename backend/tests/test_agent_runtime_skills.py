@@ -44,3 +44,36 @@ async def test_skill_invoke_keeps_ask_user_available(tmp_path):
     _result, updated = await tool.call({"skill": "demo-skill"}, state=state)
 
     assert updated.allowed_tools == ["analyze_repo", "skill.invoke", "ask_user"]
+
+
+@pytest.mark.asyncio
+async def test_skill_invoke_activates_workflow_contract(tmp_path):
+    workflow = """
+version: agent-workflow/v1
+name: Demo
+description: Demo workflow
+tasks:
+  - id: step_1_audit
+    name: Audit
+    instruction: |
+      分析仓库。
+    expected_output: |
+      输出审计。
+"""
+    skill = SkillDefinition(
+        name="workflow-skill",
+        description="workflow",
+        triggers=["workflow"],
+        when_to_use="workflow task",
+        allowed_tools=["analyze_repo"],
+        body="执行 workflow skill。",
+        base_dir=tmp_path,
+        workflow_context=workflow,
+    )
+    tool = SkillInvokeTool({"workflow-skill": skill})
+    state = RuntimeState.new(conversation_id=1, model="claude-test")
+
+    result, updated = await tool.call({"skill": "workflow-skill", "args": {}}, state=state)
+
+    assert result.ok is True
+    assert updated.active_workflow["current_step_id"] == "step_1_audit"

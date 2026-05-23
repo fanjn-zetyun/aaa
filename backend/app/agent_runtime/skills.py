@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent_runtime.state import RuntimeState
+from app.agent_runtime.workflows.contract import WorkflowContractRuntime
 from app.services.skills import SkillDefinition
 from app.services.tools import ToolDefinition, ToolResult
 
@@ -31,6 +32,7 @@ class SkillInvokeTool:
             risk_level="low",
             audit_category="skill",
         )
+        self.workflow_runtime = WorkflowContractRuntime()
 
     async def call(
         self,
@@ -59,7 +61,14 @@ class SkillInvokeTool:
             "workflow_context": skill.workflow_context,
             "args": input_value.get("args") or {},
         }
-        updated.allowed_tools = list(dict.fromkeys([*skill.allowed_tools, "skill.invoke", "ask_user"]))
+        if skill.workflow_context:
+            updated = self.workflow_runtime.activate(skill.workflow_context, state=updated)
+            allowed_tools = [*updated.allowed_tools, *skill.allowed_tools]
+        else:
+            allowed_tools = list(skill.allowed_tools)
+        updated.allowed_tools = list(
+            dict.fromkeys([*allowed_tools, "skill.invoke", "ask_user"])
+        )
         return (
             ToolResult(
                 self.name,
