@@ -11,8 +11,9 @@ from app.agent_runtime.llm import LLMAdapter, ModelRequest
 from app.agent_runtime.messages import MessageStore
 from app.agent_runtime.state import RuntimeState, save_runtime_state
 from app.agent_runtime.tool_executor import ToolExecutor
+from app.agent_runtime.workflows.contract import WorkflowContractRuntime
 from app.models import Conversation, ConversationStatus
-from app.services.tools import ToolRegistry
+from app.services.tools import ToolRegistry, ToolResult
 
 
 @dataclass(slots=True)
@@ -36,6 +37,7 @@ class AgentRuntime:
         self.tool_executor = tool_executor
         self.event_sink = event_sink
         self.context_builder = ContextBuilder()
+        self.workflow_runtime = WorkflowContractRuntime()
 
     @classmethod
     def for_test(cls, *, session: AsyncSession, llm, event_sink: EventSink | None = None) -> AgentRuntime:
@@ -87,8 +89,10 @@ class AgentRuntime:
                 state.status = "completed"
                 break
 
+            turn_results: list[ToolResult] = []
             for tool_call in response.tool_calls:
                 executed = await self.tool_executor.execute_one(tool_call, state=state)
+                turn_results.append(executed.tool_result)
                 await store.append_tool_result(
                     conversation_id,
                     tool_name=executed.tool_name,
@@ -100,9 +104,12 @@ class AgentRuntime:
                         **(executed.tool_result.metadata or {}),
                     },
                 )
-                if executed.paused and executed.updated_state:
+                if executed.updated_state:
                     state = executed.updated_state
+                if executed.paused:
                     break
+            if state.active_workflow and turn_results:
+                state = self.workflow_runtime.validate_after_tool_results(state, turn_results)
             if state.status == "waiting_for_user":
                 break
             state = state.next_turn()
