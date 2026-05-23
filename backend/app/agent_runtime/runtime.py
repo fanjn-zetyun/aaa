@@ -83,6 +83,7 @@ class AgentRuntime:
                         {"id": call.id, "name": call.name, "input": call.input}
                         for call in response.tool_calls
                     ],
+                    "raw_content": _raw_assistant_content(response.raw),
                     "usage": response.usage,
                 },
             )
@@ -177,3 +178,11 @@ def _record_recovery_attempt(state: RuntimeState, next_attempt: int) -> RuntimeS
     updated = state.next_turn()
     updated.active_workflow = workflow
     return updated
+
+
+def _raw_assistant_content(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
+    content = raw.get("content") if isinstance(raw, dict) else None
+    if not isinstance(content, list):
+        return None
+    blocks = [dict(item) for item in content if isinstance(item, dict)]
+    return blocks or None

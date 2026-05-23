@@ -25,6 +25,16 @@ class FakeResponse:
         return self._data
 
 
+class FakeErrorResponse:
+    status_code = 400
+    text = '{"error":{"message":"bad request details"}}'
+
+    def raise_for_status(self) -> None:
+        request = httpx.Request("POST", "https://api.example.com/v1/messages")
+        response = httpx.Response(400, request=request, content=self.text)
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+
 def _config() -> LLMRuntimeConfig:
     return LLMRuntimeConfig(
         provider="anthropic",
@@ -139,4 +149,19 @@ async def test_call_anthropic_compatible_tool_use_requires_complete_config():
             config,
             system="system",
             messages=[{"role": "user", "content": "hello"}],
+        )
+
+
+async def test_call_anthropic_compatible_tool_use_includes_error_body(monkeypatch):
+    async def fake_post(self, url, *, headers, json):
+        return FakeErrorResponse()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    with pytest.raises(RuntimeError, match="bad request details"):
+        await call_anthropic_compatible_tool_use(
+            _config(),
+            system="system",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
         )

@@ -67,3 +67,43 @@ async def test_message_store_builds_model_messages(db_session, test_user):
     store = MessageStore(db_session)
 
     assert await store.build_model_messages(conversation.id) == [{"role": "user", "content": "你好"}]
+
+
+@pytest.mark.asyncio
+async def test_message_store_replays_raw_assistant_content_blocks(db_session, test_user):
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.GENERAL,
+        title="runtime",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+    raw_content = [
+        {"type": "thinking", "thinking": "Need a tool.", "signature": "sig"},
+        {"type": "text", "text": "I will call a tool."},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "ask_user",
+            "input": {"question": "Continue?"},
+        },
+    ]
+    db_session.add(
+        ConversationMessage(
+            conversation_id=conversation.id,
+            role=MessageRole.ASSISTANT,
+            content="I will call a tool.",
+            message_metadata={
+                "raw_content": raw_content,
+                "tool_calls": [{"id": "toolu_1", "name": "ask_user"}],
+            },
+        )
+    )
+    await db_session.commit()
+
+    messages = await MessageStore(db_session).build_model_messages(conversation.id)
+
+    assert messages == [{"role": "assistant", "content": raw_content}]

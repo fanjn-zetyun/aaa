@@ -61,7 +61,7 @@ async def call_anthropic_compatible(
     }
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         data = response.json()
     return _extract_text(data)
 
@@ -94,7 +94,7 @@ async def call_anthropic_compatible_tool_use(
 
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         data = response.json()
     return _extract_tool_response(data)
 
@@ -147,6 +147,17 @@ def _messages_endpoint(base_url: str) -> str:
     if root.endswith("/v1/messages"):
         return root
     return f"{root}/v1/messages"
+
+
+def _raise_for_status_with_body(response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = response.text.strip()
+        detail = f"{exc}"
+        if body:
+            detail = f"{detail}; response body: {body[:2000]}"
+        raise RuntimeError(detail) from exc
 
 
 def _extract_text(data: dict) -> str:

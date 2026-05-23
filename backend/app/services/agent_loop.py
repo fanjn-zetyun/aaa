@@ -1866,6 +1866,10 @@ def _contains_unrendered_template(value: object) -> bool:
 
 
 def _assistant_tool_message(response: LLMToolResponse) -> dict:
+    raw_content = _raw_assistant_content(response.raw)
+    if raw_content:
+        return {"role": "assistant", "content": raw_content}
+
     content: list[dict] = []
     if response.text:
         content.append({"type": "text", "text": response.text})
@@ -1879,6 +1883,16 @@ def _assistant_tool_message(response: LLMToolResponse) -> dict:
             }
         )
     return {"role": "assistant", "content": content}
+
+
+def _raw_assistant_content(raw: dict[str, object]) -> list[dict] | None:
+    content = raw.get("content") if isinstance(raw, dict) else None
+    if not isinstance(content, list):
+        return None
+    blocks = [dict(item) for item in content if isinstance(item, dict)]
+    if not blocks:
+        return None
+    return blocks
 
 
 def _tool_result_block(tool_use_id: str, content: str, *, is_error: bool = False) -> dict:

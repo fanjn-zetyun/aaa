@@ -65,6 +65,10 @@ class MessageStore:
             elif row.role == MessageRole.ASSISTANT:
                 tool_calls = row.message_metadata.get("tool_calls")
                 if tool_calls:
+                    raw_content = _raw_assistant_content(row.message_metadata)
+                    if raw_content:
+                        messages.append({"role": "assistant", "content": raw_content})
+                        continue
                     content: list[dict[str, Any]] = []
                     if row.content:
                         content.append({"type": "text", "text": row.content})
@@ -96,3 +100,11 @@ class MessageStore:
                     }
                 )
         return messages
+
+
+def _raw_assistant_content(metadata: dict[str, Any]) -> list[dict[str, Any]] | None:
+    raw_content = metadata.get("raw_content")
+    if not isinstance(raw_content, list):
+        return None
+    blocks = [dict(item) for item in raw_content if isinstance(item, dict)]
+    return blocks or None

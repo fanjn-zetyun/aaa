@@ -4,7 +4,11 @@ import asyncio
 
 import pytest
 
-from app.services.agent_loop import AgentLoopManager, _safe_skill_selection_evidence
+from app.services.agent_loop import (
+    AgentLoopManager,
+    _assistant_tool_message,
+    _safe_skill_selection_evidence,
+)
 from app.services.llm_client import LLMRuntimeConfig, LLMToolResponse, LLMToolUse
 from app.services.skill_selector import SkillSelectionResult
 from app.services.skills import SkillDefinition
@@ -333,6 +337,41 @@ async def test_safe_skill_selection_evidence_drops_non_finite_float_and_caps_str
         "selected_skill": "x" * 500,
         "source": "model",
     }
+
+
+async def test_assistant_tool_message_preserves_raw_thinking_blocks():
+    response = LLMToolResponse(
+        text="I will inspect.",
+        tool_calls=[
+            LLMToolUse(
+                id="call_01_test",
+                name="analyze_repo",
+                input={"github_url": "https://github.com/example/repo"},
+            )
+        ],
+        stop_reason="tool_use",
+        raw={
+            "content": [
+                {"type": "thinking", "thinking": "Need repository audit.", "signature": "sig"},
+                {"type": "text", "text": "I will inspect."},
+                {
+                    "type": "tool_use",
+                    "id": "call_01_test",
+                    "name": "analyze_repo",
+                    "input": {"github_url": "https://github.com/example/repo"},
+                },
+            ]
+        },
+    )
+
+    message = _assistant_tool_message(response)
+
+    assert message["content"][0] == {
+        "type": "thinking",
+        "thinking": "Need repository audit.",
+        "signature": "sig",
+    }
+    assert message["content"][2]["type"] == "tool_use"
 
 
 async def test_agent_loop_delegates_to_agent_runtime_v3_when_enabled(monkeypatch):
