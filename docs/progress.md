@@ -84,6 +84,7 @@
   - 新增 `RuntimeState`、`MessageStore`、`LLMAdapter`、`ToolExecutor`、`SkillInvokeTool`、`ContextBuilder` 和 `WorkflowContractRuntime` compatibility layer。
   - `agent_runtime_v3_enabled` 默认关闭；开启后 `AgentLoopManager` 会委托 `AgentRuntime`，现有 `SkillWorkflowRunner` 链路在默认配置下保持可用。
   - V3 已支持 `model -> tool_use -> ToolExecutor -> tool_result -> model` 循环、`skill.invoke` 激活 skill/workflow contract、workflow required tool/evidence 基础验收，以及 ChatPage runtime/tool 事件展示。
+  - 真实 Lab4AI E2E 已增加显式 opt-in guard：默认 `pytest` 不会创建计费 CPU/GPU 实例，只有设置 `LOBSTER_RUN_LAB4AI_INTEGRATION=1` 的集成测试才允许进入真实实例联调。
 
 ## 当前验证结果
 
