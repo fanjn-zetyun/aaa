@@ -1245,7 +1245,14 @@ _SAFE_SKILL_SELECTION_KEYS = {
 def _safe_skill_selection_evidence(selection: object) -> dict[str, object | None] | None:
     if not isinstance(selection, dict):
         return None
-    return {key: selection.get(key) for key in _SAFE_SKILL_SELECTION_KEYS if key in selection}
+    evidence: dict[str, object | None] = {}
+    for key in _SAFE_SKILL_SELECTION_KEYS:
+        if key not in selection:
+            continue
+        value = selection.get(key)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            evidence[key] = value
+    return evidence
 
 
 def _canonical_tool_name(name: str) -> str:

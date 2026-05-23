@@ -280,6 +280,24 @@ async def test_safe_skill_selection_evidence_removes_private_fields():
     }
 
 
+async def test_safe_skill_selection_evidence_drops_nested_values():
+    evidence = _safe_skill_selection_evidence(
+        {
+            "selected_skill": "lab4ai-auto-reproduct",
+            "source": "model",
+            "reason": {"body": "secret body"},
+            "error": ["secret error"],
+            "confidence": 0.8,
+        }
+    )
+
+    assert evidence == {
+        "selected_skill": "lab4ai-auto-reproduct",
+        "source": "model",
+        "confidence": 0.8,
+    }
+
+
 async def test_model_or_fallback_retries_with_lower_token_budget(monkeypatch):
     seen_tokens: list[int] = []
 
