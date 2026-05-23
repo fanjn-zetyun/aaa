@@ -77,3 +77,22 @@ tasks:
 
     assert result.ok is True
     assert updated.active_workflow["current_step_id"] == "step_1_audit"
+
+
+def test_skill_invoke_schema_lists_available_skills_and_triggers(tmp_path):
+    skill = SkillDefinition(
+        name="lab4ai-auto-reproduct",
+        description="Project reproduction",
+        triggers=["reproduce", "github"],
+        when_to_use="Use when the user asks to reproduce a GitHub project.",
+        allowed_tools=["analyze_repo"],
+        base_dir=tmp_path,
+        workflow_context="version: agent-workflow/v1",
+    )
+    tool = SkillInvokeTool({"lab4ai-auto-reproduct": skill})
+
+    schema = tool.definition.anthropic_schema()
+
+    assert schema["input_schema"]["properties"]["skill"]["enum"] == ["lab4ai-auto-reproduct"]
+    assert "Only call this tool when the user request matches an available skill" in schema["description"]
+    assert "reproduce, github" in schema["description"]

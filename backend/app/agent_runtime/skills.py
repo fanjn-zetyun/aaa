@@ -15,15 +15,12 @@ class SkillInvokeTool:
         self.skills = skills
         self.definition = ToolDefinition(
             name=self.name,
-            description=(
-                "加载一个 skill，并把 skill 指令、workflow contract 和 allowed tools "
-                "注入当前 Agent Runtime。"
-            ),
+            description=_skill_catalog_description(skills),
             input_schema={
                 "type": "object",
                 "required": ["skill"],
                 "properties": {
-                    "skill": {"type": "string"},
+                    "skill": _skill_name_property(skills),
                     "args": {"type": "object"},
                 },
             },
@@ -82,3 +79,38 @@ class SkillInvokeTool:
             ),
             updated,
         )
+
+
+def _skill_name_property(skills: dict[str, SkillDefinition]) -> dict[str, Any]:
+    property_schema: dict[str, Any] = {
+        "type": "string",
+        "description": "Exact name of the skill to load.",
+    }
+    names = sorted(skills)
+    if names:
+        property_schema["enum"] = names
+    return property_schema
+
+
+def _skill_catalog_description(skills: dict[str, SkillDefinition]) -> str:
+    lines = [
+        "Load one skill into the current Agent Runtime. Only call this tool when "
+        "the user request matches an available skill; for normal conversation, "
+        "answer directly without calling skill.invoke.",
+        "Available skills:",
+    ]
+    if not skills:
+        lines.append("- none")
+        return "\n".join(lines)
+
+    for skill in sorted(skills.values(), key=lambda item: item.name):
+        parts = [skill.name]
+        if skill.description:
+            parts.append(f"description: {skill.description}")
+        if skill.when_to_use:
+            parts.append(f"when_to_use: {skill.when_to_use}")
+        if skill.triggers:
+            parts.append("triggers: " + ", ".join(skill.triggers[:20]))
+        parts.append(f"has_workflow: {bool(skill.workflow_context)}")
+        lines.append("- " + " | ".join(parts))
+    return "\n".join(lines)

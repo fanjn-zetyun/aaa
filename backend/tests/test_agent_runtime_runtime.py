@@ -305,6 +305,42 @@ async def test_agent_runtime_advertises_runtime_tool_schemas(db_session, test_us
 
 
 @pytest.mark.asyncio
+async def test_general_chat_can_complete_without_invoking_skill(db_session, test_user):
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.GENERAL,
+        title="general chat",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+
+    skill = SkillDefinition(
+        name="lab4ai-auto-reproduct",
+        triggers=["reproduce"],
+        workflow_context="version: agent-workflow/v1",
+    )
+    runtime = AgentRuntime(
+        session=db_session,
+        llm=CapturingToolsLLM(),
+        tool_executor=ToolExecutor(
+            registry=WorkflowRegistry(),
+            event_sink=ListEventSink(),
+            runtime_tools={"skill.invoke": SkillInvokeTool({"lab4ai-auto-reproduct": skill})},
+        ),
+        event_sink=ListEventSink(),
+    )
+
+    result = await runtime.run_conversation(conversation.id, model="claude-test")
+
+    assert result.status == "completed"
+    assert result.metadata["runtime"]["active_skill"] is None
+    assert result.metadata["runtime"]["active_workflow"] is None
+
+
+@pytest.mark.asyncio
 async def test_agent_runtime_validates_workflow_contract_after_tool_results(db_session, test_user):
     conversation = Conversation(
         user_id=test_user.id,
