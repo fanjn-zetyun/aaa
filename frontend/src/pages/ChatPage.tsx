@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MarkdownContent } from "../components/MarkdownContent";
@@ -134,6 +134,7 @@ interface TimelineEvent {
   status: "running" | "done" | "error" | "info";
   kind?: "thinking" | "execution";
   tool_name?: string;
+  workflow_step_id?: string;
 }
 
 interface ChatMessage {
@@ -291,6 +292,7 @@ export default function ChatPage() {
         created_at: payload.timestamp || new Date().toISOString(),
         status: "info",
         kind: "thinking",
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
       });
       return;
     }
@@ -310,6 +312,7 @@ export default function ChatPage() {
         created_at: payload.timestamp || new Date().toISOString(),
         status: payload.type === "workflow_cleanup_started" ? "running" : "done",
         kind: "execution",
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
       });
       return;
     }
@@ -322,6 +325,7 @@ export default function ChatPage() {
         status: "running",
         kind: "execution",
         tool_name: payload.tool_name,
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
       });
       return;
     }
@@ -335,6 +339,7 @@ export default function ChatPage() {
         status: payload.ok === false ? "error" : "done",
         kind: "execution",
         tool_name: toolName,
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
       });
       return;
     }
@@ -347,6 +352,7 @@ export default function ChatPage() {
         status: "error",
         kind: "execution",
         tool_name: payload.tool_name,
+        workflow_step_id: streamPayloadWorkflowStepId(payload),
       });
       return;
     }
@@ -906,7 +912,20 @@ function toolEventFromMessage(msg: ConversationMessage): TimelineEvent {
     status: msg.message_metadata.ok === false ? "error" : "done",
     kind: "execution",
     tool_name: toolName,
+    workflow_step_id: stringValue(msg.message_metadata.workflow_step_id),
   };
+}
+
+function streamPayloadWorkflowStepId(payload: StreamPayload) {
+  return (
+    payload.workflow_step_id ||
+    stringValue(payload.tool_input?.workflow_step_id) ||
+    stringValue(payload.message?.message_metadata?.workflow_step_id)
+  );
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function workflowStateFromConversation(conversation?: Conversation): WorkflowState | undefined {
@@ -1247,21 +1266,29 @@ function AgentResponse({
 }) {
   const hasProcess = !!message.skillSelection || !!message.workflow || !!message.events?.length;
   const finalAnswer = cleanFinalAnswer(message.content, hasProcess);
+  const hasWorkflow = !!message.workflow;
   return (
     <div className="space-y-3">
       {hasProcess && (
         <div className="space-y-3">
-          {message.events && message.events.length > 0 && (
+          {!hasWorkflow && message.events && message.events.length > 0 && (
             <AgentProcessTimeline events={message.events} />
           )}
-          {message.skillSelection && (
+          {!hasWorkflow && message.skillSelection && (
             <SkillSelectionCard
               selection={message.skillSelection}
               workflowPath={message.workflowPath}
             />
           )}
           {message.workflow && (
-            <WorkflowBoard workflow={message.workflow} pendingInput={pendingInput} onSubmit={onSubmit} />
+            <WorkflowBoard
+              workflow={message.workflow}
+              pendingInput={pendingInput}
+              onSubmit={onSubmit}
+              skillSelection={message.skillSelection}
+              workflowPath={message.workflowPath}
+              events={message.events || []}
+            />
           )}
         </div>
       )}
@@ -1375,17 +1402,50 @@ function EvidenceRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function SkillSelectionEvidenceDetails({
+  selection,
+  workflowPath,
+}: {
+  selection: SkillSelectionState;
+  workflowPath?: string | null;
+}) {
+  return (
+    <details className="group rounded-lg border border-slate-100 bg-slate-50/70">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-ui-small font-medium text-slate-600">
+        <span>查看选择证据</span>
+        <ChevronIcon className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-x-3 gap-y-2 border-t border-slate-100 px-3 py-2 text-ui-small">
+        <EvidenceRow label="source" value={selection.source || "-"} />
+        <EvidenceRow label="selected_skill" value={selection.selected_skill || "-"} />
+        <EvidenceRow label="model_choice" value={selection.model_choice || "-"} />
+        <EvidenceRow label="fallback_choice" value={selection.fallback_choice || "-"} />
+        <EvidenceRow label="workflow" value={workflowPath || "-"} />
+        <EvidenceRow label="reason" value={selection.reason || "-"} />
+        {selection.error && <EvidenceRow label="error" value={selection.error} />}
+      </div>
+    </details>
+  );
+}
+
 function WorkflowBoard({
   workflow,
   pendingInput,
   onSubmit,
+  skillSelection,
+  workflowPath,
+  events,
 }: {
   workflow: WorkflowState;
   pendingInput?: PendingUserInput | null;
   onSubmit: (content: string) => Promise<void>;
+  skillSelection?: SkillSelectionState;
+  workflowPath?: string | null;
+  events?: TimelineEvent[];
 }) {
   const steps = workflow.steps || REPRO_WORKFLOW_STEPS;
   const completedCount = steps.filter((step) => step.status === "completed").length;
+  const skillSelectionStepId = workflowSkillSelectionStepId(workflow);
   return (
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
@@ -1413,11 +1473,48 @@ function WorkflowBoard({
             isCurrent={workflow.current_step_id === step.id}
             pendingInput={pendingInputForStep(pendingInput, step, workflow)}
             onSubmit={onSubmit}
+            skillSelection={step.id === skillSelectionStepId ? skillSelection : undefined}
+            workflowPath={step.id === skillSelectionStepId ? workflowPath : undefined}
+            events={workflowTimelineEventsForStep(events || [], step, workflow)}
           />
         ))}
       </div>
     </section>
   );
+}
+
+function workflowSkillSelectionStepId(workflow: WorkflowState) {
+  return (workflow.steps || [])[0]?.id || REPRO_WORKFLOW_STEPS[0]?.id;
+}
+
+function workflowTimelineEventsForStep(
+  events: TimelineEvent[],
+  step: WorkflowStepState,
+  workflow: WorkflowState
+) {
+  const fallbackStepId =
+    workflow.current_step_id ||
+    (workflow.steps || []).find((item) => ["running", "waiting_for_user"].includes(item.status))?.id ||
+    workflowSkillSelectionStepId(workflow);
+
+  return events.filter((event) => {
+    if (event.workflow_step_id) return event.workflow_step_id === step.id;
+    return fallbackStepId === step.id;
+  });
+}
+
+function skillSelectionSummaryLines(
+  selection?: SkillSelectionState,
+  workflowPath?: string | null
+) {
+  if (!selection) return [];
+  const selected = selection.selected_skill || selection.model_choice || selection.fallback_choice;
+  if (!selected) return [];
+  const source = skillSelectionSourceMeta(selection.source);
+  const lines = [`${source.titlePrefix} ${selected}`];
+  if (workflowPath) lines.push(`已加载 ${workflowPath}`);
+  if (selection.reason) lines.push(selection.reason);
+  return lines;
 }
 
 function WorkflowStepRow({
@@ -1426,20 +1523,37 @@ function WorkflowStepRow({
   isCurrent,
   pendingInput,
   onSubmit,
+  skillSelection,
+  workflowPath,
+  events,
 }: {
   step: WorkflowStepState;
   index: number;
   isCurrent: boolean;
   pendingInput?: PendingUserInput | null;
   onSubmit: (content: string) => Promise<void>;
+  skillSelection?: SkillSelectionState;
+  workflowPath?: string | null;
+  events?: TimelineEvent[];
 }) {
   const template = REPRO_WORKFLOW_STEPS.find((item) => item.id === step.id);
   const name = step.name || template?.name || step.id;
   const progressItems = (step.progress || []).slice(-3);
   const toolCalls = (step.tool_calls || []).slice(0, 4);
+  const stepEvents = events || [];
+  const thinkingEvents = stepEvents.filter((event) => event.kind === "thinking");
+  const executionEvents = stepEvents.filter((event) => event.kind !== "thinking");
   const outcome = workflowStepOutcome(step);
   const startLabel = workflowStepStartLabel(step);
-  const defaultOpen = !!pendingInput || isCurrent || ["running", "failed", "waiting_for_user"].includes(step.status);
+  const skillSelectionLines = skillSelectionSummaryLines(skillSelection, workflowPath);
+  const hasThinking = skillSelectionLines.length > 0 || !!startLabel || thinkingEvents.length > 0;
+  const hasExecution =
+    progressItems.length > 0 || toolCalls.length > 0 || executionEvents.length > 0 || !!pendingInput;
+  const defaultOpen =
+    !!pendingInput ||
+    isCurrent ||
+    !!skillSelection ||
+    ["running", "failed", "waiting_for_user"].includes(step.status);
 
   return (
     <details className="group" open={defaultOpen} data-testid={`workflow-step-${step.id}`}>
@@ -1470,39 +1584,97 @@ function WorkflowStepRow({
         <ChevronIcon className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
       </summary>
       <div className="space-y-3 px-14 pb-4 text-ui-small">
-        {startLabel && <div className="text-slate-500">{startLabel}</div>}
-        {progressItems.length > 0 && (
-          <div className="space-y-1.5">
+        {hasThinking && (
+          <WorkflowStepProcessSection title="思考过程">
+            {skillSelectionLines.map((line) => (
+              <ProcessLine key={`${step.id}-selection-${line}`} content={line} tone="thinking" />
+            ))}
+            {skillSelection && (
+              <SkillSelectionEvidenceDetails selection={skillSelection} workflowPath={workflowPath} />
+            )}
+            {startLabel && <ProcessLine content={startLabel} tone="thinking" />}
+            {thinkingEvents.map((event) => (
+              <ProcessLine
+                key={`${step.id}-thinking-${event.id}`}
+                content={event.content ? `${event.title}: ${event.content}` : event.title}
+                tone="thinking"
+              />
+            ))}
+          </WorkflowStepProcessSection>
+        )}
+        {hasExecution && (
+          <WorkflowStepProcessSection title="执行过程">
             {progressItems.map((item, progressIndex) => (
-              <div key={`${step.id}-progress-${progressIndex}`} className="flex gap-2 text-slate-500">
-                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
-                <span className="break-words">{workflowProgressContent(item) || item}</span>
+              <ProcessLine
+                key={`${step.id}-progress-${progressIndex}`}
+                content={workflowProgressContent(item) || item}
+                tone="execution"
+              />
+            ))}
+            {executionEvents.map((event) => (
+              <ProcessLine
+                key={`${step.id}-execution-${event.id}`}
+                content={event.content ? `${event.title}: ${event.content}` : event.title}
+                tone="execution"
+              />
+            ))}
+            {toolCalls.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {toolCalls.map((call, toolIndex) => (
+                  <span
+                    key={call.tool_call_id || `${step.id}-tool-${toolIndex}`}
+                    className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
+                      call
+                    )}`}
+                    title={call.error || undefined}
+                  >
+                    <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
+                    <span>{toolCallStatusLabel(call)}</span>
+                  </span>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+            {pendingInput && <HumanInputPanel input={pendingInput} onSubmit={onSubmit} />}
+          </WorkflowStepProcessSection>
         )}
-        {toolCalls.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {toolCalls.map((call, toolIndex) => (
-              <span
-                key={call.tool_call_id || `${step.id}-tool-${toolIndex}`}
-                className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
-                  call
-                )}`}
-                title={call.error || undefined}
-              >
-                <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
-                <span>{toolCallStatusLabel(call)}</span>
-              </span>
-            ))}
-          </div>
-        )}
-        {!startLabel && progressItems.length === 0 && toolCalls.length === 0 && !outcome && (
+        {!hasThinking && !hasExecution && !outcome && (
           <div className="text-slate-500">{workflowStepDetail(step)}</div>
         )}
-        {pendingInput && <HumanInputPanel input={pendingInput} onSubmit={onSubmit} />}
       </div>
     </details>
+  );
+}
+
+function WorkflowStepProcessSection({
+  title,
+  children,
+}: {
+  title: "思考过程" | "执行过程";
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-2">
+      <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+        {title}
+      </div>
+      <div className="space-y-1.5">{children}</div>
+    </section>
+  );
+}
+
+function ProcessLine({
+  content,
+  tone,
+}: {
+  content: string;
+  tone: "thinking" | "execution";
+}) {
+  const dotClass = tone === "thinking" ? "bg-violet-400" : "bg-blue-400";
+  return (
+    <div className="flex gap-2 text-slate-500">
+      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
+      <span className="break-words">{content}</span>
+    </div>
   );
 }
 

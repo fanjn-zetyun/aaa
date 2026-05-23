@@ -109,8 +109,6 @@ describe("ChatPage", () => {
         confidence: null,
         error: null,
       },
-      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
-      workflow_steps: [],
     };
 
     renderChat();
@@ -126,6 +124,41 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("lab4ai-auto-reproduct").length).toBeGreaterThan(0);
     expect(screen.queryByText("workflow_context")).not.toBeInTheDocument();
     expect(screen.queryByText("body")).not.toBeInTheDocument();
+  });
+
+  it("nests skill selection evidence inside the first workflow step", async () => {
+    conversationPayload.metadata = {
+      task_type: "reproduce",
+      github_url: "https://github.com/jsnzwu/motion-guided-flow",
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        confidence: null,
+        error: null,
+      },
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_current_step_id: "step_1_audit",
+      workflow_results: { repo_name: "motion-guided-flow" },
+      workflow_steps: [
+        {
+          id: "step_1_audit",
+          name: "项目与论文双重审计",
+          status: "running",
+          progress: ["Start step: 项目与论文双重审计"],
+        },
+      ],
+    };
+
+    renderChat();
+
+    const step = await screen.findByTestId("workflow-step-step_1_audit");
+    expect(within(step).getByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    expect(
+      within(step).getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
+    ).toBeInTheDocument();
   });
 
   it("attaches metadata skill evidence to a new agent bubble after the latest user", async () => {
@@ -453,7 +486,11 @@ describe("ChatPage", () => {
     expect(within(agentBubble as HTMLElement).getByText("source")).toBeInTheDocument();
     expect(within(agentBubble as HTMLElement).getByText("model")).toBeInTheDocument();
     expect(within(agentBubble as HTMLElement).getByText("model_choice")).toBeInTheDocument();
-    expect(within(agentBubble as HTMLElement).getByText("Refetched metadata supplied the complete skill selection evidence.")).toBeInTheDocument();
+    expect(
+      within(agentBubble as HTMLElement).getAllByText(
+        "Refetched metadata supplied the complete skill selection evidence."
+      ).length
+    ).toBeGreaterThan(0);
   });
 
   it("merges refetched metadata run state into a completed streamed agent bubble", async () => {
@@ -863,8 +900,9 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("分析仓库完成。").length).toBeGreaterThan(0);
     expect(screen.getAllByText("分析 GitHub 仓库").length).toBeGreaterThan(0);
     expect(screen.getAllByText("score=75；已完成项目与论文审计的 MVP 记录。").length).toBeGreaterThan(0);
-    expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
-    expect(screen.queryByText("执行过程")).not.toBeInTheDocument();
+    const workflowStep = screen.getByTestId("workflow-step-step_1_audit");
+    expect(within(workflowStep).getByText("思考过程")).toBeInTheDocument();
+    expect(within(workflowStep).getByText("执行过程")).toBeInTheDocument();
     expect(screen.queryByText("工作流已加载")).not.toBeInTheDocument();
     expect(screen.queryByText("选择复现流程")).not.toBeInTheDocument();
     expect(screen.getByText("最终结论：仓库审计已完成，下一步需要创建 CPU 实例。")).toBeInTheDocument();
