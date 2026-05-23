@@ -456,6 +456,94 @@ describe("ChatPage", () => {
     expect(within(agentBubble as HTMLElement).getByText("Refetched metadata supplied the complete skill selection evidence.")).toBeInTheDocument();
   });
 
+  it("merges refetched metadata run state into a completed streamed agent bubble", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...conversationPayload,
+            metadata: { ...conversationPayload.metadata },
+            messages: conversationPayload.messages.map((message) => ({ ...message })),
+          }),
+      } as Response)
+    );
+    const { queryClient } = renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "assistant_started",
+        run_id: "run-completed-metadata",
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "assistant_delta",
+        run_id: "run-completed-metadata",
+        delta: "completed stream answer",
+      });
+      ws.emit({
+        seq: 3,
+        type: "assistant_completed",
+        run_id: "run-completed-metadata",
+        message: {
+          id: 2,
+          role: "assistant",
+          content: "completed stream answer",
+          message_metadata: {},
+          created_at: "2026-05-20T00:00:03Z",
+        },
+      });
+    });
+
+    expect(await screen.findByText("completed stream answer")).toBeInTheDocument();
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+
+    conversationPayload.updated_at = "2026-05-20T00:00:10Z";
+    conversationPayload.metadata = {
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Completed run metadata selected the reproduction skill.",
+        confidence: null,
+        error: null,
+      },
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_steps: [
+        {
+          id: "completed_metadata_step",
+          name: "completed metadata step marker",
+          status: "completed",
+        },
+      ],
+    };
+
+    await act(async () => {
+      const refetchedConversation = {
+        ...conversationPayload,
+        metadata: { ...conversationPayload.metadata },
+        messages: conversationPayload.messages.map((message) => ({ ...message })),
+      };
+      queryClient.setQueryData(["conversation", "7"], refetchedConversation);
+      await Promise.resolve();
+    });
+
+    const answer = screen.getByText("completed stream answer");
+    const agentBubble = answer.closest('[data-testid="agent-message"]');
+    await waitFor(() => {
+      expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+      expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
+      expect(agentBubble).toHaveTextContent("completed metadata step marker");
+    });
+  });
+
   it("merges top-level skill selection source into streamed selection object", async () => {
     renderChat();
 

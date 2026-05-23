@@ -734,7 +734,7 @@ function mergePersistedChatMessages(current: ChatMessage[], persistedMessages: C
       continue;
     }
     if (isProcessOnlyRunMessage(chatMessage)) {
-      const currentRunIndex = findCurrentRunProcessMessageIndex(next);
+      const currentRunIndex = findCurrentRunProcessMessageIndex(next, { includeCompletedAgent: true });
       if (currentRunIndex >= 0) {
         next = next.map((item, index) =>
           index === currentRunIndex ? mergePersistedMessageState(item, chatMessage) : item
@@ -973,14 +973,17 @@ function isProcessOnlyRunMessage(message: ChatMessage) {
   );
 }
 
-function findCurrentRunProcessMessageIndex(messages: ChatMessage[]) {
+function findCurrentRunProcessMessageIndex(
+  messages: ChatMessage[],
+  options: { includeCompletedAgent?: boolean } = {}
+) {
   const lastUserIndex = findLastIndex(messages, (msg) => msg.role === "user");
   return findLastIndex(
     messages,
     (msg, index) =>
       index > lastUserIndex &&
       msg.role === "agent" &&
-      (msg.streaming === true || isProcessOnlyRunMessage(msg))
+      (msg.streaming === true || isProcessOnlyRunMessage(msg) || options.includeCompletedAgent === true)
   );
 }
 
