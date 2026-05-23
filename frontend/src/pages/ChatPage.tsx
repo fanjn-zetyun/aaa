@@ -766,12 +766,54 @@ function mergePersistedMessageState(message: ChatMessage, incoming: ChatMessage)
     content: incoming.content || message.content,
     created_at: typeof incoming.id === "number" ? incoming.created_at : message.created_at,
     events: mergeTimelineEvents(message.events, incoming.events),
-    workflow: message.workflow || incoming.workflow,
-    skillSelection: message.skillSelection || incoming.skillSelection,
+    workflow: mergeWorkflowRunState(message.workflow, incoming.workflow),
+    skillSelection: mergeSkillSelectionState(message.skillSelection, incoming.skillSelection),
     workflowPath: message.workflowPath || incoming.workflowPath,
     streaming: message.streaming && !incoming.content ? message.streaming : false,
     run_id: message.run_id || incoming.run_id,
   };
+}
+
+function mergeSkillSelectionState(
+  current?: SkillSelectionState,
+  incoming?: SkillSelectionState
+): SkillSelectionState | undefined {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  return {
+    selected_skill: incoming.selected_skill ?? current.selected_skill,
+    source: incoming.source ?? current.source,
+    model_choice: incoming.model_choice !== undefined ? incoming.model_choice : current.model_choice,
+    fallback_choice:
+      incoming.fallback_choice !== undefined ? incoming.fallback_choice : current.fallback_choice,
+    reason: incoming.reason !== undefined ? incoming.reason : current.reason,
+    confidence: incoming.confidence !== undefined ? incoming.confidence : current.confidence,
+    error: incoming.error !== undefined ? incoming.error : current.error,
+  };
+}
+
+function mergeWorkflowRunState(
+  current?: WorkflowState,
+  incoming?: WorkflowState
+): WorkflowState | undefined {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  const base = normalizeWorkflowState(current);
+  const update = normalizeWorkflowState(incoming);
+  let steps = base.steps || [];
+  for (const step of update.steps || []) {
+    steps = upsertWorkflowStep(steps, step);
+  }
+  return normalizeWorkflowState({
+    ...base,
+    name: update.name ?? base.name,
+    version: update.version ?? base.version,
+    project_name: update.project_name ?? base.project_name,
+    current_step_id: update.current_step_id !== undefined ? update.current_step_id : base.current_step_id,
+    resources: { ...(base.resources || {}), ...(update.resources || {}) },
+    results: { ...(base.results || {}), ...(update.results || {}) },
+    steps,
+  });
 }
 
 function attachRunStateToLastAgent(
@@ -789,8 +831,8 @@ function attachRunStateToLastAgent(
       index === lastAgentIndex
         ? {
             ...item,
-            workflow: item.workflow || workflow,
-            skillSelection: item.skillSelection || skillSelection,
+            workflow: mergeWorkflowRunState(item.workflow, workflow),
+            skillSelection: mergeSkillSelectionState(item.skillSelection, skillSelection),
             workflowPath: item.workflowPath || workflowPath,
           }
         : item
@@ -918,9 +960,7 @@ function mergeRunStateIntoMessage(message: ChatMessage, payload: StreamPayload):
   if (!runState.skillSelection && !runState.workflowPath) return message;
   return {
     ...message,
-    skillSelection: runState.skillSelection
-      ? { ...message.skillSelection, ...runState.skillSelection }
-      : message.skillSelection,
+    skillSelection: mergeSkillSelectionState(message.skillSelection, runState.skillSelection),
     workflowPath: payload.workflow_path ?? message.workflowPath ?? runState.workflowPath,
   };
 }
@@ -1213,7 +1253,7 @@ function MessageBubble({
   }
 
   return (
-    <div className="flex gap-4">
+    <div className="flex gap-4" data-testid="agent-message">
       <AgentAvatar />
       <div className="flex flex-col gap-2 max-w-[85%] min-w-0">
         <span className="text-ui-small font-medium text-slate-800">LOBSTER Agent</span>

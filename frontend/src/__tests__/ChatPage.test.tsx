@@ -232,7 +232,7 @@ describe("ChatPage", () => {
     });
 
     const skillHeading = screen.getByText("模型选择了 lab4ai-auto-reproduct");
-    const agentBubble = skillHeading.closest(".flex.gap-4");
+    const agentBubble = skillHeading.closest('[data-testid="agent-message"]');
     expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
     expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
     expect(agentBubble).toHaveTextContent("streamed assistant content");
@@ -351,12 +351,109 @@ describe("ChatPage", () => {
     });
 
     const content = screen.getByText("streamed active content");
-    const agentBubble = content.closest(".flex.gap-4");
+    const agentBubble = content.closest('[data-testid="agent-message"]');
     await waitFor(() => {
       expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
     });
     expect(agentBubble).toHaveTextContent("lab4ai-auto-reproduct");
     expect(agentBubble).toHaveTextContent("skills/lab4ai-auto-reproduct/project_reproduce.yaml");
+  });
+
+  it("merges refreshed metadata fields into existing streamed run state", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...conversationPayload,
+            metadata: { ...conversationPayload.metadata },
+            messages: conversationPayload.messages.map((message) => ({ ...message })),
+          }),
+      } as Response)
+    );
+    const { queryClient } = renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "assistant_started",
+        run_id: "run-refresh-fields",
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "assistant_delta",
+        run_id: "run-refresh-fields",
+        delta: "streamed partial content",
+        skill_selection: {
+          selected_skill: "lab4ai-auto-reproduct",
+        },
+      });
+      ws.emit({
+        seq: 3,
+        type: "workflow_loaded",
+        run_id: "run-refresh-fields",
+        workflow: {
+          name: "Lab4AI_Auto_Reproduction_Pipeline",
+          steps: [],
+        },
+        timestamp: "2026-05-20T00:00:02Z",
+      });
+    });
+
+    expect(await screen.findByText("streamed partial content")).toBeInTheDocument();
+
+    conversationPayload.updated_at = "2026-05-20T00:00:10Z";
+    conversationPayload.metadata = {
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Refetched metadata supplied the complete skill selection evidence.",
+        confidence: null,
+        error: null,
+      },
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_current_step_id: "metadata_step",
+      workflow_steps: [
+        {
+          id: "metadata_step",
+          name: "metadata step marker",
+          status: "running",
+          progress: ["metadata progress marker"],
+        },
+      ],
+    };
+
+    await act(async () => {
+      const refetchedConversation = {
+        ...conversationPayload,
+        metadata: { ...conversationPayload.metadata },
+        messages: conversationPayload.messages.map((message) => ({ ...message })),
+      };
+      queryClient.setQueryData(["conversation", "7"], refetchedConversation);
+      await Promise.resolve();
+    });
+
+    const content = screen.getByText("streamed partial content");
+    const agentBubble = content.closest('[data-testid="agent-message"]');
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    await waitFor(() => {
+      expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
+      expect(agentBubble).toHaveTextContent("metadata step marker");
+    });
+
+    fireEvent.click(within(agentBubble as HTMLElement).getByText("查看选择证据"));
+
+    expect(within(agentBubble as HTMLElement).getByText("source")).toBeInTheDocument();
+    expect(within(agentBubble as HTMLElement).getByText("model")).toBeInTheDocument();
+    expect(within(agentBubble as HTMLElement).getByText("model_choice")).toBeInTheDocument();
+    expect(within(agentBubble as HTMLElement).getByText("Refetched metadata supplied the complete skill selection evidence.")).toBeInTheDocument();
   });
 
   it("merges top-level skill selection source into streamed selection object", async () => {
