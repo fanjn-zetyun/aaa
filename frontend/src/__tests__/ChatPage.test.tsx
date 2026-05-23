@@ -874,6 +874,74 @@ describe("ChatPage", () => {
     expect(finalAnswer).not.toHaveTextContent("score=75");
   });
 
+  it("preserves tool and cleanup timeline events", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "tool_started",
+        run_id: "run-tool-timeline",
+        tool_name: "analyze_repo",
+        tool_input: {
+          tool_call_id: "tool-repo-start",
+          github_url: "https://github.com/showlab/PhotoDoodle",
+        },
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "tool_completed",
+        run_id: "run-tool-timeline",
+        tool_name: "repro_report",
+        ok: true,
+        message: {
+          id: 2,
+          role: "tool",
+          content: "复现报告草稿已生成。",
+          message_metadata: { tool_name: "repro_report", ok: true },
+          created_at: "2026-05-20T00:00:02Z",
+        },
+      });
+      ws.emit({
+        seq: 3,
+        type: "tool_error",
+        run_id: "run-tool-timeline",
+        tool_name: "ssh_execute",
+        error: "SSH 连接超时，请检查实例网络。",
+        timestamp: "2026-05-20T00:00:03Z",
+      });
+      ws.emit({
+        seq: 4,
+        type: "workflow_cleanup_started",
+        run_id: "run-tool-timeline",
+        content: "正在释放遗留 CPU 实例。",
+        timestamp: "2026-05-20T00:00:04Z",
+      });
+      ws.emit({
+        seq: 5,
+        type: "workflow_cleanup_completed",
+        run_id: "run-tool-timeline",
+        content: "未发现需要继续释放的实例。",
+        timestamp: "2026-05-20T00:00:05Z",
+      });
+    });
+
+    expect(await screen.findByText("执行过程")).toBeInTheDocument();
+    expect(screen.getByText("分析 GitHub 仓库")).toBeInTheDocument();
+    expect(screen.getByText("https://github.com/showlab/PhotoDoodle")).toBeInTheDocument();
+    expect(screen.getByText("复现报告草稿已生成。")).toBeInTheDocument();
+    expect(screen.getByText("SSH 连接超时，请检查实例网络。")).toBeInTheDocument();
+    expect(screen.getByText("资源兜底释放")).toBeInTheDocument();
+    expect(screen.getByText("正在释放遗留 CPU 实例。")).toBeInTheDocument();
+    expect(screen.getByText("资源释放检查完成")).toBeInTheDocument();
+    expect(screen.getByText("未发现需要继续释放的实例。")).toBeInTheDocument();
+  });
+
   it("shows a step-level HITL reason on the workflow board", async () => {
     conversationPayload.status = "active";
     conversationPayload.metadata = {
