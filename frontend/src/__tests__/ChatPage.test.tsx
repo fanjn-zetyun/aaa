@@ -170,6 +170,71 @@ describe("ChatPage", () => {
     expect(currentUser.compareDocumentPosition(skillHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("reuses metadata-created agent bubble when stream starts for the current run", async () => {
+    conversationPayload.metadata = {
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        confidence: null,
+        error: null,
+      },
+    };
+    conversationPayload.messages = [
+      {
+        id: 1,
+        role: "user",
+        content: "previous user request",
+        message_metadata: {},
+        created_at: "2026-05-20T00:00:00Z",
+      },
+      {
+        id: 2,
+        role: "assistant",
+        content: "previous assistant answer",
+        message_metadata: {},
+        created_at: "2026-05-20T00:00:10Z",
+      },
+      {
+        id: 3,
+        role: "user",
+        content: "current user starts new run",
+        message_metadata: {},
+        created_at: "2026-05-20T00:01:00Z",
+      },
+    ];
+
+    renderChat();
+
+    expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "assistant_started",
+        run_id: "run-current",
+        timestamp: "2026-05-20T00:01:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "assistant_delta",
+        run_id: "run-current",
+        delta: "streamed assistant content",
+      });
+    });
+
+    const skillHeading = screen.getByText("模型选择了 lab4ai-auto-reproduct");
+    const agentBubble = skillHeading.closest(".flex.gap-4");
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
+    expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
+    expect(agentBubble).toHaveTextContent("streamed assistant content");
+  });
+
   it("merges streamed skill selection evidence into the active agent bubble", async () => {
     renderChat();
 
@@ -292,6 +357,30 @@ describe("ChatPage", () => {
         stage: "skill_selection",
         content: "Skill selection not available yet.",
         skill_selection: {},
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+    });
+
+    expect(await screen.findByText("LOBSTER Agent")).toBeInTheDocument();
+    expect(screen.queryByText("Skill Selection")).not.toBeInTheDocument();
+    expect(screen.queryByText("未选择")).not.toBeInTheDocument();
+  });
+
+  it("does not render skill selection card for source-only streamed payload", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "progress",
+        run_id: "run-source-only",
+        stage: "skill_selection",
+        content: "Model selection started.",
+        skill_selection_source: "model",
         timestamp: "2026-05-20T00:00:01Z",
       });
     });

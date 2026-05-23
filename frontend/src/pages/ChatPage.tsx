@@ -381,6 +381,31 @@ export default function ChatPage() {
       activeAgentMessageIdRef.current = existing.id;
       return { messages: prev, id: existing.id };
     }
+    const lastUserIndex = findLastIndex(prev, (msg) => msg.role === "user");
+    const processOnlyIndex = findLastIndex(
+      prev,
+      (msg, index) =>
+        index > lastUserIndex &&
+        msg.role === "agent" &&
+        msg.content === "" &&
+        (!!msg.skillSelection || !!msg.workflow)
+    );
+    if (processOnlyIndex >= 0) {
+      const existingProcess = prev[processOnlyIndex];
+      activeAgentMessageIdRef.current = existingProcess.id;
+      return {
+        id: existingProcess.id,
+        messages: prev.map((msg, index) =>
+          index === processOnlyIndex
+            ? {
+                ...msg,
+                run_id: runId,
+                streaming: true,
+              }
+            : msg
+        ),
+      };
+    }
     const id = `stream-${runId || payload.seq || Date.now()}`;
     activeAgentMessageIdRef.current = id;
     const runState = runStateFromPayload(payload);
@@ -845,26 +870,14 @@ function skillSelectionFromPayload(payload: StreamPayload): SkillSelectionState 
     return hasSkillSelectionSignal(payload.skill_selection) ? payload.skill_selection : undefined;
   }
   if (!payload.skill_selection_source) return undefined;
-  return {
-    selected_skill: undefined,
-    source: payload.skill_selection_source,
-    model_choice: null,
-    fallback_choice: null,
-    reason: payload.content || null,
-    confidence: null,
-    error: null,
-  };
+  return undefined;
 }
 
 function hasSkillSelectionSignal(selection?: SkillSelectionState) {
   return !!(
     selection?.selected_skill ||
     selection?.model_choice ||
-    selection?.fallback_choice ||
-    selection?.source ||
-    selection?.reason ||
-    selection?.error ||
-    selection?.confidence != null
+    selection?.fallback_choice
   );
 }
 
@@ -1678,9 +1691,9 @@ function eventDotClass(status: TimelineEvent["status"]) {
   return "bg-slate-400";
 }
 
-function findLastIndex<T>(items: T[], predicate: (item: T) => boolean) {
+function findLastIndex<T>(items: T[], predicate: (item: T, index: number) => boolean) {
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (predicate(items[index])) return index;
+    if (predicate(items[index], index)) return index;
   }
   return -1;
 }
