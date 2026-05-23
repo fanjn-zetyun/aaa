@@ -21,9 +21,16 @@ class ExecutedToolResult:
 
 
 class ToolExecutor:
-    def __init__(self, *, registry: Any, event_sink: EventSink) -> None:
+    def __init__(
+        self,
+        *,
+        registry: Any,
+        event_sink: EventSink,
+        runtime_tools: dict[str, object] | None = None,
+    ) -> None:
         self.registry = registry
         self.event_sink = event_sink
+        self.runtime_tools = dict(runtime_tools or {})
 
     async def execute_one(
         self,
@@ -40,6 +47,13 @@ class ToolExecutor:
                 metadata={"error_code": "tool_not_allowed", "retryable": False},
             )
             return self._as_executed(tool_call, result)
+
+        runtime_tool = self.runtime_tools.get(tool_call.name)
+        if runtime_tool is not None:
+            result, updated_state = await runtime_tool.call(tool_call.input, state=state)
+            executed = self._as_executed(tool_call, result)
+            executed.updated_state = updated_state
+            return executed
 
         definition = self._definition_or_none(tool_call.name)
         if definition is None:

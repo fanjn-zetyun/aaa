@@ -1,10 +1,12 @@
 import pytest
 
 from app.agent_runtime.events import ListEventSink
+from app.agent_runtime.skills import SkillInvokeTool
 from app.agent_runtime.state import RuntimeState
 from app.agent_runtime.tool_protocol import RegistryToolAdapter, validate_tool_input
 from app.agent_runtime.tool_executor import ToolExecutor
 from app.services.llm_client import LLMToolUse
+from app.services.skills import SkillDefinition
 from app.services.tools import ToolDefinition, ToolResult
 
 
@@ -105,3 +107,34 @@ async def test_tool_executor_returns_schema_error_as_tool_result():
     assert result.tool_result.ok is False
     assert result.tool_result.metadata["error_code"] == "invalid_tool_input"
     assert "缺少必填参数" in result.tool_result.content
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_executes_runtime_tool_before_registry_lookup(tmp_path):
+    skill = SkillDefinition(
+        name="demo-skill",
+        allowed_tools=["ask_user"],
+        body="执行 demo skill。",
+        base_dir=tmp_path,
+    )
+    state = RuntimeState.new(conversation_id=1, model="claude-test")
+    state.allowed_tools = ["skill.invoke"]
+    executor = ToolExecutor(
+        registry=FakeRegistry(),
+        event_sink=ListEventSink(),
+        runtime_tools={"skill.invoke": SkillInvokeTool({"demo-skill": skill})},
+    )
+
+    result = await executor.execute_one(
+        LLMToolUse(id="toolu_1", name="skill.invoke", input={"skill": "demo-skill"}),
+        state=state,
+    )
+
+    assert result.tool_result.ok is True
+    assert result.updated_state.active_skill["name"] == "demo-skill"
+    assert result.tool_result_block == {
+        "type": "tool_result",
+        "tool_use_id": "toolu_1",
+        "content": "Launching skill: demo-skill",
+        "is_error": False,
+    }
