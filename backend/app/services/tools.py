@@ -119,6 +119,9 @@ class ToolResult:
     content: str
     ok: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    error_code: str | None = None
+    retryable: bool | None = None
+    recovery_suggestion: str | None = None
 
 
 @dataclass(slots=True)
