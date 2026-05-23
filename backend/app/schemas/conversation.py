@@ -85,3 +85,22 @@ class WorkspaceFileListResponse(BaseModel):
     exists: bool
     root: str
     files: list[WorkspaceFileResponse] = Field(default_factory=list)
+
+
+class RuntimeCredentialInstanceResponse(BaseModel):
+    id: int
+    server_id: str
+    instance_id: str | None = None
+    instance_type: str
+    status: str
+    username: str | None = None
+    password: str | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = None
+    ssh_command: str | None = None
+    started_at: datetime
+    stopped_at: datetime | None = None
+
+
+class RuntimeCredentialsResponse(BaseModel):
+    instances: list[RuntimeCredentialInstanceResponse] = Field(default_factory=list)

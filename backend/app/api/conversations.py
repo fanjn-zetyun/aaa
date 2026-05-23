@@ -13,13 +13,15 @@ from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
 from app.api.ws_auth import authenticate_ws
-from app.models import Conversation, ConversationMessage, UsageRecord
+from app.models import CloudInstance, Conversation, ConversationMessage, UsageRecord
 from app.models.conversation import ConversationStatus, ConversationTaskType, MessageRole
 from app.schemas.conversation import (
     ConversationCreateRequest,
     ConversationDetailResponse,
     ConversationResponse,
     MessageCreateRequest,
+    RuntimeCredentialInstanceResponse,
+    RuntimeCredentialsResponse,
     WorkspaceFileListResponse,
     WorkspaceFileResponse,
 )
@@ -160,6 +162,42 @@ async def stop_conversation(
     await get_agent_manager().stop(conversation_id)
     await session.refresh(conv)
     return conv
+
+
+@router.get("/{conversation_id}/runtime-credentials", response_model=RuntimeCredentialsResponse)
+async def get_runtime_credentials(
+    conversation_id: int, user: CurrentUser, session: DbSession
+) -> RuntimeCredentialsResponse:
+    await _get_owned_conversation(conversation_id, user.id, session)
+    instances = (
+        await session.execute(
+            select(CloudInstance)
+            .where(
+                CloudInstance.user_id == user.id,
+                CloudInstance.conversation_id == conversation_id,
+            )
+            .order_by(CloudInstance.started_at.desc())
+        )
+    ).scalars().all()
+    return RuntimeCredentialsResponse(
+        instances=[
+            RuntimeCredentialInstanceResponse(
+                id=item.id,
+                server_id=item.server_id,
+                instance_id=item.instance_id,
+                instance_type=item.instance_type.value,
+                status=item.status.value,
+                username=item.ssh_user,
+                password=item.ssh_pass,
+                ssh_host=item.ssh_host,
+                ssh_port=item.ssh_port,
+                ssh_command=_build_ssh_command(item.ssh_user, item.ssh_host, item.ssh_port),
+                started_at=item.started_at,
+                stopped_at=item.stopped_at,
+            )
+            for item in instances
+        ]
+    )
 
 
 @router.get("/{conversation_id}/workspace-files", response_model=WorkspaceFileListResponse)
@@ -304,3 +342,14 @@ def _display_workspace_root(root: Path, project_root: Path) -> str:
         return root.relative_to(project_root).as_posix()
     except ValueError:
         return str(root).replace("\\", "/")
+
+
+def _build_ssh_command(
+    username: str | None, host: str | None, port: int | None
+) -> str | None:
+    if not host:
+        return None
+    user = username or "root"
+    if port:
+        return f"ssh -p {port} {user}@{host}"
+    return f"ssh {user}@{host}"

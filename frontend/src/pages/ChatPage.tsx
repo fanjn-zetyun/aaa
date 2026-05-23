@@ -79,6 +79,21 @@ interface WorkflowStepState {
   expected_output?: string;
   progress?: string[];
   artifacts?: string[];
+  attempts?: number;
+  tool_calls?: WorkflowToolCall[];
+  evidence?: Record<string, unknown>;
+  validation_failures?: unknown[];
+}
+
+interface WorkflowToolCall {
+  tool_call_id?: string;
+  name?: string;
+  status?: string;
+  ok?: boolean;
+  error?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 interface WorkflowState {
@@ -102,6 +117,7 @@ interface TimelineEvent {
   content?: string;
   created_at: string;
   status: "running" | "done" | "error" | "info";
+  kind?: "thinking" | "execution";
   tool_name?: string;
 }
 
@@ -239,15 +255,28 @@ export default function ChatPage() {
         content: progressContent(payload.stage, payload.content),
         created_at: payload.timestamp || new Date().toISOString(),
         status: "info",
+        kind: "thinking",
       });
       return;
     }
     if (payload.type === "workflow_loaded") {
       updateWorkflowBoard(payload);
+      appendTimelineEvent(payload, {
+        id: "workflow-loaded",
+        title: "工作流已加载",
+        content: "开始执行全自动复现流水线。",
+        created_at: payload.timestamp || new Date().toISOString(),
+        status: "done",
+        kind: "execution",
+      });
       return;
     }
     if (payload.type.startsWith("workflow_step_") && payload.step) {
       updateWorkflowBoard(payload);
+      const timelineEvent = workflowTimelineEvent(payload);
+      if (timelineEvent) {
+        appendTimelineEvent(payload, timelineEvent);
+      }
       return;
     }
     if (payload.type === "workflow_cleanup_started" || payload.type === "workflow_cleanup_completed") {
@@ -257,6 +286,7 @@ export default function ChatPage() {
         content: payload.content,
         created_at: payload.timestamp || new Date().toISOString(),
         status: payload.type === "workflow_cleanup_started" ? "running" : "done",
+        kind: "execution",
       });
       return;
     }
@@ -267,6 +297,7 @@ export default function ChatPage() {
         content: toolStartedContent(payload.tool_name, payload.tool_input),
         created_at: payload.timestamp || new Date().toISOString(),
         status: "running",
+        kind: "execution",
         tool_name: payload.tool_name,
       });
       return;
@@ -279,6 +310,7 @@ export default function ChatPage() {
         content: toolResultContent(payload.message),
         created_at: payload.message.created_at,
         status: payload.ok === false ? "error" : "done",
+        kind: "execution",
         tool_name: toolName,
       });
       return;
@@ -290,6 +322,7 @@ export default function ChatPage() {
         content: payload.error,
         created_at: payload.timestamp || new Date().toISOString(),
         status: "error",
+        kind: "execution",
         tool_name: payload.tool_name,
       });
       return;
@@ -504,7 +537,7 @@ export default function ChatPage() {
 
   async function copyMessage(message: ChatMessage) {
     try {
-      await navigator.clipboard.writeText(message.content);
+      await navigator.clipboard.writeText(cleanFinalAnswer(message.content, !!message.workflow || !!message.events?.length));
       setCopiedMessageId(message.id);
       window.setTimeout(() => setCopiedMessageId(null), 1200);
     } catch {
@@ -729,6 +762,7 @@ function toolEventFromMessage(msg: ConversationMessage): TimelineEvent {
     content: toolResultContent(msg),
     created_at: msg.created_at,
     status: msg.message_metadata.ok === false ? "error" : "done",
+    kind: "execution",
     tool_name: toolName,
   };
 }
@@ -751,6 +785,84 @@ function workflowStateFromConversation(conversation?: Conversation): WorkflowSta
     resources: metadata?.workflow_resources,
     results: metadata?.workflow_results,
   });
+}
+
+function workflowTimelineEvent(payload: StreamPayload): TimelineEvent | undefined {
+  if (!payload.step) return undefined;
+  const createdAt = payload.timestamp || new Date().toISOString();
+  const base = {
+    id: `workflow-${payload.type}-${payload.step.id}`,
+    created_at: createdAt,
+    kind: "execution" as const,
+  };
+
+  if (payload.type === "workflow_step_started") {
+    return {
+      ...base,
+      title: `启动 ${payload.step.id}`,
+      content: payload.step.name,
+      status: "running",
+    };
+  }
+  if (payload.type === "workflow_step_progress") {
+    return {
+      ...base,
+      id: `workflow-progress-${payload.step.id}-${payload.seq || createdAt}`,
+      title: `${payload.step.id} 进展`,
+      content: workflowProgressContent(payload.content) || payload.step.name,
+      status: "info",
+    };
+  }
+  if (payload.type === "workflow_step_waiting") {
+    return {
+      ...base,
+      title: `${payload.step.id} 等待确认`,
+      content: payload.step.name,
+      status: "info",
+    };
+  }
+  if (payload.type === "workflow_step_completed") {
+    return {
+      ...base,
+      title: `${payload.step.id} 完成`,
+      content: workflowStepDetail(payload.step),
+      status: "done",
+    };
+  }
+  if (payload.type === "workflow_step_failed") {
+    return {
+      ...base,
+      title: `${payload.step.id} 失败`,
+      content: workflowStepDetail(payload.step),
+      status: "error",
+    };
+  }
+  if (payload.type === "workflow_step_recovery_started") {
+    return {
+      ...base,
+      title: `${payload.step.id} 开始自主修复`,
+      content: payload.step.name,
+      status: "running",
+    };
+  }
+  if (payload.type === "workflow_step_recovery_progress") {
+    return {
+      ...base,
+      id: `workflow-recovery-${payload.step.id}-${payload.seq || createdAt}`,
+      title: `${payload.step.id} 修复进展`,
+      content: workflowProgressContent(payload.content) || payload.step.name,
+      status: "info",
+    };
+  }
+  if (payload.type === "workflow_step_recovery_exhausted") {
+    return {
+      ...base,
+      title: `${payload.step.id} 修复耗尽`,
+      content: workflowStepDetail(payload.step),
+      status: "error",
+    };
+  }
+  return undefined;
 }
 
 function mergeWorkflowState(
@@ -822,24 +934,7 @@ function projectNameFromConversation(conversation?: Conversation) {
   return conversation?.title || "项目";
 }
 
-function workflowBoardMarkdown(workflow: WorkflowState) {
-  const projectName = workflow.project_name || "项目";
-  const rows = (workflow.steps || REPRO_WORKFLOW_STEPS).map((step, index) => {
-    const template = REPRO_WORKFLOW_STEPS.find((item) => item.id === step.id);
-    const name = step.name || template?.name || step.id;
-    return `| ${index + 1} | \`${step.id}\`: ${name} | ${workflowStepMarkdownStatus(step.status)} | ${workflowStepDetail(step)} |`;
-  });
-
-  return [
-    `#### 复现流水线实时看板: \`${escapeMarkdown(projectName)}\``,
-    "",
-    "| 序号 | 执行步骤 (对应 YAML Task) | 当前状态 | 核心产出 / 详情 |",
-    "| --- | --- | --- | --- |",
-    ...rows,
-  ].join("\n");
-}
-
-function workflowStepMarkdownStatus(status: string) {
+function workflowStepStatusLabel(status: string) {
   const labels: Record<string, string> = {
     pending: "等待中",
     running: "执行中",
@@ -848,15 +943,16 @@ function workflowStepMarkdownStatus(status: string) {
     failed: "中止",
     skipped: "跳过",
   };
-  const prefix: Record<string, string> = {
-    pending: "⏳",
-    running: "⏳",
-    waiting_for_user: "⏸",
-    completed: "✅",
-    failed: "❌",
-    skipped: "↷",
-  };
-  return `${prefix[status] || "•"} ${labels[status] || status}`;
+  return labels[status] || status;
+}
+
+function workflowStepStatusClass(status: string) {
+  if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  if (status === "running") return "border-blue-100 bg-blue-50 text-blue-700";
+  if (status === "waiting_for_user") return "border-amber-100 bg-amber-50 text-amber-700";
+  if (status === "failed") return "border-red-100 bg-red-50 text-red-700";
+  if (status === "skipped") return "border-slate-100 bg-slate-50 text-slate-500";
+  return "border-slate-100 bg-slate-50 text-slate-500";
 }
 
 function workflowStepDetail(step: WorkflowStepState) {
@@ -884,51 +980,51 @@ function defaultWorkflowStepDetail(stepId: string) {
   return details[stepId] || "";
 }
 
-function finalDeliveryMarkdown(workflow: WorkflowState) {
-  const results = workflow.results || {};
-  const projectName = workflow.project_name || String(results.repo_name || "项目");
-  const reportPath =
-    typeof results.word_report_path === "string" && results.word_report_path
-      ? results.word_report_path
-      : "待生成";
-  const metrics = results.smoke_test_metrics;
-  const metricRows =
-    metrics && typeof metrics === "object" && !Array.isArray(metrics)
-      ? Object.entries(metrics as Record<string, unknown>).map(
-          ([key, value]) => `| ${escapeMarkdownTableCell(key)} | 待对齐 | ${escapeMarkdownTableCell(String(value))} |`
-        )
-      : ["| Smoke Test | 待对齐 | 待接入真实 SSH 执行 |"];
-
-  return [
-    `## 任务完成：${escapeMarkdown(projectName)} 自动化复现已结项`,
-    "",
-    "**1. 核心指标对比 (Smoke Test 实测)**",
-    "| 评估维度 | 原论文/官方基准 | H100 实测数据 |",
-    "| --- | --- | --- |",
-    ...metricRows,
-    "",
-    "**2. H100 架构优化洞察**",
-    "> 当前版本会在真实 SSH executor 接入后，根据 step_7 编译与微调日志生成优化建议。",
-    "",
-    "**3. 工业级复现报告提取**",
-    "Word 报告已排版落盘，请前往该绝对路径获取：",
-    `\`${reportPath}\``,
-    "",
-    "资源监控核对：本次流水线调用的 CPU 与 GPU 实例均已触发释放步骤核对。",
-  ].join("\n");
-}
-
-function shouldShowFinalDelivery(workflow: WorkflowState) {
-  const steps = workflow.steps || [];
-  return steps.some((step) => step.id === "step_9_release_gpu" && step.status === "completed");
-}
-
-function escapeMarkdown(value: string) {
-  return value.replace(/([\\`*_{}[\]()#+.!|>])/g, "\\$1");
-}
-
 function escapeMarkdownTableCell(value: string) {
   return value.replace(/\|/g, "\\|").replace(/\s*\n+\s*/g, "；");
+}
+
+function cleanFinalAnswer(content: string, hasProcess: boolean) {
+  const trimmed = content.trim();
+  if (!trimmed || !hasProcess) return trimmed;
+  const lines = trimmed.split(/\r?\n/);
+  const result: string[] = [];
+  let skippingWorkflowTable = false;
+
+  for (const line of lines) {
+    const normalized = line.trim();
+    if (isProcessOnlyLine(normalized)) {
+      skippingWorkflowTable =
+        normalized === "工具执行结果如下" ||
+        normalized.includes("复现流水线实时看板") ||
+        normalized.startsWith("| 序号 |");
+      continue;
+    }
+    if (skippingWorkflowTable) {
+      if (normalized.startsWith("|") || normalized === "") continue;
+      skippingWorkflowTable = false;
+    }
+    result.push(line);
+  }
+
+  const finalStartIndex = result.findIndex((line) => isFinalAnswerStart(line.trim()));
+  const finalLines = finalStartIndex > 0 ? result.slice(finalStartIndex) : result;
+  return finalLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function isProcessOnlyLine(line: string) {
+  if (!line) return false;
+  if (/^#{1,6}\s*复现流水线实时看板/.test(line)) return true;
+  if (line.startsWith("| 序号 |") || line.startsWith("| ---")) return true;
+  if (/^\|?\s*\d+\s*\|\s*`?step_/.test(line)) return true;
+  if (/^(工具执行结果如下|调用了子 Claw|使用技能|读取\s|工作流已加载)/.test(line)) return true;
+  if (/^(正在启动|Step\s+\d+\s+(完成|通过|失败)|API 超时|任务完成)/.test(line)) return true;
+  if (/^(Invoking tool:|Tool completed:|Tool failed:|Start step:)/.test(line)) return true;
+  return false;
+}
+
+function isFinalAnswerStart(line: string) {
+  return /^(最终结论|结论|下一步|需要|请|当前|已完成|我需要|配置完成)/.test(line);
 }
 
 function MessageBubble({
@@ -956,71 +1052,298 @@ function MessageBubble({
       <AgentAvatar />
       <div className="flex flex-col gap-2 max-w-[85%] min-w-0">
         <span className="text-ui-small font-medium text-slate-800">LOBSTER Agent</span>
-        <div className="border border-slate-200 rounded-xl bg-white p-4 text-chat-body text-slate-600 leading-relaxed whitespace-pre-wrap">
-          {message.type === "status" ? (
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-              <span>{message.content}</span>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {message.workflow && (
-                <WorkflowBoard workflow={message.workflow} />
-              )}
-              {message.events && message.events.length > 0 && (
-                <ExecutionTimeline events={message.events} />
-              )}
-              {message.content ? (
-                <MarkdownContent content={message.content} />
-              ) : message.streaming ? (
-                <div className="flex items-center gap-2 text-slate-500">
-                  <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                  <span>正在执行...</span>
-                </div>
-              ) : null}
-            </div>
-          )}
-        </div>
+        {message.type === "status" ? (
+          <StatusMessage content={message.content} />
+        ) : (
+          <AgentResponse message={message} />
+        )}
         <MessageMeta message={message} copied={copied} onCopy={onCopy} align="left" />
       </div>
     </div>
   );
 }
 
-function WorkflowBoard({ workflow }: { workflow: WorkflowState }) {
+function StatusMessage({ content }: { content: string }) {
   return (
-    <div className="space-y-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
-      <MarkdownContent content={workflowBoardMarkdown(workflow)} />
-      {shouldShowFinalDelivery(workflow) && (
-        <MarkdownContent content={finalDeliveryMarkdown(workflow)} />
+    <div className="rounded-xl border border-slate-200 bg-white p-4 text-chat-body leading-relaxed text-slate-600">
+      <div className="flex items-center gap-2">
+        <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+        <span>{content}</span>
+      </div>
+    </div>
+  );
+}
+
+function AgentResponse({ message }: { message: ChatMessage }) {
+  const hasProcess = !!message.workflow || !!message.events?.length;
+  const finalAnswer = cleanFinalAnswer(message.content, hasProcess);
+  return (
+    <div className="space-y-3">
+      {hasProcess && (
+        <div className="space-y-3">
+          {message.events && message.events.length > 0 && (
+            <AgentProcessTimeline events={message.events} />
+          )}
+          {message.workflow && <WorkflowBoard workflow={message.workflow} />}
+        </div>
+      )}
+      {finalAnswer ? (
+        <FinalAnswer content={finalAnswer} />
+      ) : message.streaming ? (
+        <RunningState />
+      ) : null}
+    </div>
+  );
+}
+
+function FinalAnswer({ content }: { content: string }) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 text-chat-body leading-relaxed text-slate-700">
+      <div className="mb-2 text-ui-meta font-semibold uppercase text-slate-400">最终回答</div>
+      <MarkdownContent content={content} />
+    </div>
+  );
+}
+
+function RunningState() {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 text-chat-body text-slate-500">
+      <div className="flex items-center gap-2">
+        <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+        <span>正在执行...</span>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowBoard({ workflow }: { workflow: WorkflowState }) {
+  const steps = workflow.steps || REPRO_WORKFLOW_STEPS;
+  const completedCount = steps.filter((step) => step.status === "completed").length;
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+            执行看板
+          </div>
+          <h3 className="truncate text-md-h3 font-semibold text-slate-800">
+            复现流水线实时看板: {workflow.project_name || "项目"}
+          </h3>
+        </div>
+        <span className="shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-ui-micro font-medium text-slate-500">
+          {completedCount}/{steps.length} 完成
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full table-fixed border-collapse text-ui-small">
+          <thead className="bg-white">
+            <tr className="border-b border-slate-100 text-left text-slate-500">
+              <th className="w-14 px-4 py-3 font-semibold">序号</th>
+              <th className="w-[34%] px-4 py-3 font-semibold">执行步骤</th>
+              <th className="w-32 px-4 py-3 font-semibold">当前状态</th>
+              <th className="px-4 py-3 font-semibold">执行过程与结果</th>
+            </tr>
+          </thead>
+          <tbody>
+            {steps.map((step, index) => {
+              const template = REPRO_WORKFLOW_STEPS.find((item) => item.id === step.id);
+              const name = step.name || template?.name || step.id;
+              return (
+                <tr key={step.id} className="border-b border-slate-100 last:border-b-0">
+                  <td className="px-4 py-3 align-top text-slate-500">{index + 1}</td>
+                  <td className="px-4 py-3 align-top">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <code className="rounded bg-slate-100 px-1.5 py-0.5 text-ui-small font-semibold text-slate-700">
+                        {step.id}
+                      </code>
+                      <span className="break-words font-medium text-slate-700">{name}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 align-top">
+                    <span
+                      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-ui-micro font-medium ${workflowStepStatusClass(
+                        step.status
+                      )}`}
+                    >
+                      {workflowStepStatusLabel(step.status)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 align-top text-slate-600">
+                    <WorkflowStepRuntime step={step} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function WorkflowStepRuntime({ step }: { step: WorkflowStepState }) {
+  const progressItems = (step.progress || []).slice(-3);
+  const toolCalls = (step.tool_calls || []).slice(-3);
+  const outcome = workflowStepOutcome(step);
+  const startLabel = workflowStepStartLabel(step);
+  const hasDetails = progressItems.length > 0 || toolCalls.length > 0 || !!outcome;
+
+  if (!hasDetails) {
+    return <span className="break-words">{workflowStepDetail(step)}</span>;
+  }
+
+  return (
+    <div className="space-y-2">
+      {startLabel && <div className="text-ui-small text-slate-500">{startLabel}</div>}
+      {progressItems.length > 0 && (
+        <div className="space-y-1">
+          {progressItems.map((item, index) => (
+            <div key={`${step.id}-progress-${index}`} className="flex gap-2 text-ui-small text-slate-500">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+              <span className="break-words">{workflowProgressContent(item) || item}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {toolCalls.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {toolCalls.map((call, index) => (
+            <span
+              key={call.tool_call_id || `${step.id}-tool-${index}`}
+              className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
+                call
+              )}`}
+              title={call.error || undefined}
+            >
+              <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
+              <span>{toolCallStatusLabel(call)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {outcome && (
+        <div className={`rounded-lg border px-2.5 py-2 text-ui-small ${workflowOutcomeClass(step.status)}`}>
+          {outcome}
+        </div>
       )}
     </div>
   );
 }
 
-function ExecutionTimeline({ events }: { events: TimelineEvent[] }) {
+function workflowStepStartLabel(step: WorkflowStepState) {
+  if (step.status === "pending") return "";
+  const attempt = step.attempts && step.attempts > 1 ? `第 ${step.attempts} 次尝试` : "开始执行";
+  return `${attempt}: ${step.name || step.id}`;
+}
+
+function workflowStepOutcome(step: WorkflowStepState) {
+  if (step.status === "completed") return workflowStepDetail(step);
+  if (step.status === "failed") {
+    return step.error || workflowValidationFailureText(step) || workflowStepDetail(step) || "执行失败，等待检查原因。";
+  }
+  if (step.status === "waiting_for_user") {
+    return step.error || step.output || workflowValidationFailureText(step) || "需要用户确认或补充信息后继续。";
+  }
+  if (step.status === "running") return step.output || "正在执行当前步骤。";
+  if (step.status === "skipped") return step.output || "该步骤已跳过。";
+  return "";
+}
+
+function workflowValidationFailureText(step: WorkflowStepState) {
+  const failure = step.validation_failures?.[step.validation_failures.length - 1];
+  if (!failure) return "";
+  if (typeof failure === "string") return failure;
+  if (typeof failure !== "object") return String(failure);
+
+  const record = failure as Record<string, unknown>;
+  const reason = record.reason || record.message || record.error || record.postcondition;
+  if (typeof reason === "string") return reason;
+  if (reason !== undefined) return String(reason);
+  return "";
+}
+
+function workflowOutcomeClass(status: string) {
+  if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  if (status === "failed") return "border-red-100 bg-red-50 text-red-700";
+  if (status === "waiting_for_user") return "border-amber-100 bg-amber-50 text-amber-700";
+  if (status === "running") return "border-blue-100 bg-blue-50 text-blue-700";
+  return "border-slate-100 bg-slate-50 text-slate-500";
+}
+
+function toolCallStatusLabel(call: WorkflowToolCall) {
+  if (call.status === "waiting_for_user") return "待确认";
+  if (call.status === "completed" && call.ok !== false) return "完成";
+  if (call.status === "failed" || call.ok === false) return "失败";
+  if (call.status === "running") return "执行中";
+  return call.status || "记录";
+}
+
+function toolCallStatusClass(call: WorkflowToolCall) {
+  if (call.status === "waiting_for_user") return "border-amber-100 bg-amber-50 text-amber-700";
+  if (call.status === "completed" && call.ok !== false) return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  if (call.status === "failed" || call.ok === false) return "border-red-100 bg-red-50 text-red-700";
+  if (call.status === "running") return "border-blue-100 bg-blue-50 text-blue-700";
+  return "border-slate-100 bg-slate-50 text-slate-500";
+}
+
+function AgentProcessTimeline({ events }: { events: TimelineEvent[] }) {
+  const thinkingEvents = events.filter((event) => event.kind === "thinking");
+  const executionEvents = events.filter((event) => event.kind !== "thinking");
   return (
-    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
-      <div className="mb-2 text-ui-meta font-semibold text-slate-500">执行过程</div>
-      <div className="space-y-2">
+    <div className="space-y-3">
+      {thinkingEvents.length > 0 && (
+        <TimelineSection title="思考过程" events={thinkingEvents} />
+      )}
+      {executionEvents.length > 0 && (
+        <TimelineSection title="执行过程" events={executionEvents} />
+      )}
+    </div>
+  );
+}
+
+function TimelineSection({ title, events }: { title: string; events: TimelineEvent[] }) {
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
+        <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+          {title}
+        </div>
+        <span className="rounded-full bg-white px-2 py-0.5 text-ui-micro text-slate-400">
+          {events.length} 项
+        </span>
+      </div>
+      <div className="divide-y divide-slate-100">
         {events.map((event) => (
-          <div key={event.id} className="flex gap-2 text-ui-small leading-relaxed">
-            <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${eventDotClass(event.status)}`} />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-medium text-slate-700">{event.title}</span>
-                <span className="shrink-0 text-ui-micro text-slate-400">
-                  {formatMessageTime(event.created_at)}
-                </span>
-              </div>
-              {event.content && (
-                <div className="mt-0.5 break-words text-slate-500">{event.content}</div>
-              )}
-            </div>
-          </div>
+          <TimelineEventCard key={event.id} event={event} />
         ))}
       </div>
-    </div>
+    </section>
+  );
+}
+
+function TimelineEventCard({ event }: { event: TimelineEvent }) {
+  const hasContent = !!event.content?.trim();
+  return (
+    <details className="group" open={event.status === "running" || event.status === "error" || hasContent}>
+      <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-ui-small transition-colors hover:bg-slate-50">
+        <span
+          className={`h-2.5 w-2.5 shrink-0 rounded-full ${eventDotClass(event.status)}`}
+          aria-hidden="true"
+        />
+        <span className="min-w-0 flex-1 truncate font-medium text-slate-700">
+          {event.title}
+        </span>
+        <span className="shrink-0 text-ui-micro text-slate-400">
+          {formatMessageTime(event.created_at)}
+        </span>
+        <ChevronIcon className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+      </summary>
+      {hasContent && (
+        <div className="px-4 pb-3 pl-[42px] text-ui-small leading-relaxed text-slate-500">
+          {event.content}
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -1205,6 +1528,14 @@ function CheckIcon() {
   return (
     <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="m5 13 4 4L19 7" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m6 9 6 6 6-6" />
     </svg>
   );
 }

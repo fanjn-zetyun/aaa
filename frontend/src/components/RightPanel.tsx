@@ -6,46 +6,23 @@ interface Conversation {
   id: number;
   title: string;
   status: string;
-  task_type: string;
-  metadata: {
-    github_url?: string;
-    paper_url?: string;
-    intent_hint?: string;
-    workflow_state?: string;
-    pending_user_input?: {
-      question: string;
-      tool_name?: string;
-    } | null;
-    workflow_name?: string;
-    workflow_version?: string;
-    workflow_current_step_id?: string | null;
-    workflow_steps?: WorkflowStep[];
-    workflow_resources?: Record<string, WorkflowResource>;
-    workflow_results?: Record<string, unknown>;
-    memory?: {
-      decisions?: Array<{
-        step?: string;
-        outcome?: string;
-        answer?: string;
-        tool_name?: string;
-      }>;
-      artifacts?: string[];
-    };
-  };
   created_at: string;
   updated_at: string;
 }
 
-interface WorkflowStep {
-  id: string;
-  name: string;
+interface RuntimeCredentialInstance {
+  id: number;
+  server_id: string;
+  instance_id?: string | null;
+  instance_type: string;
   status: string;
-  output?: string;
-}
-
-interface WorkflowResource {
-  server_id?: string;
-  released?: boolean;
+  username?: string | null;
+  password?: string | null;
+  ssh_host?: string | null;
+  ssh_port?: number | null;
+  ssh_command?: string | null;
+  started_at: string;
+  stopped_at?: string | null;
 }
 
 interface WorkspaceFile {
@@ -61,6 +38,10 @@ interface WorkspaceFilesResponse {
   exists: boolean;
   root: string;
   files: WorkspaceFile[];
+}
+
+interface RuntimeCredentialsResponse {
+  instances: RuntimeCredentialInstance[];
 }
 
 export default function RightPanel() {
@@ -80,6 +61,13 @@ export default function RightPanel() {
     refetchInterval: 5000,
   });
 
+  const { data: runtimeCredentials, isLoading: credentialsLoading } = useQuery({
+    queryKey: ["runtime-credentials", id],
+    queryFn: () => apiFetch<RuntimeCredentialsResponse>(`/api/conversations/${id}/runtime-credentials`),
+    enabled: !!id,
+    refetchInterval: 3000,
+  });
+
   if (!id) {
     return (
       <aside className="h-full w-full min-h-0 bg-white flex flex-col z-10 overflow-hidden">
@@ -93,12 +81,8 @@ export default function RightPanel() {
   return (
     <aside className="h-full w-full min-h-0 bg-white flex flex-col z-10 overflow-hidden">
       <section className="h-[44%] min-h-[280px] shrink-0 flex flex-col border-b border-slate-200">
-        <PanelHeader title="权限与环境配置" subtitle={conversation?.status || "loading"} />
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-5">
-          <EnvironmentSection conversation={conversation} />
-          <WorkflowSection conversation={conversation} />
-          <PermissionSection conversation={conversation} />
-        </div>
+        <PanelHeader title="权限与环境配置" subtitle={statusLabel(conversation?.status)} />
+        <RuntimeCredentialsSection data={runtimeCredentials} loading={credentialsLoading} />
       </section>
 
       <section className="flex-1 min-h-0 flex flex-col">
@@ -112,116 +96,62 @@ export default function RightPanel() {
   );
 }
 
-function WorkflowSection({ conversation }: { conversation?: Conversation }) {
-  const metadata = conversation?.metadata || {};
-  const steps = metadata.workflow_steps || [];
-  if (!metadata.workflow_name && steps.length === 0) return null;
+function RuntimeCredentialsSection({
+  data,
+  loading,
+}: {
+  data?: RuntimeCredentialsResponse;
+  loading: boolean;
+}) {
+  if (loading) {
+    return <EmptyState text="正在读取 Lab4AI 实例连接信息..." />;
+  }
 
-  const resources = metadata.workflow_resources || {};
-  const results = metadata.workflow_results || {};
+  const instances = data?.instances || [];
+  if (instances.length === 0) {
+    return <EmptyState text="当前任务暂无 Lab4AI 实例连接信息。" />;
+  }
 
   return (
-    <div>
-      <SectionTitle label="复现流水线" />
-      <div className="space-y-2">
-        {metadata.workflow_name && (
-          <InfoRow
-            label="Workflow"
-            value={`${metadata.workflow_name}${metadata.workflow_version ? ` · ${metadata.workflow_version}` : ""}`}
-          />
-        )}
-        {steps.length > 0 && (
-          <div className="space-y-1.5">
-            {steps.map((step, index) => (
-              <WorkflowStepRow key={step.id} step={step} index={index} />
-            ))}
-          </div>
-        )}
-        {resources.cpu?.server_id && (
-          <InfoRow
-            label="CPU"
-            value={`${resources.cpu.server_id} · ${resources.cpu.released ? "已释放" : "占用中"}`}
-            tone={resources.cpu.released ? "ok" : "warning"}
-          />
-        )}
-        {resources.gpu?.server_id && (
-          <InfoRow
-            label="GPU"
-            value={`${resources.gpu.server_id} · ${resources.gpu.released ? "已释放" : "占用中"}`}
-            tone={resources.gpu.released ? "ok" : "warning"}
-          />
-        )}
-        {typeof results.word_report_path === "string" && (
-          <InfoRow label="报告" value={results.word_report_path} tone="ok" />
-        )}
+    <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+      <SectionTitle label="Lab4AI 实例" />
+      <div className="space-y-3">
+        {instances.map((instance) => (
+          <InstanceCredentialBlock key={instance.id} instance={instance} />
+        ))}
       </div>
     </div>
   );
 }
 
-function WorkflowStepRow({ step, index }: { step: WorkflowStep; index: number }) {
+function InstanceCredentialBlock({ instance }: { instance: RuntimeCredentialInstance }) {
   return (
-    <div className="rounded-md border border-slate-100 px-3 py-2">
-      <div className="flex items-start gap-2">
-        <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${workflowStepDot(step.status)}`} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className="min-w-0 truncate text-ui-small font-medium text-slate-700">
-              {index + 1}. {step.name || step.id}
-            </span>
-            <span className={`shrink-0 text-ui-micro ${toneClass(workflowStepTone(step.status))}`}>
-              {workflowStepLabel(step.status)}
-            </span>
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-ui-small font-semibold text-slate-800">
+            {instanceTypeLabel(instance.instance_type)} · {instance.server_id}
           </div>
-          {step.output && <div className="mt-1 break-words text-ui-micro text-slate-500">{step.output}</div>}
+          {instance.instance_id && (
+            <div className="mt-0.5 truncate text-ui-micro text-slate-400">
+              {instance.instance_id}
+            </div>
+          )}
         </div>
+        <span
+          className={`shrink-0 rounded-md border px-2 py-0.5 text-ui-micro font-medium ${instanceStatusClass(
+            instance.status
+          )}`}
+        >
+          {instanceStatusLabel(instance.status)}
+        </span>
       </div>
-    </div>
-  );
-}
-
-function EnvironmentSection({ conversation }: { conversation?: Conversation }) {
-  const metadata = conversation?.metadata || {};
-  return (
-    <div>
-      <SectionTitle label="环境" />
       <div className="space-y-2">
-        <InfoRow label="Agent" value="V2 Agent Loop" />
-        <InfoRow label="工具层" value="Lab4AI / SSH / Repo Analysis" />
-        <InfoRow label="任务类型" value={taskTypeLabel(conversation?.task_type)} />
-        <InfoRow label="运行状态" value={statusLabel(conversation?.status)} tone={statusTone(conversation?.status)} />
-        {metadata.github_url && <LinkRow label="GitHub" href={metadata.github_url} />}
-        {metadata.paper_url && <LinkRow label="论文" href={metadata.paper_url} />}
-      </div>
-    </div>
-  );
-}
-
-function PermissionSection({ conversation }: { conversation?: Conversation }) {
-  const metadata = conversation?.metadata || {};
-  const pendingTool = metadata.pending_user_input?.tool_name;
-  const decisions = metadata.memory?.decisions || [];
-  const resourceApproved = decisions.some(
-    (item) =>
-      item.outcome === "approved" &&
-      (item.tool_name === "lab4ai_create_instance" ||
-        item.step === "confirm_resource_creation" ||
-        item.step?.startsWith("tool_confirm:lab4ai_create_instance"))
-  );
-  const isWaiting = metadata.workflow_state === "waiting_for_user";
-
-  return (
-    <div>
-      <SectionTitle label="权限" />
-      <div className="space-y-2">
-        <PermissionRow
-          label="创建算力实例"
-          value={pendingTool === "lab4ai_create_instance" && isWaiting ? "等待确认" : resourceApproved ? "已确认" : "需要时确认"}
-          tone={pendingTool === "lab4ai_create_instance" && isWaiting ? "warning" : resourceApproved ? "ok" : "neutral"}
-        />
-        <PermissionRow label="高风险 SSH 命令" value="按策略确认" tone="neutral" />
-        <PermissionRow label="文件写入" value="后端工具受控" tone="neutral" />
-        <PermissionRow label="凭证暴露" value="隐藏敏感文件" tone="ok" />
+        <CredentialRow label="用户名" value={instance.username || "-"} />
+        <CredentialRow label="密码" value={instance.password || "-"} />
+        <CredentialRow label="SSH Host" value={instance.ssh_host || "-"} />
+        <CredentialRow label="SSH Port" value={instance.ssh_port ? String(instance.ssh_port) : "-"} />
+        <CredentialRow label="SSH 命令" value={instance.ssh_command || "-"} />
       </div>
     </div>
   );
@@ -291,52 +221,11 @@ function SectionTitle({ label }: { label: string }) {
   return <div className="mb-2 text-ui-meta font-semibold uppercase tracking-wide text-slate-400">{label}</div>;
 }
 
-function InfoRow({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "ok" | "warning" | "danger";
-}) {
+function CredentialRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-start justify-between gap-3">
-      <span className="shrink-0 text-ui-small text-slate-400">{label}</span>
-      <span className={`min-w-0 break-words text-right text-ui-small ${toneClass(tone)}`}>{value}</span>
-    </div>
-  );
-}
-
-function LinkRow({ label, href }: { label: string; href: string }) {
-  return (
-    <div className="space-y-1">
-      <div className="text-ui-small text-slate-400">{label}</div>
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        className="block break-all text-ui-small leading-relaxed text-blue-600 hover:underline"
-      >
-        {href}
-      </a>
-    </div>
-  );
-}
-
-function PermissionRow({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: "neutral" | "ok" | "warning" | "danger";
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2">
-      <span className="text-ui-small text-slate-600">{label}</span>
-      <span className={`shrink-0 text-ui-meta font-medium ${toneClass(tone)}`}>{value}</span>
+    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 text-ui-small">
+      <span className="text-slate-400">{label}</span>
+      <span className="min-w-0 break-all font-mono text-slate-700">{value}</span>
     </div>
   );
 }
@@ -373,20 +262,6 @@ function FileIcon({ kind }: { kind: WorkspaceFile["kind"] }) {
   );
 }
 
-function toneClass(tone: "neutral" | "ok" | "warning" | "danger") {
-  if (tone === "ok") return "text-green-600";
-  if (tone === "warning") return "text-amber-600";
-  if (tone === "danger") return "text-red-600";
-  return "text-slate-600";
-}
-
-function statusTone(status?: string): "neutral" | "ok" | "warning" | "danger" {
-  if (status === "completed") return "ok";
-  if (status === "running" || status === "active") return "warning";
-  if (status === "failed") return "danger";
-  return "neutral";
-}
-
 function statusLabel(status?: string) {
   const labels: Record<string, string> = {
     active: "待执行",
@@ -398,43 +273,25 @@ function statusLabel(status?: string) {
   return status ? labels[status] || status : "-";
 }
 
-function workflowStepLabel(status: string) {
+function instanceTypeLabel(value: string) {
+  const normalized = value.toUpperCase();
+  if (normalized === "CPU") return "CPU 实例";
+  if (normalized === "GPU") return "GPU 实例";
+  return `${value} 实例`;
+}
+
+function instanceStatusLabel(status: string) {
   const labels: Record<string, string> = {
-    pending: "等待",
-    running: "执行中",
-    waiting_for_user: "待确认",
-    completed: "完成",
-    failed: "失败",
-    skipped: "跳过",
+    running: "运行中",
+    stopped: "已停止",
   };
   return labels[status] || status;
 }
 
-function workflowStepTone(status: string): "neutral" | "ok" | "warning" | "danger" {
-  if (status === "completed") return "ok";
-  if (status === "running" || status === "waiting_for_user") return "warning";
-  if (status === "failed") return "danger";
-  return "neutral";
-}
-
-function workflowStepDot(status: string) {
-  if (status === "completed") return "bg-green-500";
-  if (status === "running") return "bg-blue-500 animate-pulse";
-  if (status === "waiting_for_user") return "bg-amber-500";
-  if (status === "failed") return "bg-red-500";
-  return "bg-slate-300";
-}
-
-function taskTypeLabel(taskType?: string) {
-  const labels: Record<string, string> = {
-    reproduce: "代码与论文复现",
-    search: "论文检索",
-    paper_only: "纯论文分析",
-    experiments: "实验设计",
-    polish: "论文润色",
-    general: "通用任务",
-  };
-  return taskType ? labels[taskType] || taskType : "-";
+function instanceStatusClass(status: string) {
+  if (status === "running") return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  if (status === "stopped") return "border-slate-100 bg-slate-50 text-slate-500";
+  return "border-amber-100 bg-amber-50 text-amber-700";
 }
 
 function formatSize(value: number | null) {

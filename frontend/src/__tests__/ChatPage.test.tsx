@@ -131,6 +131,7 @@ describe("ChatPage", () => {
           id: "step_1_audit",
           name: "项目与论文双重审计",
           status: "running",
+          progress: ["Invoking tool: analyze_repo"],
         },
         timestamp: "2026-05-20T00:00:02Z",
       });
@@ -166,6 +167,14 @@ describe("ChatPage", () => {
           name: "项目与论文双重审计",
           status: "completed",
           output: "score=75；已完成项目与论文审计的 MVP 记录。",
+          tool_calls: [
+            {
+              tool_call_id: "tool-1",
+              name: "analyze_repo",
+              status: "completed",
+              ok: true,
+            },
+          ],
         },
         timestamp: "2026-05-20T00:00:03Z",
       });
@@ -175,18 +184,73 @@ describe("ChatPage", () => {
         run_id: "run-1",
         timestamp: "2026-05-20T00:00:04Z",
       });
-      ws.emit({ seq: 8, type: "assistant_delta", run_id: "run-1", delta: "第一段" });
-      ws.emit({ seq: 9, type: "assistant_delta", run_id: "run-1", delta: "，第二段" });
+      ws.emit({
+        seq: 8,
+        type: "assistant_delta",
+        run_id: "run-1",
+        delta: "工具执行结果如下\n| 序号 | 执行步骤 | 当前状态 | 核心产出 / 详情 |\n| --- | --- | --- | --- |\n| 1 | `step_1_audit`: 项目与论文双重审计 | ✅ 完成 | score=75 |\n最终结论：仓库审计已完成，下一步需要创建 CPU 实例。",
+      });
     });
 
     expect(await screen.findByText("执行过程")).toBeInTheDocument();
-    expect(screen.getByText("复现流水线实时看板:")).toBeInTheDocument();
-    expect(screen.getByText(/项目与论文双重审计/)).toBeInTheDocument();
-    expect(screen.getByText("✅ 完成")).toBeInTheDocument();
+    expect(screen.getByText("思考过程")).toBeInTheDocument();
+    expect(screen.getByText("工作流已加载")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("执行过程与结果")).toBeInTheDocument();
+    expect(screen.getAllByText(/项目与论文双重审计/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("完成").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("正在分析仓库。").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("分析 GitHub 仓库").length).toBeGreaterThan(0);
     expect(screen.getByText("选择复现流程")).toBeInTheDocument();
-    expect(screen.getByText("分析 GitHub 仓库")).toBeInTheDocument();
     expect(screen.getByText("已识别仓库 showlab/PhotoDoodle。")).toBeInTheDocument();
-    expect(screen.getByText("第一段，第二段")).toBeInTheDocument();
+    expect(screen.getByText("最终结论：仓库审计已完成，下一步需要创建 CPU 实例。")).toBeInTheDocument();
+
+    const finalAnswer = screen.getByText("最终回答").parentElement;
+    expect(finalAnswer).toHaveTextContent("最终结论：仓库审计已完成，下一步需要创建 CPU 实例。");
+    expect(finalAnswer).not.toHaveTextContent("工具执行结果如下");
+    expect(finalAnswer).not.toHaveTextContent("score=75");
+  });
+
+  it("shows a step-level HITL reason on the workflow board", async () => {
+    conversationPayload.status = "active";
+    conversationPayload.metadata = {
+      workflow_state: "waiting_for_user",
+      selected_skill: "lab4ai-auto-reproduct",
+      workflow_name: "lab4ai-auto-reproduct",
+      workflow_results: { repo_name: "PhotoDoodle" },
+      workflow_steps: [
+        {
+          id: "step_3_deploy_cpu",
+          name: "创建 CPU 实例",
+          status: "waiting_for_user",
+          output: "需要确认后才能创建 CPU 实例。",
+          progress: ["Tool waiting for user: lab4ai_create_instance"],
+          tool_calls: [
+            {
+              tool_call_id: "tool-cpu",
+              name: "lab4ai_create_instance",
+              status: "waiting_for_user",
+            },
+          ],
+        },
+      ],
+      pending_user_input: {
+        question: "是否继续创建 CPU 实例？",
+        options: ["继续执行"],
+        tool_name: "lab4ai_create_instance",
+      },
+    };
+
+    renderChat();
+
+    expect(await screen.findByText("等待你确认")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })).toBeInTheDocument();
+    expect(screen.getAllByText("等待确认").length).toBeGreaterThan(0);
+    expect(screen.getByText("需要你确认后继续。")).toBeInTheDocument();
+    expect(screen.getByText("需要确认后才能创建 CPU 实例。")).toBeInTheDocument();
+    expect(screen.getAllByText("创建 Lab4AI 实例").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
   });
 
   it("ignores replayed websocket events by seq", async () => {
