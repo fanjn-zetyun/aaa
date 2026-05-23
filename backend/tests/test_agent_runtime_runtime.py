@@ -50,6 +50,21 @@ class CapturingLLM:
         )
 
 
+class CapturingToolsLLM:
+    def __init__(self):
+        self.tools: list[dict] = []
+
+    async def complete(self, request):
+        self.tools = list(request.tools)
+        return ModelResponse(
+            text="完成。",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage={},
+            raw={},
+        )
+
+
 class WorkflowLLM:
     def __init__(self):
         self.calls = 0
@@ -257,6 +272,36 @@ async def test_agent_runtime_uses_context_builder_system_prompt(db_session, test
     await runtime.run_conversation(conversation.id, model="claude-test")
 
     assert "不要要求用户提供 Lab4AI 密码" in llm.system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_advertises_runtime_tool_schemas(db_session, test_user):
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.GENERAL,
+        title="runtime tools",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+
+    llm = CapturingToolsLLM()
+    runtime = AgentRuntime(
+        session=db_session,
+        llm=llm,
+        tool_executor=ToolExecutor(
+            registry=WorkflowRegistry(),
+            event_sink=ListEventSink(),
+            runtime_tools={"skill.invoke": SkillInvokeTool({})},
+        ),
+        event_sink=ListEventSink(),
+    )
+
+    await runtime.run_conversation(conversation.id, model="claude-test")
+
+    assert "skill.invoke" in {tool["name"] for tool in llm.tools}
 
 
 @pytest.mark.asyncio

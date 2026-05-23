@@ -372,6 +372,7 @@ async def test_agent_loop_delegates_to_agent_runtime_v3_when_enabled(monkeypatch
     assert delegated is True
     assert calls[0][0] == "init"
     assert calls[0][1]["session"] == "session"
+    assert "skill.invoke" in calls[0][1]["tool_executor"].runtime_tools
     assert calls[1] == ("run", {"conversation_id": 123, "model": "model"})
 
 

@@ -161,6 +161,24 @@ class ToolExecutor:
             tool_result_block=block,
         )
 
+    def list_anthropic_tools(self, allowed_tools: list[str] | None = None) -> list[dict[str, Any]]:
+        schemas_by_name: dict[str, dict[str, Any]] = {}
+        for schema in self.registry.list_anthropic_tools(allowed_tools):
+            name = schema.get("name")
+            if isinstance(name, str):
+                schemas_by_name[name] = schema
+
+        allowed = set(allowed_tools or [])
+        for name, runtime_tool in self.runtime_tools.items():
+            if allowed and name not in allowed:
+                continue
+            definition = getattr(runtime_tool, "definition", None)
+            if definition is None:
+                continue
+            schema = definition.anthropic_schema()
+            schemas_by_name[name] = schema
+        return [schemas_by_name[name] for name in sorted(schemas_by_name)]
+
     def _definition_or_none(self, name: str) -> Any | None:
         try:
             return self.registry.definition(name)

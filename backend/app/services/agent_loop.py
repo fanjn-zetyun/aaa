@@ -15,6 +15,7 @@ from sqlalchemy import select
 from app.agent_runtime.events import CallbackEventSink
 from app.agent_runtime.llm import LLMAdapter
 from app.agent_runtime.runtime import AgentRuntime
+from app.agent_runtime.skills import SkillInvokeTool
 from app.agent_runtime.tool_executor import ToolExecutor
 from app.core.database import SessionLocal
 from app.models import Conversation, ConversationMessage, LLMConfig
@@ -175,7 +176,11 @@ class AgentLoopManager:
             runtime = AgentRuntime(
                 session=session,
                 llm=LLMAdapter(config),
-                tool_executor=ToolExecutor(registry=self._tools, event_sink=event_sink),
+                tool_executor=ToolExecutor(
+                    registry=self._tools,
+                    event_sink=event_sink,
+                    runtime_tools={"skill.invoke": SkillInvokeTool(self._skills)},
+                ),
                 event_sink=event_sink,
             )
             await runtime.run_conversation(conversation_id, model=config.model)

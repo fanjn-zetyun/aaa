@@ -155,7 +155,7 @@ class AgentRuntime:
         )
 
     def _tool_schemas(self, state: RuntimeState) -> list[dict[str, Any]]:
-        return self.tool_executor.registry.list_anthropic_tools(state.allowed_tools)
+        return self.tool_executor.list_anthropic_tools(state.allowed_tools)
 
 
 def _current_workflow_step_status(state: RuntimeState) -> str:

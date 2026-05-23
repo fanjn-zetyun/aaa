@@ -67,6 +67,9 @@ class FakeRegistry:
         allowed = set(allowed_tools or [])
         return [item for item in self.definitions.values() if not allowed or item.name in allowed]
 
+    def list_anthropic_tools(self, allowed_tools=None):
+        return [item.anthropic_schema() for item in self.list_definitions(allowed_tools)]
+
     def confirmation_for(self, name, tool_input):
         return None
 
@@ -180,3 +183,16 @@ async def test_tool_executor_returns_unresolved_template_as_tool_result():
     assert result.tool_result.metadata["unresolved_variables"] == [
         "workflow_resources.gpu.server_id"
     ]
+
+
+def test_tool_executor_lists_runtime_tool_schema_when_allowed():
+    executor = ToolExecutor(
+        registry=FakeRegistry(),
+        event_sink=ListEventSink(),
+        runtime_tools={"skill.invoke": SkillInvokeTool({})},
+    )
+
+    schemas = executor.list_anthropic_tools(["skill.invoke"])
+
+    assert [schema["name"] for schema in schemas] == ["skill.invoke"]
+    assert schemas[0]["input_schema"]["required"] == ["skill"]
