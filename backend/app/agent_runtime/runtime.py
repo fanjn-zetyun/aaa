@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent_runtime.context import ContextBuilder
 from app.agent_runtime.events import EventSink, ListEventSink
 from app.agent_runtime.llm import LLMAdapter, ModelRequest
 from app.agent_runtime.messages import MessageStore
@@ -34,6 +35,7 @@ class AgentRuntime:
         self.llm = llm
         self.tool_executor = tool_executor
         self.event_sink = event_sink
+        self.context_builder = ContextBuilder()
 
     @classmethod
     def for_test(cls, *, session: AsyncSession, llm, event_sink: EventSink | None = None) -> AgentRuntime:
@@ -62,7 +64,7 @@ class AgentRuntime:
             messages = await store.build_model_messages(conversation_id)
             response = await self.llm.complete(
                 ModelRequest(
-                    system=_system_prompt(state),
+                    system=self.context_builder.build_system_prompt(state),
                     messages=messages,
                     tools=[item for item in self._tool_schemas(state)],
                     max_tokens=state.token_budget["planning"],
@@ -120,10 +122,3 @@ class AgentRuntime:
 
     def _tool_schemas(self, state: RuntimeState) -> list[dict[str, Any]]:
         return self.tool_executor.registry.list_anthropic_tools(state.allowed_tools)
-
-
-def _system_prompt(state: RuntimeState) -> str:
-    return (
-        "你是 LOBSTER Agent Runtime。所有副作用必须通过后端 Tool 执行。"
-        f"当前 run_id：{state.run_id}。"
-    )
