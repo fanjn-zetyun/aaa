@@ -251,13 +251,16 @@ export default function ChatPage() {
       });
       return;
     }
-    if (payload.type === "assistant_delta" && payload.delta) {
+    if (payload.type === "assistant_delta") {
       setMessages((prev) => {
         const { messages: next, id } = ensureActiveAgentMessage(prev, payload);
         activeAgentMessageIdRef.current = id;
         return next.map((msg) =>
           msg.id === id
-            ? mergeRunStateIntoMessage({ ...msg, content: `${msg.content}${payload.delta}` }, payload)
+            ? mergeRunStateIntoMessage(
+                { ...msg, content: payload.delta ? `${msg.content}${payload.delta}` : msg.content },
+                payload
+              )
             : msg
         );
       });

@@ -340,6 +340,42 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
   });
 
+  it("merges skill evidence from assistant delta without text into the active agent bubble", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "assistant_started",
+        run_id: "run-delta-state-only",
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "assistant_delta",
+        run_id: "run-delta-state-only",
+        skill_selection_source: "model",
+        skill_selection: {
+          selected_skill: "lab4ai-auto-reproduct",
+          model_choice: "lab4ai-auto-reproduct",
+          fallback_choice: null,
+          reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+          confidence: null,
+          error: null,
+        },
+        workflow_path: "skills/lab4ai-auto-reproduct/project_reproduce.yaml",
+      });
+    });
+
+    expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    expect(screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")).toBeInTheDocument();
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+  });
+
   it("updates inferred workflow path when a later stream payload includes explicit workflow path", async () => {
     renderChat();
 
