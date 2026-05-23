@@ -279,6 +279,10 @@ export default function ChatPage() {
       return;
     }
     if (payload.type === "progress") {
+      if (payload.stage === "skill_selection") {
+        updateSkillSelection(payload);
+        return;
+      }
       appendTimelineEvent(payload, {
         id: `progress-${payload.stage || "general"}`,
         title: progressTitle(payload.stage, payload.content),
@@ -291,22 +295,10 @@ export default function ChatPage() {
     }
     if (payload.type === "workflow_loaded") {
       updateWorkflowBoard(payload);
-      appendTimelineEvent(payload, {
-        id: "workflow-loaded",
-        title: "工作流已加载",
-        content: "开始执行全自动复现流水线。",
-        created_at: payload.timestamp || new Date().toISOString(),
-        status: "done",
-        kind: "execution",
-      });
       return;
     }
     if (payload.type.startsWith("workflow_step_") && payload.step) {
       updateWorkflowBoard(payload);
-      const timelineEvent = workflowTimelineEvent(payload);
-      if (timelineEvent) {
-        appendTimelineEvent(payload, timelineEvent);
-      }
       return;
     }
     if (payload.type === "workflow_cleanup_started" || payload.type === "workflow_cleanup_completed") {
@@ -360,6 +352,14 @@ export default function ChatPage() {
     if (payload.type === "message" && payload.message) {
       appendPersistedMessage(payload.message);
     }
+  }
+
+  function updateSkillSelection(payload: StreamPayload) {
+    setMessages((prev) => {
+      const { messages: next, id } = ensureActiveAgentMessage(prev, payload);
+      activeAgentMessageIdRef.current = id;
+      return next.map((msg) => (msg.id === id ? mergeRunStateIntoMessage(msg, payload) : msg));
+    });
   }
 
   function updateWorkflowBoard(payload: StreamPayload) {
@@ -993,84 +993,6 @@ function workflowPathFromSelection(selection?: SkillSelectionState, payloadPath?
     return "skills/lab4ai-auto-reproduct/project_reproduce.yaml";
   }
   return null;
-}
-
-function workflowTimelineEvent(payload: StreamPayload): TimelineEvent | undefined {
-  if (!payload.step) return undefined;
-  const createdAt = payload.timestamp || new Date().toISOString();
-  const base = {
-    id: `workflow-${payload.type}-${payload.step.id}`,
-    created_at: createdAt,
-    kind: "execution" as const,
-  };
-
-  if (payload.type === "workflow_step_started") {
-    return {
-      ...base,
-      title: `启动 ${payload.step.id}`,
-      content: payload.step.name,
-      status: "running",
-    };
-  }
-  if (payload.type === "workflow_step_progress") {
-    return {
-      ...base,
-      id: `workflow-progress-${payload.step.id}-${payload.seq || createdAt}`,
-      title: `${payload.step.id} 进展`,
-      content: workflowProgressContent(payload.content) || payload.step.name,
-      status: "info",
-    };
-  }
-  if (payload.type === "workflow_step_waiting") {
-    return {
-      ...base,
-      title: `${payload.step.id} 等待确认`,
-      content: payload.step.name,
-      status: "info",
-    };
-  }
-  if (payload.type === "workflow_step_completed") {
-    return {
-      ...base,
-      title: `${payload.step.id} 完成`,
-      content: workflowStepDetail(payload.step),
-      status: "done",
-    };
-  }
-  if (payload.type === "workflow_step_failed") {
-    return {
-      ...base,
-      title: `${payload.step.id} 失败`,
-      content: workflowStepDetail(payload.step),
-      status: "error",
-    };
-  }
-  if (payload.type === "workflow_step_recovery_started") {
-    return {
-      ...base,
-      title: `${payload.step.id} 开始自主修复`,
-      content: payload.step.name,
-      status: "running",
-    };
-  }
-  if (payload.type === "workflow_step_recovery_progress") {
-    return {
-      ...base,
-      id: `workflow-recovery-${payload.step.id}-${payload.seq || createdAt}`,
-      title: `${payload.step.id} 修复进展`,
-      content: workflowProgressContent(payload.content) || payload.step.name,
-      status: "info",
-    };
-  }
-  if (payload.type === "workflow_step_recovery_exhausted") {
-    return {
-      ...base,
-      title: `${payload.step.id} 修复耗尽`,
-      content: workflowStepDetail(payload.step),
-      status: "error",
-    };
-  }
-  return undefined;
 }
 
 function mergeWorkflowState(

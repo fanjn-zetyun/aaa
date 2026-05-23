@@ -758,7 +758,7 @@ describe("ChatPage", () => {
     expect(screen.queryByText("未选择")).not.toBeInTheDocument();
   });
 
-  it("renders streamed assistant deltas, tool timeline, and skill workflow board in one round", async () => {
+  it("renders skill selection and workflow updates without a noisy process timeline", async () => {
     renderChat();
 
     await waitFor(() => {
@@ -771,15 +771,28 @@ describe("ChatPage", () => {
         type: "progress",
         run_id: "run-1",
         stage: "skill_selection",
-        content: "已选择 skill：lab4ai-auto-reproduct。",
+        content: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        skill_selection_source: "model",
+        skill_selection: {
+          selected_skill: "lab4ai-auto-reproduct",
+          source: "model",
+          model_choice: "lab4ai-auto-reproduct",
+          fallback_choice: null,
+          reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+          confidence: null,
+          error: null,
+        },
+        workflow_path: "skills/lab4ai-auto-reproduct/project_reproduce.yaml",
         timestamp: "2026-05-20T00:00:01Z",
       });
       ws.emit({
         seq: 2,
         type: "workflow_loaded",
         run_id: "run-1",
+        workflow_path: "skills/lab4ai-auto-reproduct/project_reproduce.yaml",
         workflow: {
           name: "Lab4AI_Auto_Reproduction_Pipeline",
+          project_name: "PhotoDoodle",
           steps: [
             { id: "step_1_audit", name: "项目与论文双重审计", status: "running" },
           ],
@@ -802,28 +815,6 @@ describe("ChatPage", () => {
       });
       ws.emit({
         seq: 4,
-        type: "tool_started",
-        run_id: "run-1",
-        tool_name: "analyze_repo",
-        tool_input: { github_url: "https://github.com/showlab/PhotoDoodle" },
-        timestamp: "2026-05-20T00:00:02Z",
-      });
-      ws.emit({
-        seq: 5,
-        type: "tool_completed",
-        run_id: "run-1",
-        tool_name: "analyze_repo",
-        ok: true,
-        message: {
-          id: 2,
-          role: "tool",
-          content: "已识别仓库 showlab/PhotoDoodle。",
-          message_metadata: { tool_name: "analyze_repo", ok: true },
-          created_at: "2026-05-20T00:00:03Z",
-        },
-      });
-      ws.emit({
-        seq: 6,
         type: "workflow_step_completed",
         run_id: "run-1",
         workflow_step_id: "step_1_audit",
@@ -832,6 +823,7 @@ describe("ChatPage", () => {
           name: "项目与论文双重审计",
           status: "completed",
           output: "score=75；已完成项目与论文审计的 MVP 记录。",
+          progress: ["Invoking tool: analyze_repo", "Tool completed: analyze_repo"],
           tool_calls: [
             {
               tool_call_id: "tool-1",
@@ -844,31 +836,36 @@ describe("ChatPage", () => {
         timestamp: "2026-05-20T00:00:03Z",
       });
       ws.emit({
-        seq: 7,
+        seq: 5,
         type: "assistant_started",
         run_id: "run-1",
         timestamp: "2026-05-20T00:00:04Z",
       });
       ws.emit({
-        seq: 8,
+        seq: 6,
         type: "assistant_delta",
         run_id: "run-1",
         delta: "工具执行结果如下\n| 序号 | 执行步骤 | 当前状态 | 核心产出 / 详情 |\n| --- | --- | --- | --- |\n| 1 | `step_1_audit`: 项目与论文双重审计 | ✅ 完成 | score=75 |\n最终结论：仓库审计已完成，下一步需要创建 CPU 实例。",
       });
     });
 
-    expect(await screen.findByText("执行过程")).toBeInTheDocument();
-    expect(screen.getByText("思考过程")).toBeInTheDocument();
-    expect(screen.getByText("工作流已加载")).toBeInTheDocument();
+    expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    expect(
+      screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
+    ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })).toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByText("执行过程与结果")).toBeInTheDocument();
     expect(screen.getAllByText(/项目与论文双重审计/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("完成").length).toBeGreaterThan(0);
     expect(screen.getAllByText("正在分析仓库。").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("分析仓库完成。").length).toBeGreaterThan(0);
     expect(screen.getAllByText("分析 GitHub 仓库").length).toBeGreaterThan(0);
-    expect(screen.getByText("选择复现流程")).toBeInTheDocument();
-    expect(screen.getByText("已识别仓库 showlab/PhotoDoodle。")).toBeInTheDocument();
+    expect(screen.getAllByText("score=75；已完成项目与论文审计的 MVP 记录。").length).toBeGreaterThan(0);
+    expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+    expect(screen.queryByText("执行过程")).not.toBeInTheDocument();
+    expect(screen.queryByText("工作流已加载")).not.toBeInTheDocument();
+    expect(screen.queryByText("选择复现流程")).not.toBeInTheDocument();
     expect(screen.getByText("最终结论：仓库审计已完成，下一步需要创建 CPU 实例。")).toBeInTheDocument();
 
     const finalAnswer = screen.getByText("最终回答").parentElement;
