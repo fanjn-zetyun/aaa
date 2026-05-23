@@ -298,6 +298,42 @@ async def test_safe_skill_selection_evidence_drops_nested_values():
     }
 
 
+async def test_safe_skill_selection_evidence_redacts_model_call_failure_reason():
+    evidence = _safe_skill_selection_evidence(
+        {
+            "selected_skill": "lab4ai-auto-reproduct",
+            "source": "fallback",
+            "error": "model_call_failed",
+            "reason": (
+                "Model skill selection failed; selected fallback. Error: "
+                "RuntimeError: https://secret.example/token abc123"
+            ),
+        }
+    )
+
+    assert evidence == {
+        "selected_skill": "lab4ai-auto-reproduct",
+        "source": "fallback",
+        "error": "model_call_failed",
+        "reason": "Model skill selection failed; selected fallback.",
+    }
+
+
+async def test_safe_skill_selection_evidence_drops_non_finite_float_and_caps_strings():
+    evidence = _safe_skill_selection_evidence(
+        {
+            "selected_skill": "x" * 600,
+            "source": "model",
+            "confidence": float("nan"),
+        }
+    )
+
+    assert evidence == {
+        "selected_skill": "x" * 500,
+        "source": "model",
+    }
+
+
 async def test_model_or_fallback_retries_with_lower_token_budget(monkeypatch):
     seen_tokens: list[int] = []
 

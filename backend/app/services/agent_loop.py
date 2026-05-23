@@ -6,6 +6,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+import math
 import re
 from uuid import uuid4
 
@@ -1240,6 +1241,8 @@ _SAFE_SKILL_SELECTION_KEYS = {
     "confidence",
     "error",
 }
+_SAFE_SKILL_SELECTION_STRING_MAX_LENGTH = 500
+_MODEL_CALL_FAILED_SAFE_REASON = "Model skill selection failed; selected fallback."
 
 
 def _safe_skill_selection_evidence(selection: object) -> dict[str, object | None] | None:
@@ -1250,7 +1253,16 @@ def _safe_skill_selection_evidence(selection: object) -> dict[str, object | None
         if key not in selection:
             continue
         value = selection.get(key)
-        if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
+        if isinstance(value, str):
+            if key == "reason" and selection.get("error") == "model_call_failed":
+                evidence[key] = _MODEL_CALL_FAILED_SAFE_REASON
+            else:
+                evidence[key] = value[:_SAFE_SKILL_SELECTION_STRING_MAX_LENGTH]
+        elif value is None or isinstance(value, (int, bool)):
+            evidence[key] = value
+        elif isinstance(value, float):
             evidence[key] = value
     return evidence
 
