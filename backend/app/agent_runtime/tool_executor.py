@@ -6,6 +6,7 @@ from typing import Any
 from app.agent_runtime.events import EventSink
 from app.agent_runtime.state import RuntimeState
 from app.agent_runtime.tool_protocol import RegistryToolAdapter
+from app.agent_runtime.workflows.rendering import render_runtime_templates
 from app.services.llm_client import LLMToolUse
 from app.services.tools import ToolExecutionContext, ToolResult
 
@@ -65,8 +66,23 @@ class ToolExecutor:
             )
             return self._as_executed(tool_call, result)
 
+        rendered = render_runtime_templates(tool_call.input, _template_context(state))
+        if not rendered.ok:
+            result = ToolResult(
+                tool_call.name,
+                f"工具参数存在未解析模板变量：{', '.join(rendered.unresolved_variables)}",
+                ok=False,
+                metadata={
+                    "error_code": rendered.error_code,
+                    "unresolved_variables": rendered.unresolved_variables,
+                    "retryable": True,
+                },
+            )
+            return self._as_executed(tool_call, result)
+        tool_input = rendered.value
+
         adapter = RegistryToolAdapter(definition)
-        validation = adapter.validate_input(tool_call.input)
+        validation = adapter.validate_input(tool_input)
         if not validation.ok:
             result = ToolResult(
                 tool_call.name,
@@ -77,7 +93,7 @@ class ToolExecutor:
             return self._as_executed(tool_call, result)
 
         tool_input = {
-            **tool_call.input,
+            **tool_input,
             "workflow_run_id": state.run_id,
             "tool_call_id": tool_call.id,
             "workflow_step_id": _workflow_step_id(state),
@@ -156,3 +172,11 @@ def _workflow_step_id(state: RuntimeState) -> str | None:
     workflow = state.active_workflow or {}
     current = workflow.get("current_step_id")
     return str(current) if current else None
+
+
+def _template_context(state: RuntimeState) -> dict[str, Any]:
+    return {
+        "parameters": (state.active_skill or {}).get("args") or {},
+        "workflow_resources": (state.active_workflow or {}).get("resources") or {},
+        "workflow_results": (state.active_workflow or {}).get("results") or {},
+    }

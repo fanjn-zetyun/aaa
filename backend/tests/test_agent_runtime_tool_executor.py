@@ -138,3 +138,45 @@ async def test_tool_executor_executes_runtime_tool_before_registry_lookup(tmp_pa
         "content": "Launching skill: demo-skill",
         "is_error": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_renders_runtime_templates_before_registry_invoke():
+    state = RuntimeState.new(conversation_id=1, model="claude-test")
+    state.allowed_tools = ["ask_user"]
+    state.active_skill = {"args": {"question": "继续执行吗？"}}
+    executor = ToolExecutor(registry=FakeRegistry(), event_sink=ListEventSink())
+
+    result = await executor.execute_one(
+        LLMToolUse(
+            id="toolu_1",
+            name="ask_user",
+            input={"question": "{{parameters.question}}"},
+        ),
+        state=state,
+    )
+
+    assert result.tool_result.ok is True
+    assert result.tool_result.metadata["echo"]["question"] == "继续执行吗？"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_returns_unresolved_template_as_tool_result():
+    state = RuntimeState.new(conversation_id=1, model="claude-test")
+    state.allowed_tools = ["ask_user"]
+    executor = ToolExecutor(registry=FakeRegistry(), event_sink=ListEventSink())
+
+    result = await executor.execute_one(
+        LLMToolUse(
+            id="toolu_1",
+            name="ask_user",
+            input={"question": "{{workflow_resources.gpu.server_id}}"},
+        ),
+        state=state,
+    )
+
+    assert result.tool_result.ok is False
+    assert result.tool_result.metadata["error_code"] == "unresolved_template_variable"
+    assert result.tool_result.metadata["unresolved_variables"] == [
+        "workflow_resources.gpu.server_id"
+    ]
