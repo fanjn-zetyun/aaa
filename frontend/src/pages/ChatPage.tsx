@@ -1085,6 +1085,15 @@ function workflowStepStatusClass(status: string) {
   return "border-slate-100 bg-slate-50 text-slate-500";
 }
 
+function workflowStepNumberClass(status: string) {
+  if (status === "completed") return "border-emerald-200 bg-emerald-500 text-white";
+  if (status === "running") return "border-blue-200 bg-blue-500 text-white";
+  if (status === "waiting_for_user") return "border-amber-200 bg-amber-500 text-white";
+  if (status === "failed") return "border-red-200 bg-red-500 text-white";
+  if (status === "skipped") return "border-slate-200 bg-slate-200 text-slate-500";
+  return "border-slate-200 bg-white text-slate-500";
+}
+
 function workflowStepDetail(step: WorkflowStepState) {
   const detail =
     step.output ||
@@ -1338,112 +1347,114 @@ function WorkflowBoard({ workflow }: { workflow: WorkflowState }) {
   const completedCount = steps.filter((step) => step.status === "completed").length;
   return (
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
         <div className="min-w-0">
           <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
-            执行看板
+            Project Reproduction Workflow
           </div>
-          <h3 className="truncate text-md-h3 font-semibold text-slate-800">
-            复现流水线实时看板: {workflow.project_name || "项目"}
+          <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
+            {workflow.project_name || "项目"} 复现流水线
           </h3>
+          <p className="mt-1 text-ui-small text-slate-500">
+            按 YAML workflow step 展示当前复现运行状态、进度和工具调用。
+          </p>
         </div>
         <span className="shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-ui-micro font-medium text-slate-500">
           {completedCount}/{steps.length} 完成
         </span>
       </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full table-fixed border-collapse text-ui-small">
-          <thead className="bg-white">
-            <tr className="border-b border-slate-100 text-left text-slate-500">
-              <th className="w-14 px-4 py-3 font-semibold">序号</th>
-              <th className="w-[34%] px-4 py-3 font-semibold">执行步骤</th>
-              <th className="w-32 px-4 py-3 font-semibold">当前状态</th>
-              <th className="px-4 py-3 font-semibold">执行过程与结果</th>
-            </tr>
-          </thead>
-          <tbody>
-            {steps.map((step, index) => {
-              const template = REPRO_WORKFLOW_STEPS.find((item) => item.id === step.id);
-              const name = step.name || template?.name || step.id;
-              return (
-                <tr key={step.id} className="border-b border-slate-100 last:border-b-0">
-                  <td className="px-4 py-3 align-top text-slate-500">{index + 1}</td>
-                  <td className="px-4 py-3 align-top">
-                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                      <code className="rounded bg-slate-100 px-1.5 py-0.5 text-ui-small font-semibold text-slate-700">
-                        {step.id}
-                      </code>
-                      <span className="break-words font-medium text-slate-700">{name}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 align-top">
-                    <span
-                      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-ui-micro font-medium ${workflowStepStatusClass(
-                        step.status
-                      )}`}
-                    >
-                      {workflowStepStatusLabel(step.status)}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 align-top text-slate-600">
-                    <WorkflowStepRuntime step={step} />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="divide-y divide-slate-100">
+        {steps.map((step, index) => (
+          <WorkflowStepRow
+            key={step.id}
+            step={step}
+            index={index}
+            isCurrent={workflow.current_step_id === step.id}
+          />
+        ))}
       </div>
     </section>
   );
 }
 
-function WorkflowStepRuntime({ step }: { step: WorkflowStepState }) {
+function WorkflowStepRow({
+  step,
+  index,
+  isCurrent,
+}: {
+  step: WorkflowStepState;
+  index: number;
+  isCurrent: boolean;
+}) {
+  const template = REPRO_WORKFLOW_STEPS.find((item) => item.id === step.id);
+  const name = step.name || template?.name || step.id;
   const progressItems = (step.progress || []).slice(-3);
-  const toolCalls = (step.tool_calls || []).slice(-3);
+  const toolCalls = (step.tool_calls || []).slice(0, 4);
   const outcome = workflowStepOutcome(step);
   const startLabel = workflowStepStartLabel(step);
-  const hasDetails = progressItems.length > 0 || toolCalls.length > 0 || !!outcome;
-
-  if (!hasDetails) {
-    return <span className="break-words">{workflowStepDetail(step)}</span>;
-  }
+  const defaultOpen = isCurrent || ["running", "failed", "waiting_for_user"].includes(step.status);
 
   return (
-    <div className="space-y-2">
-      {startLabel && <div className="text-ui-small text-slate-500">{startLabel}</div>}
-      {progressItems.length > 0 && (
-        <div className="space-y-1">
-          {progressItems.map((item, index) => (
-            <div key={`${step.id}-progress-${index}`} className="flex gap-2 text-ui-small text-slate-500">
-              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
-              <span className="break-words">{workflowProgressContent(item) || item}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {toolCalls.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {toolCalls.map((call, index) => (
+    <details className="group" open={defaultOpen}>
+      <summary className="flex cursor-pointer list-none gap-3 px-4 py-3 hover:bg-slate-50">
+        <span
+          className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-ui-micro font-semibold ${workflowStepNumberClass(
+            step.status
+          )}`}
+        >
+          {index + 1}
+        </span>
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="break-words font-medium text-slate-800">{name}</span>
+            <code className="rounded bg-slate-100 px-1.5 py-0.5 text-ui-small font-semibold text-slate-600">
+              {step.id}
+            </code>
             <span
-              key={call.tool_call_id || `${step.id}-tool-${index}`}
-              className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
-                call
+              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-ui-micro font-medium ${workflowStepStatusClass(
+                step.status
               )}`}
-              title={call.error || undefined}
             >
-              <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
-              <span>{toolCallStatusLabel(call)}</span>
+              {workflowStepStatusLabel(step.status)}
             </span>
-          ))}
+          </div>
+          {outcome && <div className="break-words text-ui-small text-slate-600">{outcome}</div>}
         </div>
-      )}
-      {outcome && (
-        <div className={`rounded-lg border px-2.5 py-2 text-ui-small ${workflowOutcomeClass(step.status)}`}>
-          {outcome}
-        </div>
-      )}
-    </div>
+        <ChevronIcon className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="space-y-3 px-14 pb-4 text-ui-small">
+        {startLabel && <div className="text-slate-500">{startLabel}</div>}
+        {progressItems.length > 0 && (
+          <div className="space-y-1.5">
+            {progressItems.map((item, progressIndex) => (
+              <div key={`${step.id}-progress-${progressIndex}`} className="flex gap-2 text-slate-500">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+                <span className="break-words">{workflowProgressContent(item) || item}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {toolCalls.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {toolCalls.map((call, toolIndex) => (
+              <span
+                key={call.tool_call_id || `${step.id}-tool-${toolIndex}`}
+                className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
+                  call
+                )}`}
+                title={call.error || undefined}
+              >
+                <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
+                <span>{toolCallStatusLabel(call)}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        {!startLabel && progressItems.length === 0 && toolCalls.length === 0 && !outcome && (
+          <div className="text-slate-500">{workflowStepDetail(step)}</div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -1477,14 +1488,6 @@ function workflowValidationFailureText(step: WorkflowStepState) {
   if (typeof reason === "string") return reason;
   if (reason !== undefined) return String(reason);
   return "";
-}
-
-function workflowOutcomeClass(status: string) {
-  if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
-  if (status === "failed") return "border-red-100 bg-red-50 text-red-700";
-  if (status === "waiting_for_user") return "border-amber-100 bg-amber-50 text-amber-700";
-  if (status === "running") return "border-blue-100 bg-blue-50 text-blue-700";
-  return "border-slate-100 bg-slate-50 text-slate-500";
 }
 
 function toolCallStatusLabel(call: WorkflowToolCall) {

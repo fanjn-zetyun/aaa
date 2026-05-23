@@ -853,9 +853,10 @@ describe("ChatPage", () => {
     expect(
       screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })).toBeInTheDocument();
-    expect(screen.getByRole("table")).toBeInTheDocument();
-    expect(screen.getByText("执行过程与结果")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "PhotoDoodle 复现流水线" })).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.getByText("Project Reproduction Workflow")).toBeInTheDocument();
+    expect(screen.getByText("1/9 完成")).toBeInTheDocument();
     expect(screen.getAllByText(/项目与论文双重审计/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("完成").length).toBeGreaterThan(0);
     expect(screen.getAllByText("正在分析仓库。").length).toBeGreaterThan(0);
@@ -975,12 +976,70 @@ describe("ChatPage", () => {
     renderChat();
 
     expect(await screen.findByText("等待你确认")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "PhotoDoodle 复现流水线" })).toBeInTheDocument();
     expect(screen.getAllByText("等待确认").length).toBeGreaterThan(0);
     expect(screen.getByText("需要你确认后继续。")).toBeInTheDocument();
     expect(screen.getByText("需要确认后才能创建 CPU 实例。")).toBeInTheDocument();
     expect(screen.getAllByText("创建 Lab4AI 实例").length).toBeGreaterThan(0);
     expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
+  });
+
+  it("shows workflow steps as a vertical run card with the current step expanded", async () => {
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_current_step_id: "step_4_cpu_env_setup",
+      workflow_results: { repo_name: "motion-guided-flow" },
+      workflow_steps: [
+        {
+          id: "step_1_audit",
+          name: "Repository and paper audit",
+          status: "completed",
+          output: "Audit completed: repo structure and baseline notes captured.",
+        },
+        {
+          id: "step_4_cpu_env_setup",
+          name: "CPU environment setup",
+          status: "running",
+          output: "Preparing CPU workspace for motion-guided-flow.",
+          progress: [
+            "Start step: CPU environment setup",
+            "Invoking tool: ssh_execute",
+            "Installing dependencies on CPU instance.",
+            "Tool completed: lab4ai_project_prep",
+          ],
+          tool_calls: [
+            {
+              tool_call_id: "tool-ssh",
+              name: "ssh_execute",
+              status: "completed",
+              ok: true,
+            },
+            {
+              tool_call_id: "tool-prep",
+              name: "lab4ai_project_prep",
+              status: "running",
+            },
+          ],
+        },
+      ],
+    };
+
+    renderChat();
+
+    expect(
+      await screen.findByRole("heading", { name: "motion-guided-flow 复现流水线" })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.getByText("1/9 完成")).toBeInTheDocument();
+    expect(screen.getByText("step_1_audit")).toBeInTheDocument();
+    expect(
+      screen.getByText("Audit completed: repo structure and baseline notes captured.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("step_4_cpu_env_setup")).toBeInTheDocument();
+    expect(screen.getByText("Preparing CPU workspace for motion-guided-flow.")).toBeInTheDocument();
+    expect(screen.getByText("Installing dependencies on CPU instance.")).toBeInTheDocument();
+    expect(screen.getByText("执行远程命令")).toBeInTheDocument();
+    expect(screen.getByText("lab4ai_project_prep")).toBeInTheDocument();
   });
 
   it("ignores replayed websocket events by seq", async () => {
