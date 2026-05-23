@@ -402,7 +402,7 @@ class SkillWorkflowRunner:
                 outputs,
                 False,
             )
-        if handled and step.id not in FIXED_EXECUTOR_STEPS:
+        if handled:
             return (
                 mark_workflow_step(
                     metadata,
@@ -996,10 +996,7 @@ class SkillWorkflowRunner:
         metadata: dict,
         step: WorkflowStep,
     ) -> tuple[dict, list[str], bool, bool, bool]:
-        if self.run_step_model_tools is None or step.id not in {
-            "step_4_cpu_env_setup",
-            "step_7_gpu_execution",
-        }:
+        if self.run_step_model_tools is None:
             return metadata, [], False, False, False
         result = await self.run_step_model_tools(metadata, step)
         if len(result) == 4:

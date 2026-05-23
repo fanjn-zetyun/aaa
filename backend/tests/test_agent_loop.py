@@ -9,6 +9,7 @@ from app.services.llm_client import LLMRuntimeConfig, LLMToolResponse, LLMToolUs
 from app.services.skill_selector import SkillSelectionResult
 from app.services.skills import SkillDefinition
 from app.services.tools import ToolResult
+from app.services.workflow import workflow_step_state
 
 
 pytestmark = pytest.mark.asyncio
@@ -658,6 +659,147 @@ async def test_step_model_tool_use_executes_allowed_tool(monkeypatch):
         )
     ]
     assert [tool["name"] for tool in seen_tools[0]] == ["analyze_repo"]
+    step_state = workflow_step_state(metadata, "step_4_cpu_env_setup")
+    assert step_state["tool_calls"][0]["name"] == "analyze_repo"
+    assert step_state["tool_calls"][0]["status"] == "completed"
+    assert step_state["tool_calls"][0]["ok"] is True
+
+
+async def test_step_model_tool_use_records_resource_evidence(monkeypatch):
+    manager = AgentLoopManager()
+    call_count = 0
+
+    async def fake_tool_use(config, *, system, messages, tools):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            return LLMToolResponse(
+                text="CPU 实例创建完成。",
+                tool_calls=[],
+                stop_reason="end_turn",
+                raw={},
+            )
+        return LLMToolResponse(
+            text="按 workflow instruction 创建 CPU 实例。",
+            tool_calls=[
+                LLMToolUse(
+                    id="toolu-cpu",
+                    name="lab4ai_create_instance",
+                    input={"resource_kind": "CPU", "cpu_cores": 2},
+                )
+            ],
+            stop_reason="tool_use",
+            raw={},
+        )
+
+    async def fake_invoke(conversation_id, metadata, tool_name, tool_input):
+        return (
+            ToolResult(tool_name, "cpu ok", metadata={"server_id": "cpu-from-model"}),
+            metadata,
+            False,
+        )
+
+    monkeypatch.setattr("app.services.agent_loop.call_anthropic_compatible_tool_use", fake_tool_use)
+    monkeypatch.setattr(manager, "_invoke_tool_with_policy", fake_invoke)
+    config = LLMRuntimeConfig(
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        model="model",
+        max_tokens=4096,
+    )
+    step = type(
+        "Step",
+        (),
+        {
+            "id": "step_3_deploy_cpu",
+            "name": "CPU",
+            "instruction": "调用 `lab4ai-instance-manage (创建)` 申请 1台 CPU 实例(2核)。",
+            "expected_output": "成功获取 CPU 实例的 SSH 信息。",
+        },
+    )()
+
+    metadata, outputs, paused, handled, failed = await manager._run_step_model_tool_use(
+        1,
+        {
+            "workflow_run_id": "run-1",
+            "workflow_steps": [
+                {
+                    "id": "step_3_deploy_cpu",
+                    "allowed_tools": ["lab4ai_create_instance"],
+                }
+            ],
+        },
+        step,
+        config,
+        system="system",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert paused is False
+    assert handled is True
+    assert failed is False
+    assert outputs == ["lab4ai_create_instance: cpu ok"]
+    assert metadata["workflow_resources"]["cpu"]["server_id"] == "cpu-from-model"
+    step_state = workflow_step_state(metadata, "step_3_deploy_cpu")
+    assert step_state["tool_calls"][0]["name"] == "lab4ai_create_instance"
+    assert step_state["tool_calls"][0]["status"] == "completed"
+    assert step_state["evidence"]["cpu_instance_created"] is True
+    assert step_state["evidence"]["completion_source"] == "model_tool_use"
+
+
+async def test_step_model_tool_use_fails_when_model_omits_required_tool(monkeypatch):
+    manager = AgentLoopManager()
+
+    async def fake_tool_use(config, *, system, messages, tools):
+        return LLMToolResponse(
+            text="我将稍后创建实例。",
+            tool_calls=[],
+            stop_reason="end_turn",
+            raw={},
+        )
+
+    monkeypatch.setattr("app.services.agent_loop.call_anthropic_compatible_tool_use", fake_tool_use)
+    config = LLMRuntimeConfig(
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        model="model",
+        max_tokens=4096,
+    )
+    step = type(
+        "Step",
+        (),
+        {
+            "id": "step_3_deploy_cpu",
+            "name": "CPU",
+            "instruction": "调用 `lab4ai-instance-manage (创建)` 申请 1台 CPU 实例(2核)。",
+            "expected_output": "成功获取 CPU 实例的 SSH 信息。",
+        },
+    )()
+
+    metadata, outputs, paused, handled, failed = await manager._run_step_model_tool_use(
+        1,
+        {
+            "workflow_run_id": "run-1",
+            "workflow_steps": [
+                {
+                    "id": "step_3_deploy_cpu",
+                    "allowed_tools": ["lab4ai_create_instance"],
+                }
+            ],
+        },
+        step,
+        config,
+        system="system",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert paused is False
+    assert handled is False
+    assert failed is True
+    assert "未调用当前 step 允许的任何 Tool" in outputs[0]
+    assert "workflow_resources" not in metadata
 
 
 async def test_step_model_tool_use_fills_workflow_resource_context(monkeypatch):

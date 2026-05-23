@@ -7,10 +7,13 @@ from app.services.conversation_memory import mark_running, resolve_pending_user_
 from app.services.tools import ToolResult
 from app.services.workflow import (
     SkillWorkflowRunner,
+    add_workflow_tool_call,
     cleanup_workflow_resources,
     ensure_workflow_metadata,
     parse_workflow,
     set_workflow_resource,
+    set_workflow_step_evidence,
+    update_workflow_tool_call,
     workflow_step_state,
 )
 
@@ -58,6 +61,83 @@ tasks:
     assert audit["progress"] == []
     assert audit["error"] is None
     assert cpu["allowed_tools"] == ["lab4ai_create_instance"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_uses_yaml_instruction_model_hook_for_resource_steps():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_3_deploy_cpu
+    name: CPU
+    instruction: |
+      调用 YAML instruction 中声明的 CPU 创建步骤。
+"""
+    )
+    events: list[dict] = []
+    hook_calls: list[tuple[str, str]] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        raise AssertionError("fixed executor must not run after instruction-driven model hook")
+
+    async def write(metadata):
+        return None
+
+    async def step_hook(metadata, step):
+        hook_calls.append((step.id, step.instruction))
+        metadata = add_workflow_tool_call(
+            metadata,
+            step,
+            tool_call_id="model-tool-cpu",
+            tool_name="lab4ai_create_instance",
+            status="running",
+        )
+        metadata = update_workflow_tool_call(
+            metadata,
+            step.id,
+            "model-tool-cpu",
+            status="completed",
+            ok=True,
+            result_metadata={"server_id": "cpu-from-model"},
+        )
+        metadata = set_workflow_resource(
+            metadata,
+            "cpu",
+            server_id="cpu-from-model",
+            released=False,
+            raw={"server_id": "cpu-from-model"},
+        )
+        metadata = set_workflow_step_evidence(
+            metadata,
+            step,
+            cpu_instance_created=True,
+            server_id="cpu-from-model",
+            completion_source="model_tool_use",
+        )
+        return metadata, ["lab4ai_create_instance: created by model"], False, True
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+        run_step_model_tools=step_hook,
+    )
+
+    result = await runner.run(mark_running({"task_type": "reproduce"}))
+
+    assert result.paused is False
+    assert hook_calls == [
+        ("step_3_deploy_cpu", "调用 YAML instruction 中声明的 CPU 创建步骤。")
+    ]
+    assert result.tool_outputs == ["lab4ai_create_instance: created by model"]
+    assert result.metadata["workflow_resources"]["cpu"]["server_id"] == "cpu-from-model"
+    step = workflow_step_state(result.metadata, "step_3_deploy_cpu")
+    assert step["status"] == "completed"
+    assert step["evidence"]["completion_source"] == "model_tool_use"
 
 
 @pytest.mark.asyncio
@@ -166,7 +246,7 @@ tasks:
 
 
 @pytest.mark.asyncio
-async def test_workflow_runner_runs_fixed_executor_after_step_model_tool_hook():
+async def test_workflow_runner_skips_fixed_executor_after_step_model_tool_hook():
     workflow = parse_workflow(
         """
 version: demo/v1
@@ -178,17 +258,44 @@ tasks:
     )
     events: list[dict] = []
     hook_calls: list[str] = []
-    tool_calls: list[tuple[str, dict]] = []
 
     async def invoke(metadata, tool_name, tool_input):
-        tool_calls.append((tool_name, tool_input))
-        return ToolResult(tool_name, "fixed ssh ok", metadata={"exit_code": 0}), metadata, False
+        raise AssertionError("fixed executor must not run after instruction-driven model hook")
 
     async def write(metadata):
         return None
 
     async def step_hook(metadata, step):
         hook_calls.append(step.id)
+        for tool_call_id, tool_name in [
+            ("model-tool-clone", "claw_shell_run"),
+            ("model-tool-prep", "remote_project_prep"),
+        ]:
+            metadata = add_workflow_tool_call(
+                metadata,
+                step,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                status="running",
+            )
+            metadata = update_workflow_tool_call(
+                metadata,
+                step.id,
+                tool_call_id,
+                status="completed",
+                ok=True,
+                result_metadata={"exit_code": 0},
+            )
+        metadata = set_workflow_step_evidence(
+            metadata,
+            step,
+            clone_completed=True,
+            remote_workspace_verified=True,
+            git_repo_verified=True,
+            dependency_install_attempted=True,
+            project_prep_completed=True,
+            completion_source="model_tool_use",
+        )
         return metadata, ["file_system_read: ok"], False, True
 
     runner = SkillWorkflowRunner(
@@ -211,24 +318,8 @@ tasks:
     )
 
     assert result.paused is False
-    assert result.tool_outputs == [
-        "file_system_read: ok",
-        "claw_shell_run: fixed ssh ok",
-        "remote_project_prep: fixed ssh ok",
-        "ssh_execute: fixed ssh ok",
-    ]
+    assert result.tool_outputs == ["file_system_read: ok"]
     assert hook_calls == ["step_4_cpu_env_setup"]
-    assert tool_calls[0][0] == "claw_shell_run"
-    assert tool_calls[0][1]["server_id"] == "cpu-1"
-    assert "git clone --recursive" in tool_calls[0][1]["command"]
-    assert "pip install" not in tool_calls[0][1]["command"]
-    assert tool_calls[1][0] == "remote_project_prep"
-    assert tool_calls[1][1]["server_id"] == "cpu-1"
-    assert tool_calls[1][1]["repo_name"] == "demo"
-    assert tool_calls[1][1]["dependency_cmds"][0].startswith("pip install torch")
-    assert "requirements.txt" in tool_calls[1][1]["dependency_cmds"][1]
-    assert tool_calls[2][0] == "ssh_execute"
-    assert "git rev-parse --is-inside-work-tree" in tool_calls[2][1]["command"]
     step = workflow_step_state(result.metadata, "step_4_cpu_env_setup")
     assert step["status"] == "completed"
     assert step["evidence"]["clone_completed"] is True
@@ -236,7 +327,8 @@ tasks:
     assert step["evidence"]["git_repo_verified"] is True
     assert step["evidence"]["dependency_install_attempted"] is True
     assert step["evidence"]["project_prep_completed"] is True
-    assert step["output"] == "CPU 环境准备命令已真实执行完成。"
+    assert step["evidence"]["completion_source"] == "model_tool_use"
+    assert step["output"] == "file_system_read: ok"
 
 
 @pytest.mark.asyncio

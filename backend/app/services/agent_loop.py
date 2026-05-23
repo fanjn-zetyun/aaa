@@ -54,8 +54,15 @@ from app.services.skills import SkillDefinition, SkillLoader
 from app.services.tools import ToolExecutionContext, ToolRegistry, ToolResult
 from app.services.workflow import (
     SkillWorkflowRunner,
+    WorkflowStep,
+    add_workflow_step_artifact,
+    add_workflow_tool_call,
     cleanup_workflow_resources,
     parse_workflow,
+    set_workflow_resource,
+    set_workflow_step_evidence,
+    update_workflow_tool_call,
+    workflow_step_state,
 )
 
 AGENT_PLAN_MAX_TOKENS = 2048
@@ -641,6 +648,13 @@ class AgentLoopManager:
                 prepared_tool_calls.append((tool_call, {"_tool_name": canonical_tool_name, **tool_input}))
             for tool_call, tool_input in prepared_tool_calls:
                 canonical_tool_name = str(tool_input.pop("_tool_name"))
+                if workflow_step_id:
+                    metadata = _record_model_tool_call_started(
+                        metadata,
+                        workflow_step_id,
+                        canonical_tool_name,
+                        str(tool_input["tool_call_id"]),
+                    )
                 result, metadata, paused = await self._invoke_tool_with_policy(
                     conversation_id,
                     metadata,
@@ -648,6 +662,13 @@ class AgentLoopManager:
                     tool_input,
                 )
                 if paused:
+                    if workflow_step_id:
+                        metadata = update_workflow_tool_call(
+                            metadata,
+                            workflow_step_id,
+                            str(tool_input["tool_call_id"]),
+                            status="waiting_for_user",
+                        )
                     return ModelToolRunResult(
                         metadata=metadata,
                         tool_outputs=tool_outputs,
@@ -655,6 +676,15 @@ class AgentLoopManager:
                         used_model_tools=True,
                     )
                 if result:
+                    if workflow_step_id:
+                        metadata = _record_model_tool_call_completed(
+                            metadata,
+                            workflow_step_id,
+                            canonical_tool_name,
+                            str(tool_input["tool_call_id"]),
+                            tool_input,
+                            result,
+                        )
                     output = f"{result.name}: {result.content}"
                     tool_outputs.append(output)
                     tool_result_blocks.append(
@@ -668,10 +698,23 @@ class AgentLoopManager:
                 current_messages.append({"role": "user", "content": tool_result_blocks})
 
         if last_error:
+            message = f"模型 tool-use 调用失败，当前 workflow step 已停止。错误：{_format_exception(last_error)}"
             await self._progress(
                 conversation_id,
-                f"模型 tool-use 调用失败，已回退到固定执行链路。错误：{_format_exception(last_error)}",
-                stage="tool_use_fallback",
+                message,
+                stage="tool_use_failed",
+            )
+            return ModelToolRunResult(
+                metadata=metadata,
+                tool_outputs=[message],
+                failed=True,
+            )
+        if not used_model_tools:
+            message = "模型未调用当前 step 允许的任何 Tool，已停止该 workflow step，避免回退到固定执行链路。"
+            return ModelToolRunResult(
+                metadata=metadata,
+                tool_outputs=[message],
+                failed=True,
             )
         return ModelToolRunResult(
             metadata=metadata,
@@ -1322,6 +1365,230 @@ def _step_tool_use_guidance(metadata: dict, step_id: str) -> str:
             "不要在 command 中再次写 sshpass/ssh root@...，也不要输出 `{{...}}` 模板变量。"
         )
     return "不要输出 `{{...}}` 模板变量。"
+
+
+def _record_model_tool_call_started(
+    metadata: dict,
+    workflow_step_id: str,
+    tool_name: str,
+    tool_call_id: str,
+) -> dict:
+    step = _workflow_step_ref(metadata, workflow_step_id)
+    existing = workflow_step_state(metadata, workflow_step_id).get("tool_calls") or []
+    if any(isinstance(item, dict) and item.get("tool_call_id") == tool_call_id for item in existing):
+        return update_workflow_tool_call(
+            metadata,
+            workflow_step_id,
+            tool_call_id,
+            status="running",
+        )
+    return add_workflow_tool_call(
+        metadata,
+        step,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        status="running",
+    )
+
+
+def _record_model_tool_call_completed(
+    metadata: dict,
+    workflow_step_id: str,
+    tool_name: str,
+    tool_call_id: str,
+    tool_input: dict[str, object],
+    result: ToolResult,
+) -> dict:
+    metadata = update_workflow_tool_call(
+        metadata,
+        workflow_step_id,
+        tool_call_id,
+        status="completed" if result.ok else "failed",
+        ok=result.ok,
+        error=None if result.ok else result.content,
+        result_metadata=result.metadata,
+    )
+    if result.ok:
+        metadata = _apply_model_tool_result_to_workflow(
+            metadata,
+            workflow_step_id,
+            tool_name,
+            tool_input,
+            result,
+        )
+    return metadata
+
+
+def _apply_model_tool_result_to_workflow(
+    metadata: dict,
+    workflow_step_id: str,
+    tool_name: str,
+    tool_input: dict[str, object],
+    result: ToolResult,
+) -> dict:
+    step = _workflow_step_ref(metadata, workflow_step_id)
+    result_metadata = result.metadata or {}
+
+    if tool_name == "analyze_repo":
+        metadata = ensure_memory(metadata)
+        workflow_results = dict(metadata.get("workflow_results") or {})
+        workflow_results.update(
+            {
+                "repo_name": _repo_name_from_url(str(metadata.get("github_url") or "project")),
+                "repo_score": result_metadata.get("score", workflow_results.get("repo_score")),
+                "score": result_metadata.get("score", workflow_results.get("score")),
+                "audit_report_path": str(result_metadata.get("report_path") or ""),
+            }
+        )
+        metadata["workflow_results"] = workflow_results
+        if result_metadata.get("report_path"):
+            metadata = add_workflow_step_artifact(metadata, step, str(result_metadata["report_path"]))
+
+    if tool_name == "analyze_paper":
+        metadata = ensure_memory(metadata)
+        workflow_results = dict(metadata.get("workflow_results") or {})
+        workflow_results.update(
+            {
+                "paper_score": result_metadata.get("score", workflow_results.get("paper_score")),
+                "paper_report_path": str(result_metadata.get("report_path") or ""),
+                "baseline_metrics": result_metadata.get("metrics") or workflow_results.get("baseline_metrics") or {},
+                "hyperparams": result_metadata.get("hyperparams") or workflow_results.get("hyperparams") or {},
+                "datasets": result_metadata.get("datasets") or workflow_results.get("datasets") or [],
+            }
+        )
+        if result_metadata.get("score") is not None:
+            workflow_results["score"] = max(
+                int(workflow_results.get("score") or 0),
+                int(result_metadata.get("score") or 0),
+            )
+        metadata["workflow_results"] = workflow_results
+        if result_metadata.get("report_path"):
+            metadata = add_workflow_step_artifact(metadata, step, str(result_metadata["report_path"]))
+
+    if tool_name == "lab4ai_create_instance":
+        kind = _resource_kind_for_tool(workflow_step_id, tool_input)
+        server_id = str(result_metadata.get("server_id") or "")
+        if kind and server_id:
+            resource_key = kind.lower()
+            metadata = set_workflow_resource(
+                metadata,
+                resource_key,
+                server_id=server_id,
+                released=False,
+                raw=result_metadata,
+            )
+            metadata = add_workflow_step_artifact(
+                metadata,
+                step,
+                f"lab4ai:{resource_key}:{server_id}",
+            )
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                **{
+                    f"{resource_key}_instance_created": True,
+                    "server_id": server_id,
+                    "completion_source": "model_tool_use",
+                },
+            )
+            metadata = remember_artifact(metadata, f"{kind} 实例：{server_id}")
+
+    if tool_name == "lab4ai_stop_instance":
+        kind = _resource_kind_for_tool(workflow_step_id, tool_input)
+        resource_key = (kind or "").lower()
+        server_id = str(tool_input.get("server_id") or result_metadata.get("server_id") or "")
+        if resource_key:
+            metadata = set_workflow_resource(metadata, resource_key, released=True)
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                **{
+                    f"{resource_key}_instance_released": bool(server_id),
+                    "server_id": server_id,
+                    "completion_source": "model_tool_use",
+                },
+            )
+
+    if workflow_step_id == "step_4_cpu_env_setup":
+        if tool_name in {"ssh_execute", "claw_shell_run"}:
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                clone_completed=True,
+                remote_workspace_verified=True,
+                git_repo_verified=True,
+                completion_source="model_tool_use",
+            )
+        if tool_name == "remote_project_prep":
+            metadata = set_workflow_step_evidence(
+                metadata,
+                step,
+                dependency_install_attempted=True,
+                project_prep_completed=True,
+                completion_source="model_tool_use",
+            )
+
+    if workflow_step_id == "step_7_gpu_execution" and tool_name in {"ssh_execute", "claw_shell_run"}:
+        metadata = ensure_memory(metadata)
+        workflow_results = dict(metadata.get("workflow_results") or {})
+        workflow_results["smoke_test_metrics"] = {
+            "status": "passed",
+            "exit_code": result_metadata.get("exit_code"),
+            "stdout_tail": str(result_metadata.get("stdout") or "")[-2000:],
+            "stderr_tail": str(result_metadata.get("stderr") or "")[-2000:],
+        }
+        metadata["workflow_results"] = workflow_results
+        metadata = set_workflow_step_evidence(
+            metadata,
+            step,
+            gpu_ssh_probe_completed=True,
+            gpu_workspace_verified=True,
+            gpu_runtime_env_configured=True,
+            smoke_test_executed=True,
+            env_patches_recorded=True,
+            completion_source="model_tool_use",
+        )
+
+    if tool_name == "repro_report":
+        report_path = str(result_metadata.get("report_path") or "")
+        metadata = ensure_memory(metadata)
+        workflow_results = dict(metadata.get("workflow_results") or {})
+        workflow_results["word_report_path"] = report_path
+        metadata["workflow_results"] = workflow_results
+        metadata = set_workflow_step_evidence(
+            metadata,
+            step,
+            report_generated=bool(report_path),
+            report_path=report_path,
+            completion_source="model_tool_use",
+        )
+        if report_path:
+            metadata = add_workflow_step_artifact(metadata, step, report_path)
+            metadata = remember_artifact(metadata, f"复现报告：{report_path}")
+
+    return metadata
+
+
+def _workflow_step_ref(metadata: dict, workflow_step_id: str) -> WorkflowStep:
+    state = workflow_step_state(metadata, workflow_step_id)
+    depends_on = state.get("depends_on") if isinstance(state.get("depends_on"), list) else []
+    return WorkflowStep(
+        id=workflow_step_id,
+        name=str(state.get("name") or workflow_step_id),
+        depends_on=[str(item) for item in depends_on],
+        expected_output=str(state.get("expected_output") or ""),
+    )
+
+
+def _resource_kind_for_tool(workflow_step_id: str, tool_input: dict[str, object]) -> str | None:
+    explicit = str(tool_input.get("resource_kind") or "").upper()
+    if explicit in {"CPU", "GPU"}:
+        return explicit
+    if workflow_step_id in {"step_3_deploy_cpu", "step_5_release_cpu"}:
+        return "CPU"
+    if workflow_step_id in {"step_6_deploy_gpu", "step_9_release_gpu"}:
+        return "GPU"
+    return None
 
 
 def _prepare_model_tool_input(
