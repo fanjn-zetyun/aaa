@@ -9,11 +9,21 @@ from app.services.agent_loop import (
     _assistant_tool_message,
     _safe_skill_selection_evidence,
 )
+from app.services.conversation_memory import (
+    mark_running,
+    mark_waiting_for_user,
+    resolve_pending_user_input,
+)
 from app.services.llm_client import LLMRuntimeConfig, LLMToolResponse, LLMToolUse
 from app.services.skill_selector import SkillSelectionResult
 from app.services.skills import SkillDefinition
 from app.services.tools import ToolResult
-from app.services.workflow import workflow_step_state
+from app.services.workflow import (
+    WorkflowStep,
+    add_workflow_tool_call,
+    ensure_workflow_metadata_for_step,
+    workflow_step_state,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -650,6 +660,101 @@ async def test_lab4ai_missing_credentials_pauses_for_admin_intervention(
 
     resumed = resolve_pending_user_input(metadata, answer="已完成配置，继续执行")
     assert resumed["memory"]["decisions"][-1]["outcome"] == "approved"
+
+
+async def test_step_model_tool_use_resumes_approved_waiting_tool_without_new_model_call(
+    monkeypatch,
+    test_user,
+    db_session,
+):
+    from app.models import Conversation
+    from app.models.conversation import ConversationStatus, ConversationTaskType
+
+    async def fail_model_call(*args, **kwargs):
+        raise AssertionError("resumed approved tool should execute without a new model call")
+
+    manager = AgentLoopManager()
+    monkeypatch.setattr("app.services.agent_loop.call_anthropic_compatible_tool_use", fail_model_call)
+    invoked: list[tuple[str, dict]] = []
+
+    async def fake_invoke(name, tool_input, context=None):
+        invoked.append((name, dict(tool_input or {})))
+        return ToolResult(name, "created", metadata={"server_id": "cpu-resumed"})
+
+    monkeypatch.setattr(manager._tools, "invoke", fake_invoke)
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.REPRODUCE,
+        title="resume approved model tool",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+
+    step = WorkflowStep(id="step_3_deploy_cpu", name="CPU")
+    metadata = ensure_workflow_metadata_for_step(mark_running({"task_type": "reproduce"}), step)
+    tool_input = {
+        "resource_kind": "CPU",
+        "workflow_step_id": step.id,
+        "tool_call_id": "call_waiting_cpu",
+        "workflow_run_id": metadata["workflow_run_id"],
+    }
+    metadata = add_workflow_tool_call(
+        metadata,
+        step,
+        tool_call_id="call_waiting_cpu",
+        tool_name="lab4ai_create_instance",
+        status="waiting_for_user",
+    )
+    confirmation = manager._tools.confirmation_for("lab4ai_create_instance", tool_input)
+    assert confirmation is not None
+    metadata = mark_waiting_for_user(
+        metadata,
+        question=confirmation.question,
+        options=list(confirmation.options),
+        step=confirmation.step,
+        tool_name="lab4ai_create_instance",
+        tool_input=tool_input,
+        tool_call_id=confirmation.tool_call_id,
+        workflow_step_id=confirmation.workflow_step_id,
+    )
+    metadata = resolve_pending_user_input(metadata, answer="yes")
+
+    metadata, outputs, paused, handled, failed = await manager._run_step_model_tool_use(
+        conversation.id,
+        metadata,
+        step,
+        LLMRuntimeConfig(
+            provider="anthropic",
+            base_url="https://api.example.com",
+            api_key="key",
+            model="model",
+            max_tokens=4096,
+        ),
+        system="system",
+        messages=[],
+    )
+
+    assert paused is False
+    assert handled is True
+    assert failed is False
+    assert outputs == ["lab4ai_create_instance: created"]
+    assert invoked == [
+        (
+            "lab4ai_create_instance",
+            {
+                "resource_kind": "CPU",
+                "workflow_step_id": "step_3_deploy_cpu",
+                "tool_call_id": "call_waiting_cpu",
+                "workflow_run_id": metadata["workflow_run_id"],
+            },
+        )
+    ]
+    assert metadata["workflow_resources"]["cpu"]["server_id"] == "cpu-resumed"
+    step_state = workflow_step_state(metadata, "step_3_deploy_cpu")
+    assert step_state["tool_calls"][-1]["status"] == "completed"
 
 
 async def test_step_model_tool_use_executes_allowed_tool(monkeypatch):

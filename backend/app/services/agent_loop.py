@@ -23,6 +23,7 @@ from app.models.conversation import ConversationStatus, MessageRole
 from app.core.config import get_settings
 from app.services.conversation_store import append_conversation_event
 from app.services.conversation_memory import (
+    DECISION_APPROVED,
     DECISION_NEEDS_REVISION,
     DECISION_REJECTED,
     DECISION_STOPPED,
@@ -784,6 +785,48 @@ class AgentLoopManager:
         if not allowed_tools:
             return metadata, [], False, False, False
 
+        approved_waiting_tool = _approved_waiting_step_tool(metadata, step.id, allowed_tools)
+        if approved_waiting_tool:
+            tool_name, tool_input = approved_waiting_tool
+            tool_call_id = str(tool_input["tool_call_id"])
+            metadata = _record_model_tool_call_started(
+                metadata,
+                step.id,
+                tool_name,
+                tool_call_id,
+            )
+            result, metadata, paused = await self._invoke_tool_with_policy(
+                conversation_id,
+                metadata,
+                tool_name,
+                tool_input,
+            )
+            if paused:
+                metadata = update_workflow_tool_call(
+                    metadata,
+                    step.id,
+                    tool_call_id,
+                    status="waiting_for_user",
+                )
+                return metadata, [], True, True, False
+            if result is None:
+                return metadata, [], False, True, True
+            metadata = _record_model_tool_call_completed(
+                metadata,
+                step.id,
+                tool_name,
+                tool_call_id,
+                tool_input,
+                result,
+            )
+            return (
+                metadata,
+                [f"{result.name}: {result.content}"],
+                False,
+                True,
+                result.ok is False,
+            )
+
         result = await self._run_model_tool_use_or_fallback(
             conversation_id,
             metadata,
@@ -1425,6 +1468,51 @@ def _record_model_tool_call_started(
         tool_name=tool_name,
         status="running",
     )
+
+
+def _approved_waiting_step_tool(
+    metadata: dict,
+    workflow_step_id: str,
+    allowed_tools: list[str],
+) -> tuple[str, dict[str, object]] | None:
+    step = workflow_step_state(metadata, workflow_step_id)
+    waiting_calls = {
+        str(item.get("tool_call_id")): str(item.get("name") or "")
+        for item in reversed(step.get("tool_calls") or [])
+        if (
+            isinstance(item, dict)
+            and item.get("status") == "waiting_for_user"
+            and item.get("tool_call_id")
+            and str(item.get("name") or "") in allowed_tools
+        )
+    }
+    if not waiting_calls:
+        return None
+
+    run_id = str(metadata.get("workflow_run_id") or "")
+    decisions = (ensure_memory(metadata).get("memory") or {}).get("decisions") or []
+    for decision in reversed(decisions):
+        if not isinstance(decision, dict):
+            continue
+        tool_call_id = str(decision.get("tool_call_id") or "")
+        tool_name = str(decision.get("tool_name") or waiting_calls.get(tool_call_id) or "")
+        if (
+            decision.get("outcome") != DECISION_APPROVED
+            or decision.get("workflow_step_id") != workflow_step_id
+            or tool_call_id not in waiting_calls
+            or tool_name not in allowed_tools
+            or (run_id and decision.get("run_id") != run_id)
+            or (waiting_calls.get(tool_call_id) and waiting_calls[tool_call_id] != tool_name)
+        ):
+            continue
+
+        tool_input = dict(decision.get("tool_input") or {})
+        tool_input["tool_call_id"] = tool_call_id
+        tool_input["workflow_step_id"] = workflow_step_id
+        if run_id:
+            tool_input["workflow_run_id"] = run_id
+        return tool_name, tool_input
+    return None
 
 
 def _record_model_tool_call_completed(
