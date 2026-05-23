@@ -85,6 +85,7 @@
   - `agent_runtime_v3_enabled` 默认关闭；开启后 `AgentLoopManager` 会委托 `AgentRuntime`，现有 `SkillWorkflowRunner` 链路在默认配置下保持可用。
   - V3 已支持 `model -> tool_use -> ToolExecutor -> tool_result -> model` 循环、`skill.invoke` 激活 skill/workflow contract、workflow required tool/evidence 基础验收，以及 ChatPage runtime/tool 事件展示。
   - 真实 Lab4AI E2E 已增加显式 opt-in guard：默认 `pytest` 不会创建计费 CPU/GPU 实例，只有设置 `LOBSTER_RUN_LAB4AI_INTEGRATION=1` 的集成测试才允许进入真实实例联调。
+  - `AgentLoopManager` 的 V3 feature-flag 路径已注入 `skill.invoke` runtime tool；模型能在 tool schema 中看到可用 skill、`triggers` 和 `when_to_use`，普通对话不再由后端固定触发复现 workflow。
 
 ## 当前验证结果
 
