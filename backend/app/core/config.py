@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     workspace_root: str = "runtime/workspaces"
     skills_dir: str = "skills"
+    agent_runtime_v3_enabled: bool = False
 
     lab4ai_credential_key: str = ""
 
