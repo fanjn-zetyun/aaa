@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>复现流程对话 Demo</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7fb;
+        --panel: #ffffff;
+        --line: #d9dee8;
+        --line-soft: #edf0f5;
+        --text: #202735;
+        --muted: #667085;
+        --soft: #f8fafc;
+        --blue: #2563eb;
+        --green: #0f9f6e;
+        --amber: #b7791f;
+        --red: #c2410c;
+        --purple: #7c3aed;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .app {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 320px;
+      }
+
+      .chat {
+        padding: 32px;
+        overflow: auto;
+      }
+
+      .conversation {
+        max-width: 980px;
+        margin: 0 auto;
+        display: grid;
+        gap: 22px;
+      }
+
+      .bubble-row {
+        display: flex;
+        gap: 12px;
+      }
+
+      .bubble-row.user {
+        justify-content: flex-end;
+      }
+
+      .avatar {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        font-weight: 700;
+      }
+
+      .avatar.agent {
+        background: #182033;
+        color: white;
+      }
+
+      .user-bubble {
+        max-width: 720px;
+        padding: 12px 16px;
+        border-radius: 18px 18px 4px 18px;
+        background: #e8edf7;
+        color: #273449;
+      }
+
+      .agent-stack {
+        width: min(100%, 860px);
+        display: grid;
+        gap: 12px;
+      }
+
+      .agent-name {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(24, 32, 51, 0.06);
+        overflow: hidden;
+      }
+
+      .section {
+        padding: 16px;
+      }
+
+      .section + .section {
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .status-line {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+      }
+
+      .pulse {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--blue);
+        box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.12);
+      }
+
+      .decision-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+      }
+
+      .eyebrow {
+        margin: 0 0 4px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      .decision-title {
+        font-size: 17px;
+        line-height: 1.35;
+        font-weight: 750;
+      }
+
+      .pill {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 9px;
+        background: var(--soft);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .pill.model {
+        border-color: rgba(37, 99, 235, 0.22);
+        background: #eff6ff;
+        color: #1d4ed8;
+      }
+
+      .progress-strip {
+        margin-top: 14px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .progress-item {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr);
+        gap: 8px;
+        color: #475467;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-top: 7px;
+        background: #cbd5e1;
+      }
+
+      .dot.done {
+        background: var(--green);
+      }
+
+      .dot.running {
+        background: var(--blue);
+        box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.11);
+      }
+
+      details {
+        margin-top: 12px;
+        border-radius: 9px;
+        border: 1px solid var(--line-soft);
+        background: #fbfcff;
+      }
+
+      summary {
+        cursor: pointer;
+        padding: 10px 12px;
+        color: #475467;
+        font-weight: 700;
+      }
+
+      .evidence {
+        display: grid;
+        grid-template-columns: 140px minmax(0, 1fr);
+        gap: 6px 12px;
+        border-top: 1px solid var(--line-soft);
+        padding: 12px;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 12px;
+      }
+
+      .evidence span:nth-child(odd) {
+        color: var(--muted);
+      }
+
+      .workflow-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        padding: 16px;
+        border-bottom: 1px solid var(--line-soft);
+        background: #fbfcff;
+      }
+
+      .workflow-title {
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .workflow-subtitle {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .steps {
+        display: grid;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr);
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .step:last-child {
+        border-bottom: 0;
+      }
+
+      .step-number {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: #eef2f7;
+        color: #667085;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .step.done .step-number {
+        background: #e8f7f0;
+        color: var(--green);
+      }
+
+      .step.running {
+        background: #f8fbff;
+      }
+
+      .step.running .step-number {
+        background: #eff6ff;
+        color: var(--blue);
+      }
+
+      .step.waiting .step-number {
+        background: #fff7ed;
+        color: var(--amber);
+      }
+
+      .step-main {
+        min-width: 0;
+      }
+
+      .step-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      .step-name {
+        font-weight: 760;
+        color: #273449;
+      }
+
+      .step-id {
+        margin-top: 2px;
+        color: var(--muted);
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 12px;
+      }
+
+      .tag {
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 12px;
+        font-weight: 760;
+        white-space: nowrap;
+      }
+
+      .tag.done {
+        background: #e8f7f0;
+        color: var(--green);
+      }
+
+      .tag.running {
+        background: #eff6ff;
+        color: var(--blue);
+      }
+
+      .tag.pending {
+        background: #f1f5f9;
+        color: #64748b;
+      }
+
+      .tag.waiting {
+        background: #fff7ed;
+        color: var(--amber);
+      }
+
+      .step-body {
+        margin-top: 10px;
+        display: grid;
+        gap: 8px;
+        color: #475467;
+      }
+
+      .summary-line {
+        border-left: 3px solid #dbe7ff;
+        padding-left: 10px;
+      }
+
+      .mini-log {
+        display: grid;
+        gap: 5px;
+      }
+
+      .mini-log div {
+        display: flex;
+        gap: 7px;
+      }
+
+      .mini-log div::before {
+        content: "";
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #94a3b8;
+        margin-top: 8px;
+        flex: 0 0 auto;
+      }
+
+      .tool-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .tool {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 4px 8px;
+        background: white;
+        color: #475467;
+        font-size: 12px;
+      }
+
+      .tool.running {
+        border-color: rgba(37, 99, 235, 0.24);
+        background: #eff6ff;
+        color: #1d4ed8;
+      }
+
+      .tool.done {
+        border-color: rgba(15, 159, 110, 0.24);
+        background: #ecfdf5;
+        color: #047857;
+      }
+
+      .human-panel {
+        border: 1px solid #fed7aa;
+        border-radius: 10px;
+        background: #fffbeb;
+        padding: 12px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .human-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      .human-title {
+        font-weight: 800;
+        color: #92400e;
+      }
+
+      .human-copy {
+        margin-top: 2px;
+        color: #7c2d12;
+        font-size: 13px;
+      }
+
+      .human-form {
+        display: grid;
+        gap: 9px;
+      }
+
+      .field {
+        display: grid;
+        grid-template-columns: 120px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+      }
+
+      .field label {
+        color: #7c2d12;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .field input,
+      .field select {
+        width: 100%;
+        border: 1px solid #f4c58c;
+        border-radius: 8px;
+        background: white;
+        padding: 8px 10px;
+        color: #273449;
+        font: inherit;
+      }
+
+      .human-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .button {
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-weight: 760;
+        font: inherit;
+      }
+
+      .button.primary {
+        background: #1f2937;
+        color: white;
+      }
+
+      .button.secondary {
+        border-color: #f4c58c;
+        background: white;
+        color: #92400e;
+      }
+
+      .privacy-note {
+        color: #8a5a18;
+        font-size: 12px;
+      }
+
+      .final {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: white;
+        padding: 16px;
+      }
+
+      .side {
+        border-left: 1px solid var(--line);
+        background: #ffffff;
+        padding: 22px;
+        display: grid;
+        align-content: start;
+        gap: 18px;
+      }
+
+      .side-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+        background: #fbfcff;
+      }
+
+      .side-title {
+        font-weight: 800;
+        margin-bottom: 8px;
+      }
+
+      .side-list {
+        display: grid;
+        gap: 8px;
+        color: #475467;
+        font-size: 13px;
+      }
+
+      .demo-note {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (max-width: 980px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+
+        .side {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+
+        .chat {
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section class="chat">
+        <div class="conversation">
+          <div class="bubble-row user">
+            <div class="user-bubble">
+              帮我复现这个项目：https://github.com/jsnzwu/motion-guided-flow
+            </div>
+          </div>
+
+          <div class="bubble-row">
+            <div class="avatar agent">L</div>
+            <div class="agent-stack">
+              <div class="agent-name">LOBSTER Agent</div>
+
+              <section class="card">
+                <div class="section">
+                  <div class="status-line">
+                    <span class="pulse"></span>
+                    <span>我会先判断这是不是项目复现任务，再选择合适的 workflow skill。</span>
+                  </div>
+                </div>
+
+                <div class="section">
+                  <div class="decision-header">
+                    <div>
+                      <p class="eyebrow">Skill Selection</p>
+                      <h2 class="decision-title">
+                        模型选择了 lab4ai-auto-reproduct，并加载 project_reproduce.yaml
+                      </h2>
+                    </div>
+                    <span class="pill model">模型选择</span>
+                  </div>
+
+                  <div class="progress-strip">
+                    <div class="progress-item">
+                      <span class="dot done"></span>
+                      <span>识别到 GitHub 仓库：motion-guided-flow</span>
+                    </div>
+                    <div class="progress-item">
+                      <span class="dot done"></span>
+                      <span>读取可用 skills：lab4ai-auto-reproduct, general-chat</span>
+                    </div>
+                    <div class="progress-item">
+                      <span class="dot done"></span>
+                      <span>模型返回 skill_name：lab4ai-auto-reproduct</span>
+                    </div>
+                    <div class="progress-item">
+                      <span class="dot running"></span>
+                      <span>正在进入 project_reproduce.yaml 定义的复现流水线</span>
+                    </div>
+                  </div>
+
+                  <details>
+                    <summary>查看选择证据</summary>
+                    <div class="evidence">
+                      <span>source</span><span>model</span>
+                      <span>selected_skill</span><span>lab4ai-auto-reproduct</span>
+                      <span>model_choice</span><span>lab4ai-auto-reproduct</span>
+                      <span>fallback_choice</span><span>-</span>
+                      <span>workflow</span><span>skills/lab4ai-auto-reproduct/project_reproduce.yaml</span>
+                      <span>reason</span><span>Model selected registered skill `lab4ai-auto-reproduct`.</span>
+                    </div>
+                  </details>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="workflow-head">
+                  <div>
+                    <p class="eyebrow">Project Reproduction Workflow</p>
+                    <h1 class="workflow-title">motion-guided-flow 复现流水线</h1>
+                    <p class="workflow-subtitle">
+                      按 project_reproduce.yaml 的步骤持续更新，当前步骤自动展开。
+                    </p>
+                  </div>
+                  <span class="pill">2/9 完成 · 等待确认</span>
+                </div>
+
+                <div class="steps">
+                  <article class="step done">
+                    <div class="step-number">1</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">项目复现可行性分析</div>
+                          <div class="step-id">step_1_audit</div>
+                        </div>
+                        <span class="tag done">完成</span>
+                      </div>
+                      <div class="step-body">
+                        <div class="summary-line">
+                          已完成代码审计，提取依赖风险、推荐运行入口和可行性得分。
+                        </div>
+                        <div class="tool-row">
+                          <span class="tool done">lab4ai-project-analysis 完成</span>
+                          <span class="tool done">审计报告已生成</span>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step done">
+                    <div class="step-number">2</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">复现可行性熔断判断</div>
+                          <div class="step-id">step_2_condition_check</div>
+                        </div>
+                        <span class="tag done">完成</span>
+                      </div>
+                      <div class="step-body">
+                        <div class="summary-line">
+                          score = 82，满足继续复现条件，允许进入算力申请阶段。
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step waiting">
+                    <div class="step-number">3</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">拉起廉价 CPU 实例</div>
+                          <div class="step-id">step_3_deploy_cpu</div>
+                        </div>
+                        <span class="tag waiting">等待你确认</span>
+                      </div>
+                      <div class="step-body">
+                        <div class="summary-line">
+                          申请 CPU 实例前需要 Lab4AI 登录凭证。凭证保存后，流程会从当前步骤继续执行。
+                        </div>
+                        <div class="human-panel">
+                          <div class="human-head">
+                            <div>
+                              <div class="human-title">需要你的输入</div>
+                              <p class="human-copy">
+                                为了创建 Lab4AI CPU 实例，请由管理员配置平台账号。敏感字段不会写入普通聊天正文。
+                              </p>
+                            </div>
+                            <span class="tag waiting">Human Input</span>
+                          </div>
+                          <div class="human-form">
+                            <div class="field">
+                              <label for="lab4ai-phone">手机号/账号</label>
+                              <input id="lab4ai-phone" type="text" placeholder="输入 Lab4AI 平台账号" />
+                            </div>
+                            <div class="field">
+                              <label for="lab4ai-password">密码</label>
+                              <input id="lab4ai-password" type="password" placeholder="输入 Lab4AI 平台密码" />
+                            </div>
+                          </div>
+                          <div class="human-actions">
+                            <button class="button primary" type="button">保存并继续</button>
+                            <button class="button secondary" type="button">打开管理员配置</button>
+                            <button class="button secondary" type="button">稍后再说</button>
+                          </div>
+                          <div class="privacy-note">
+                            提交后，当前步骤会从“等待你确认”切换为“正在创建 CPU 实例”。页面只显示“凭证已配置”，不展示明文。
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step">
+                    <div class="step-number">4</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">在 CPU 上拉取代码与智能环境/数据构建</div>
+                          <div class="step-id">step_4_cpu_env_setup</div>
+                        </div>
+                        <span class="tag pending">等待</span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step">
+                    <div class="step-number">5</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">释放 CPU 实例</div>
+                          <div class="step-id">step_5_release_cpu</div>
+                        </div>
+                        <span class="tag pending">等待</span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step">
+                    <div class="step-number">6</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">拉起 H800A GPU 实例</div>
+                          <div class="step-id">step_6_deploy_gpu</div>
+                        </div>
+                        <span class="tag pending">等待</span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step">
+                    <div class="step-number">7</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">SSH 探活、底层算子编译与微调测试</div>
+                          <div class="step-id">step_7_gpu_execution</div>
+                        </div>
+                        <span class="tag pending">等待</span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step">
+                    <div class="step-number">8</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">结构化抽取与生成 Word 报告</div>
+                          <div class="step-id">step_8_generate_report</div>
+                        </div>
+                        <span class="tag pending">等待</span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="step">
+                    <div class="step-number">9</div>
+                    <div class="step-main">
+                      <div class="step-top">
+                        <div>
+                          <div class="step-name">释放 GPU 实例</div>
+                          <div class="step-id">step_9_release_gpu</div>
+                        </div>
+                        <span class="tag pending">等待</span>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </section>
+
+              <section class="final">
+                <p class="eyebrow">最终回答区域</p>
+                <p>
+                  这里不再堆执行日志，只在流程结束后显示结论、产物路径、报告文件和需要你确认的事项。
+                </p>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side">
+        <div>
+          <h2 class="workflow-title">Demo 说明</h2>
+          <p class="demo-note">
+            这是静态交互稿，用来确认页面结构。真实实现时数据来自后端 WebSocket
+            的 skill_selection 与 workflow_step_* 事件。
+          </p>
+        </div>
+        <section class="side-card">
+          <div class="side-title">显示规则</div>
+          <div class="side-list">
+            <div>当前运行步骤自动展开</div>
+            <div>需要人工输入时嵌入当前 step</div>
+            <div>已完成步骤保留摘要，可点击展开</div>
+            <div>工具调用归档到对应 YAML step</div>
+            <div>最终回答只显示总结和产物</div>
+          </div>
+        </section>
+        <section class="side-card">
+          <div class="side-title">可审计证据</div>
+          <div class="side-list">
+            <div>source = model 表示模型选择 skill</div>
+            <div>source = fallback 表示规则兜底</div>
+            <div>workflow 指向加载的 YAML 文件</div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </body>
+</html>
