@@ -149,6 +149,11 @@ interface ChatMessage {
   run_id?: string | null;
 }
 
+interface RunState {
+  skillSelection?: SkillSelectionState;
+  workflowPath?: string | null;
+}
+
 const REPRO_WORKFLOW_STEPS: WorkflowStepState[] = [
   { id: "step_1_audit", name: "项目与论文双重审计", status: "pending" },
   { id: "step_2_condition_check", name: "复现可行性熔断判断", status: "pending" },
@@ -354,7 +359,10 @@ export default function ChatPage() {
       activeAgentMessageIdRef.current = id;
       return next.map((msg) =>
         msg.id === id
-          ? { ...msg, workflow: mergeWorkflowState(msg.workflow, payload, conversation) }
+          ? mergeRunStateIntoMessage(
+              { ...msg, workflow: mergeWorkflowState(msg.workflow, payload, conversation) },
+              payload
+            )
           : msg
       );
     });
@@ -375,7 +383,7 @@ export default function ChatPage() {
     }
     const id = `stream-${runId || payload.seq || Date.now()}`;
     activeAgentMessageIdRef.current = id;
-    const skillSelection = skillSelectionFromPayload(payload);
+    const runState = runStateFromPayload(payload);
     return {
       id,
       messages: [
@@ -387,8 +395,8 @@ export default function ChatPage() {
           created_at: payload.timestamp || new Date().toISOString(),
           type: "text" as const,
           events: [],
-          skillSelection,
-          workflowPath: workflowPathFromSelection(skillSelection, payload.workflow_path),
+          skillSelection: runState.skillSelection,
+          workflowPath: runState.workflowPath,
           streaming: true,
           run_id: runId,
         },
@@ -406,7 +414,7 @@ export default function ChatPage() {
         const existingIndex = events.findIndex((item) => item.id === timelineEvent.id);
         if (existingIndex >= 0) {
           events[existingIndex] = { ...events[existingIndex], ...timelineEvent };
-          return { ...msg, events };
+          return mergeRunStateIntoMessage({ ...msg, events }, payload);
         }
         const pendingIndex =
           timelineEvent.status !== "running" && timelineEvent.tool_name
@@ -420,7 +428,7 @@ export default function ChatPage() {
         } else {
           events.push(timelineEvent);
         }
-        return { ...msg, events };
+        return mergeRunStateIntoMessage({ ...msg, events }, payload);
       });
     });
   }
@@ -827,14 +835,13 @@ function workflowStateFromConversation(conversation?: Conversation): WorkflowSta
 
 function skillSelectionFromConversation(conversation?: Conversation): SkillSelectionState | undefined {
   const selection = conversation?.metadata?.skill_selection;
-  if (!selection?.selected_skill && !selection?.model_choice && !selection?.fallback_choice) {
-    return undefined;
-  }
-  return selection;
+  return hasSkillSelectionSignal(selection) ? selection : undefined;
 }
 
 function skillSelectionFromPayload(payload: StreamPayload): SkillSelectionState | undefined {
-  if (payload.skill_selection) return payload.skill_selection;
+  if (payload.skill_selection) {
+    return hasSkillSelectionSignal(payload.skill_selection) ? payload.skill_selection : undefined;
+  }
   if (!payload.skill_selection_source) return undefined;
   return {
     selected_skill: undefined,
@@ -844,6 +851,38 @@ function skillSelectionFromPayload(payload: StreamPayload): SkillSelectionState 
     reason: payload.content || null,
     confidence: null,
     error: null,
+  };
+}
+
+function hasSkillSelectionSignal(selection?: SkillSelectionState) {
+  return !!(
+    selection?.selected_skill ||
+    selection?.model_choice ||
+    selection?.fallback_choice ||
+    selection?.source ||
+    selection?.reason ||
+    selection?.error ||
+    selection?.confidence != null
+  );
+}
+
+function runStateFromPayload(payload: StreamPayload): RunState {
+  const skillSelection = skillSelectionFromPayload(payload);
+  return {
+    skillSelection,
+    workflowPath: workflowPathFromSelection(skillSelection, payload.workflow_path),
+  };
+}
+
+function mergeRunStateIntoMessage(message: ChatMessage, payload: StreamPayload): ChatMessage {
+  const runState = runStateFromPayload(payload);
+  if (!runState.skillSelection && !runState.workflowPath) return message;
+  return {
+    ...message,
+    skillSelection: runState.skillSelection
+      ? { ...message.skillSelection, ...runState.skillSelection }
+      : message.skillSelection,
+    workflowPath: message.workflowPath || runState.workflowPath,
   };
 }
 
@@ -1198,11 +1237,7 @@ function SkillSelectionCard({
   workflowPath?: string | null;
 }) {
   const selected = selection.selected_skill || selection.model_choice || selection.fallback_choice || "未选择";
-  const sourceLabel = selection.source === "model" ? "模型选择" : "规则兜底";
-  const sourceClass =
-    selection.source === "model"
-      ? "border-blue-100 bg-blue-50 text-blue-700"
-      : "border-amber-100 bg-amber-50 text-amber-700";
+  const source = skillSelectionSourceMeta(selection.source);
   return (
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <div className="border-b border-slate-100 bg-slate-50 px-4 py-3">
@@ -1212,7 +1247,7 @@ function SkillSelectionCard({
               Skill Selection
             </div>
             <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
-              {sourceLabel === "模型选择" ? "模型选择了" : "规则兜底选择了"} {selected}
+              {source.titlePrefix} {selected}
             </h3>
             {workflowPath && (
               <p className="mt-1 break-words text-ui-small text-slate-500">
@@ -1220,8 +1255,8 @@ function SkillSelectionCard({
               </p>
             )}
           </div>
-          <span className={`shrink-0 rounded-full border px-2.5 py-1 text-ui-micro font-medium ${sourceClass}`}>
-            {sourceLabel}
+          <span className={`shrink-0 rounded-full border px-2.5 py-1 text-ui-micro font-medium ${source.className}`}>
+            {source.label}
           </span>
         </div>
       </div>
@@ -1242,6 +1277,28 @@ function SkillSelectionCard({
       </details>
     </section>
   );
+}
+
+function skillSelectionSourceMeta(source?: string) {
+  if (source === "model") {
+    return {
+      label: "模型选择",
+      titlePrefix: "模型选择了",
+      className: "border-blue-100 bg-blue-50 text-blue-700",
+    };
+  }
+  if (source === "fallback") {
+    return {
+      label: "规则兜底",
+      titlePrefix: "规则兜底选择了",
+      className: "border-amber-100 bg-amber-50 text-amber-700",
+    };
+  }
+  return {
+    label: "已选择",
+    titlePrefix: "已选择",
+    className: "border-slate-200 bg-slate-50 text-slate-600",
+  };
 }
 
 function EvidenceRow({ label, value }: { label: string; value: string }) {

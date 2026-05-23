@@ -124,6 +124,91 @@ describe("ChatPage", () => {
     expect(screen.queryByText("workflow_context")).not.toBeInTheDocument();
   });
 
+  it("merges streamed skill selection evidence into the active agent bubble", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "assistant_started",
+        run_id: "run-skill",
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "progress",
+        run_id: "run-skill",
+        stage: "skill_selection",
+        content: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        skill_selection: {
+          selected_skill: "lab4ai-auto-reproduct",
+          source: "model",
+          model_choice: "lab4ai-auto-reproduct",
+          fallback_choice: null,
+          reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+          confidence: null,
+          error: null,
+        },
+        workflow_path: "skills/lab4ai-auto-reproduct/project_reproduce.yaml",
+        timestamp: "2026-05-20T00:00:02Z",
+      });
+    });
+
+    expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    expect(
+      screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+  });
+
+  it("uses a neutral label for unknown skill selection source", async () => {
+    conversationPayload.metadata = {
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "runtime",
+        model_choice: null,
+        fallback_choice: null,
+        reason: "Runtime provided the selected skill.",
+        confidence: null,
+        error: null,
+      },
+    };
+
+    renderChat();
+
+    expect(await screen.findByText("已选择 lab4ai-auto-reproduct")).toBeInTheDocument();
+    expect(screen.getByText("已选择")).toBeInTheDocument();
+    expect(screen.queryByText("规则兜底")).not.toBeInTheDocument();
+  });
+
+  it("does not render skill selection card for empty streamed selection payload", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "progress",
+        run_id: "run-empty-skill",
+        stage: "skill_selection",
+        content: "Skill selection not available yet.",
+        skill_selection: {},
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+    });
+
+    expect(await screen.findByText("LOBSTER Agent")).toBeInTheDocument();
+    expect(screen.queryByText("Skill Selection")).not.toBeInTheDocument();
+    expect(screen.queryByText("未选择")).not.toBeInTheDocument();
+  });
+
   it("renders streamed assistant deltas, tool timeline, and skill workflow board in one round", async () => {
     renderChat();
 
