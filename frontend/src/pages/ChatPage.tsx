@@ -1513,6 +1513,10 @@ function HumanInputPanel({
   input: PendingUserInput;
   onSubmit: (content: string) => Promise<void>;
 }) {
+  if (input.intervention?.type === "lab4ai_credentials_required") {
+    return <Lab4AICredentialPanel input={input} onSubmit={onSubmit} />;
+  }
+
   return (
     <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3" data-testid="step-human-input">
       <div className="text-ui-meta font-bold uppercase text-amber-700">等待你确认</div>
@@ -1540,6 +1544,105 @@ function HumanInputPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function Lab4AICredentialPanel({
+  input,
+  onSubmit,
+}: {
+  input: PendingUserInput;
+  onSubmit: (content: string) => Promise<void>;
+}) {
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const endpoint = String(input.intervention?.admin_endpoint || "/api/admin/settings/lab4ai");
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+    if (!phone.trim() || !password.trim()) {
+      setError("请填写 Lab4AI 平台账号和密码。");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await apiFetch(endpoint, {
+        method: "PUT",
+        body: JSON.stringify({ phone: phone.trim(), password }),
+      });
+      setPhone("");
+      setPassword("");
+      await onSubmit("已完成配置，继续执行");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存失败，请检查账号权限后重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={handleSave}
+      className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3"
+      data-testid="lab4ai-credential-panel"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-ui-meta font-bold uppercase text-amber-700">等待你确认</div>
+          <div className="mt-1 text-ui-small font-semibold text-amber-800">需要你的输入</div>
+          <div className="mt-1 text-ui-small leading-relaxed text-amber-700">
+            {input.question}
+          </div>
+        </div>
+        <span className="rounded-full border border-amber-200 bg-white px-2 py-0.5 text-ui-micro font-medium text-amber-700">
+          Human Input
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2">
+        <label className="grid gap-1 text-ui-small font-medium text-amber-900">
+          手机号/账号
+          <input
+            value={phone}
+            onChange={(event) => setPhone(event.target.value)}
+            autoComplete="username"
+            className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-chat-body font-normal text-slate-700 outline-none focus:border-amber-300"
+          />
+        </label>
+        <label className="grid gap-1 text-ui-small font-medium text-amber-900">
+          密码
+          <input
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            type="password"
+            autoComplete="current-password"
+            className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-chat-body font-normal text-slate-700 outline-none focus:border-amber-300"
+          />
+        </label>
+      </div>
+      {error && <div className="mt-2 text-ui-small text-red-600">{error}</div>}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="submit"
+          disabled={saving}
+          className="rounded-lg bg-slate-800 px-3 py-1.5 text-ui-small font-medium text-white hover:bg-slate-700 disabled:bg-slate-300"
+        >
+          {saving ? "保存中..." : "保存并继续"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onSubmit("停止任务")}
+          className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-ui-small text-slate-700 hover:bg-amber-100"
+        >
+          稍后再说
+        </button>
+      </div>
+      <div className="mt-2 text-ui-micro leading-relaxed text-amber-700">
+        页面只会显示“凭证已配置”，不会把账号或密码写入普通聊天正文。
+      </div>
+    </form>
   );
 }
 

@@ -1135,21 +1135,40 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
   });
 
-  it("shows Lab4AI credential request inline and continues from chat confirmation", async () => {
+  it("saves Lab4AI credentials from the workflow step without sending secrets as chat text", async () => {
     conversationPayload.status = "active";
     conversationPayload.metadata = {
       workflow_state: "waiting_for_user",
+      workflow_current_step_id: "step_3_deploy_cpu",
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: { repo_name: "PhotoDoodle" },
+      workflow_steps: [
+        {
+          id: "step_3_deploy_cpu",
+          name: "拉起廉价 CPU 实例",
+          status: "waiting_for_user",
+          output: "申请 CPU 实例前需要 Lab4AI 登录凭证。",
+        },
+      ],
       pending_user_input: {
         question: "Lab4AI 凭证未配置，请先由管理员配置平台账号。",
         options: ["已完成配置，继续执行", "停止任务"],
         tool_name: "lab4ai_create_instance",
+        workflow_step_id: "step_3_deploy_cpu",
         intervention: {
           type: "lab4ai_credentials_required",
           title: "需要配置 Lab4AI 平台账号",
+          admin_endpoint: "/api/admin/settings/lab4ai",
         },
       },
     };
-    globalThis.fetch = vi.fn().mockImplementation(() => {
+    globalThis.fetch = vi.fn().mockImplementation((path: string, options?: RequestInit) => {
+      if (path === "/api/admin/settings/lab4ai" && options?.method === "PUT") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ configured: true, phone_masked: "138****8000" }),
+        });
+      }
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve(conversationPayload),
@@ -1158,13 +1177,24 @@ describe("ChatPage", () => {
 
     renderChat();
 
-    const inlineDecision = await screen.findByTestId("inline-human-decision");
-    expect(within(inlineDecision).getByText("Lab4AI 凭证未配置，请先由管理员配置平台账号。")).toBeInTheDocument();
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    const step = await screen.findByTestId("workflow-step-step_3_deploy_cpu");
+    fireEvent.change(within(step).getByLabelText("手机号/账号"), {
+      target: { value: "13800008000" },
+    });
+    fireEvent.change(within(step).getByLabelText("密码"), {
+      target: { value: "super-secret-password" },
+    });
+    fireEvent.click(within(step).getByRole("button", { name: "保存并继续" }));
 
-    fireEvent.click(
-      within(inlineDecision).getByRole("button", { name: "已完成配置，继续执行" })
-    );
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "/api/admin/settings/lab4ai",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ phone: "13800008000", password: "super-secret-password" }),
+        })
+      );
+    });
 
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -1175,5 +1205,10 @@ describe("ChatPage", () => {
         })
       );
     });
+
+    const messageCalls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .filter(([path]) => path === "/api/conversations/7/messages")
+      .map(([, options]) => String((options as RequestInit).body || ""));
+    expect(messageCalls.join("\n")).not.toContain("super-secret-password");
   });
 });
