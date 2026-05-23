@@ -29,7 +29,9 @@ function renderChat() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  return {
+    queryClient,
+    ...render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={["/reproduce/task/7"]}>
         <Routes>
@@ -37,7 +39,8 @@ function renderChat() {
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>
-  );
+    ),
+  };
 }
 
 describe("ChatPage", () => {
@@ -274,6 +277,86 @@ describe("ChatPage", () => {
       screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
     ).toBeInTheDocument();
     expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+  });
+
+  it("merges refetched metadata run state into the current streamed agent bubble", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...conversationPayload,
+            metadata: { ...conversationPayload.metadata },
+            messages: conversationPayload.messages.map((message) => ({ ...message })),
+          }),
+      } as Response)
+    );
+    const { queryClient } = renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "assistant_started",
+        run_id: "run-refetch-skill",
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "assistant_delta",
+        run_id: "run-refetch-skill",
+        delta: "streamed active content",
+        skill_selection: {
+          selected_skill: "lab4ai-auto-reproduct",
+          source: "model",
+          model_choice: "lab4ai-auto-reproduct",
+          fallback_choice: null,
+          reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+          confidence: null,
+          error: null,
+        },
+        workflow_path: "skills/lab4ai-auto-reproduct/project_reproduce.yaml",
+      });
+    });
+
+    expect(await screen.findByText("streamed active content")).toBeInTheDocument();
+    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+
+    conversationPayload.updated_at = "2026-05-20T00:00:10Z";
+    conversationPayload.metadata = {
+      skill_selection: {
+        selected_skill: "lab4ai-auto-reproduct",
+        source: "model",
+        model_choice: "lab4ai-auto-reproduct",
+        fallback_choice: null,
+        reason: "Model selected registered skill `lab4ai-auto-reproduct`.",
+        confidence: null,
+        error: null,
+      },
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_steps: [],
+    };
+    await act(async () => {
+      const refetchedConversation = {
+        ...conversationPayload,
+        metadata: { ...conversationPayload.metadata },
+        messages: conversationPayload.messages.map((message) => ({ ...message })),
+      };
+      queryClient.setQueryData(["conversation", "7"], refetchedConversation);
+      queryClient.setQueryData(["conversation", 7], refetchedConversation);
+      await Promise.resolve();
+    });
+
+    const content = screen.getByText("streamed active content");
+    const agentBubble = content.closest(".flex.gap-4");
+    await waitFor(() => {
+      expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    });
+    expect(agentBubble).toHaveTextContent("lab4ai-auto-reproduct");
+    expect(agentBubble).toHaveTextContent("skills/lab4ai-auto-reproduct/project_reproduce.yaml");
   });
 
   it("merges top-level skill selection source into streamed selection object", async () => {

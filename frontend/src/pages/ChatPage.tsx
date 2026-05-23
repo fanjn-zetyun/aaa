@@ -390,15 +390,7 @@ export default function ChatPage() {
       activeAgentMessageIdRef.current = existing.id;
       return { messages: prev, id: existing.id };
     }
-    const lastUserIndex = findLastIndex(prev, (msg) => msg.role === "user");
-    const processOnlyIndex = findLastIndex(
-      prev,
-      (msg, index) =>
-        index > lastUserIndex &&
-        msg.role === "agent" &&
-        msg.content === "" &&
-        (!!msg.skillSelection || !!msg.workflow)
-    );
+    const processOnlyIndex = findCurrentRunProcessMessageIndex(prev);
     if (processOnlyIndex >= 0) {
       const existingProcess = prev[processOnlyIndex];
       activeAgentMessageIdRef.current = existingProcess.id;
@@ -598,7 +590,12 @@ export default function ChatPage() {
 
   async function copyMessage(message: ChatMessage) {
     try {
-      await navigator.clipboard.writeText(cleanFinalAnswer(message.content, !!message.workflow || !!message.events?.length));
+      await navigator.clipboard.writeText(
+        cleanFinalAnswer(
+          message.content,
+          !!message.skillSelection || !!message.workflow || !!message.events?.length
+        )
+      );
       setCopiedMessageId(message.id);
       window.setTimeout(() => setCopiedMessageId(null), 1200);
     } catch {
@@ -731,19 +728,19 @@ function mergePersistedChatMessages(current: ChatMessage[], persistedMessages: C
     if (existingIndex >= 0) {
       next = next.map((item, index) =>
         index === existingIndex
-          ? {
-              ...item,
-              content: chatMessage.content || item.content,
-              created_at: typeof chatMessage.id === "number" ? chatMessage.created_at : item.created_at,
-              events: mergeTimelineEvents(item.events, chatMessage.events),
-              workflow: chatMessage.workflow || item.workflow,
-              skillSelection: chatMessage.skillSelection || item.skillSelection,
-              workflowPath: chatMessage.workflowPath || item.workflowPath,
-              streaming: item.streaming && !chatMessage.content ? item.streaming : false,
-            }
+          ? mergePersistedMessageState(item, chatMessage)
           : item
       );
       continue;
+    }
+    if (isProcessOnlyRunMessage(chatMessage)) {
+      const currentRunIndex = findCurrentRunProcessMessageIndex(next);
+      if (currentRunIndex >= 0) {
+        next = next.map((item, index) =>
+          index === currentRunIndex ? mergePersistedMessageState(item, chatMessage) : item
+        );
+        continue;
+      }
     }
     const pendingUserIndex =
       chatMessage.role === "user"
@@ -761,6 +758,20 @@ function mergePersistedChatMessages(current: ChatMessage[], persistedMessages: C
     }
   }
   return next;
+}
+
+function mergePersistedMessageState(message: ChatMessage, incoming: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    content: incoming.content || message.content,
+    created_at: typeof incoming.id === "number" ? incoming.created_at : message.created_at,
+    events: mergeTimelineEvents(message.events, incoming.events),
+    workflow: message.workflow || incoming.workflow,
+    skillSelection: message.skillSelection || incoming.skillSelection,
+    workflowPath: message.workflowPath || incoming.workflowPath,
+    streaming: message.streaming && !incoming.content ? message.streaming : false,
+    run_id: message.run_id || incoming.run_id,
+  };
 }
 
 function attachRunStateToLastAgent(
@@ -912,6 +923,25 @@ function mergeRunStateIntoMessage(message: ChatMessage, payload: StreamPayload):
       : message.skillSelection,
     workflowPath: payload.workflow_path ?? message.workflowPath ?? runState.workflowPath,
   };
+}
+
+function isProcessOnlyRunMessage(message: ChatMessage) {
+  return (
+    message.role === "agent" &&
+    message.content === "" &&
+    (!!message.skillSelection || !!message.workflow)
+  );
+}
+
+function findCurrentRunProcessMessageIndex(messages: ChatMessage[]) {
+  const lastUserIndex = findLastIndex(messages, (msg) => msg.role === "user");
+  return findLastIndex(
+    messages,
+    (msg, index) =>
+      index > lastUserIndex &&
+      msg.role === "agent" &&
+      (msg.streaming === true || isProcessOnlyRunMessage(msg))
+  );
 }
 
 function workflowPathFromSelection(selection?: SkillSelectionState, payloadPath?: string | null) {
