@@ -12,6 +12,10 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from app.agent_runtime.events import CallbackEventSink
+from app.agent_runtime.llm import LLMAdapter
+from app.agent_runtime.runtime import AgentRuntime
+from app.agent_runtime.tool_executor import ToolExecutor
 from app.core.database import SessionLocal
 from app.models import Conversation, ConversationMessage, LLMConfig
 from app.models.conversation import ConversationStatus, MessageRole
@@ -154,6 +158,28 @@ class AgentLoopManager:
             return
         self._pending_starts.discard(conversation_id)
         self.start(conversation_id)
+
+    async def _run_with_agent_runtime_v3(
+        self,
+        *,
+        conversation_id: int,
+        config: LLMRuntimeConfig,
+    ) -> bool:
+        settings = get_settings()
+        if not settings.agent_runtime_v3_enabled:
+            return False
+        if not config.configured:
+            return False
+        async with SessionLocal() as session:
+            event_sink = CallbackEventSink(lambda event: self._publish(conversation_id, event))
+            runtime = AgentRuntime(
+                session=session,
+                llm=LLMAdapter(config),
+                tool_executor=ToolExecutor(registry=self._tools, event_sink=event_sink),
+                event_sink=event_sink,
+            )
+            await runtime.run_conversation(conversation_id, model=config.model)
+        return True
 
     async def stop(self, conversation_id: int) -> None:
         task = self._tasks.get(conversation_id)
@@ -311,6 +337,11 @@ class AgentLoopManager:
                 return
 
             llm_config = await _load_llm_config(user_id)
+            if await self._run_with_agent_runtime_v3(
+                conversation_id=conversation_id,
+                config=llm_config,
+            ):
+                return
             skill, skill_name, metadata = await self._select_skill_for_run(
                 llm_config,
                 metadata,

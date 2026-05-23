@@ -335,6 +335,46 @@ async def test_safe_skill_selection_evidence_drops_non_finite_float_and_caps_str
     }
 
 
+async def test_agent_loop_delegates_to_agent_runtime_v3_when_enabled(monkeypatch):
+    class FakeSettings:
+        agent_runtime_v3_enabled = True
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return "session"
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeAgentRuntime:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        async def run_conversation(self, conversation_id: int, *, model: str):
+            calls.append(("run", {"conversation_id": conversation_id, "model": model}))
+
+    manager = AgentLoopManager()
+    config = LLMRuntimeConfig(
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_key="key",
+        model="model",
+        max_tokens=4096,
+    )
+    monkeypatch.setattr("app.services.agent_loop.get_settings", lambda: FakeSettings())
+    monkeypatch.setattr("app.services.agent_loop.SessionLocal", lambda: FakeSessionContext())
+    monkeypatch.setattr("app.services.agent_loop.AgentRuntime", FakeAgentRuntime)
+
+    delegated = await manager._run_with_agent_runtime_v3(conversation_id=123, config=config)
+
+    assert delegated is True
+    assert calls[0][0] == "init"
+    assert calls[0][1]["session"] == "session"
+    assert calls[1] == ("run", {"conversation_id": 123, "model": "model"})
+
+
 async def test_model_or_fallback_retries_with_lower_token_budget(monkeypatch):
     seen_tokens: list[int] = []
 
