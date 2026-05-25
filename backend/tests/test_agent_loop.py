@@ -6,8 +6,11 @@ import pytest
 
 from app.services.agent_loop import (
     AgentLoopManager,
+    _apply_model_tool_result_to_workflow,
     _assistant_tool_message,
+    _prepare_model_tool_input,
     _safe_skill_selection_evidence,
+    _should_use_static_workflow_completion_reply,
 )
 from app.services.conversation_memory import (
     mark_running,
@@ -384,6 +387,34 @@ async def test_assistant_tool_message_preserves_raw_thinking_blocks():
     assert message["content"][2]["type"] == "tool_use"
 
 
+async def test_prepare_model_tool_input_drops_remote_output_dir_for_local_analysis():
+    payload = _prepare_model_tool_input(
+        "analyze_paper",
+        {
+            "paper_url": "https://arxiv.org/pdf/2502.14397",
+            "github_url": "https://github.com/showlab/PhotoDoodle",
+            "output_dir": "/root/.openclaw/workspace/PhotoDoodle",
+        },
+        {"github_url": "https://github.com/showlab/PhotoDoodle"},
+        "step_1_audit",
+    )
+
+    assert "output_dir" not in payload
+
+
+async def test_prepare_model_tool_input_defaults_gpu_creation_from_workflow_step():
+    payload = _prepare_model_tool_input(
+        "lab4ai_create_instance",
+        {},
+        {},
+        "step_6_deploy_gpu",
+    )
+
+    assert payload["workflow_step_id"] == "step_6_deploy_gpu"
+    assert payload["resource_kind"] == "GPU"
+    assert payload["gpu_count"] == 1
+
+
 async def test_agent_loop_delegates_to_agent_runtime_v3_when_enabled(monkeypatch):
     class FakeSettings:
         agent_runtime_v3_enabled = True
@@ -757,6 +788,100 @@ async def test_step_model_tool_use_resumes_approved_waiting_tool_without_new_mod
     assert step_state["tool_calls"][-1]["status"] == "completed"
 
 
+async def test_step_model_tool_use_defers_after_failed_resumed_remote_tool(
+    monkeypatch,
+    test_user,
+    db_session,
+):
+    from app.models import Conversation
+    from app.models.conversation import ConversationStatus, ConversationTaskType
+
+    async def fail_model_call(*args, **kwargs):
+        raise AssertionError("resumed approved tool should execute without a new model call")
+
+    manager = AgentLoopManager()
+    monkeypatch.setattr("app.services.agent_loop.call_anthropic_compatible_tool_use", fail_model_call)
+
+    async def fake_invoke(name, tool_input, context=None):
+        return ToolResult(
+            name,
+            "clone failed",
+            ok=False,
+            metadata={"error_code": "nonzero_exit", "exit_code": 128},
+        )
+
+    monkeypatch.setattr(manager._tools, "invoke", fake_invoke)
+    conversation = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.REPRODUCE,
+        title="resume failed remote tool",
+        status=ConversationStatus.RUNNING,
+        metadata_={},
+    )
+    db_session.add(conversation)
+    await db_session.commit()
+    await db_session.refresh(conversation)
+
+    step = WorkflowStep(id="step_4_cpu_env_setup", name="CPU setup")
+    metadata = ensure_workflow_metadata_for_step(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "workflow_resources": {"cpu": {"server_id": "cpu-1"}},
+            }
+        ),
+        step,
+    )
+    tool_input = {
+        "server_id": "cpu-1",
+        "resource_kind": "CPU",
+        "command": "git clone https://github.com/example/demo .",
+        "workflow_step_id": step.id,
+        "tool_call_id": "call_waiting_ssh",
+        "workflow_run_id": metadata["workflow_run_id"],
+    }
+    metadata = add_workflow_tool_call(
+        metadata,
+        step,
+        tool_call_id="call_waiting_ssh",
+        tool_name="ssh_execute",
+        status="waiting_for_user",
+    )
+    metadata = mark_waiting_for_user(
+        metadata,
+        question="continue?",
+        options=["yes", "no"],
+        step="tool_confirm:ssh_execute",
+        tool_name="ssh_execute",
+        tool_input=tool_input,
+        tool_call_id="call_waiting_ssh",
+        workflow_step_id=step.id,
+    )
+    metadata = resolve_pending_user_input(metadata, answer="yes")
+
+    metadata, outputs, paused, handled, failed = await manager._run_step_model_tool_use(
+        conversation.id,
+        metadata,
+        step,
+        LLMRuntimeConfig(
+            provider="anthropic",
+            base_url="https://api.example.com",
+            api_key="key",
+            model="model",
+            max_tokens=4096,
+        ),
+        system="system",
+        messages=[],
+    )
+
+    assert paused is False
+    assert handled is True
+    assert failed is False
+    assert outputs == ["ssh_execute: clone failed"]
+    step_state = workflow_step_state(metadata, "step_4_cpu_env_setup")
+    assert step_state["tool_calls"][-1]["status"] == "failed"
+
+
 async def test_step_model_tool_use_executes_allowed_tool(monkeypatch):
     manager = AgentLoopManager()
     seen_tools: list[list[dict]] = []
@@ -933,7 +1058,7 @@ async def test_step_model_tool_use_records_resource_evidence(monkeypatch):
     assert step_state["evidence"]["completion_source"] == "model_tool_use"
 
 
-async def test_step_model_tool_use_fails_when_model_omits_required_tool(monkeypatch):
+async def test_step_model_tool_use_defers_when_model_omits_required_tool(monkeypatch):
     manager = AgentLoopManager()
 
     async def fake_tool_use(config, *, system, messages, tools):
@@ -982,7 +1107,7 @@ async def test_step_model_tool_use_fails_when_model_omits_required_tool(monkeypa
 
     assert paused is False
     assert handled is False
-    assert failed is True
+    assert failed is False
     assert "未调用当前 step 允许的任何 Tool" in outputs[0]
     assert "workflow_resources" not in metadata
 
@@ -1341,6 +1466,83 @@ async def test_step_model_tool_use_rejects_ssh_wrapper_without_remote_command(mo
     assert failed is True
     assert invoked == []
     assert "没有可安全提取的远程命令" in outputs[0]
+
+
+async def test_completed_workflow_uses_static_completion_reply_guard():
+    metadata = {
+        "workflow_state": "completed",
+        "workflow_steps": [
+            {"id": "step_1_audit", "status": "completed"},
+            {"id": "step_2_condition_check", "status": "completed"},
+        ],
+    }
+
+    assert _should_use_static_workflow_completion_reply(metadata) is True
+
+
+async def test_incomplete_workflow_does_not_use_static_completion_reply_guard():
+    metadata = {
+        "workflow_state": "running",
+        "workflow_steps": [
+            {"id": "step_1_audit", "status": "completed"},
+            {"id": "step_2_condition_check", "status": "running"},
+        ],
+    }
+
+    assert _should_use_static_workflow_completion_reply(metadata) is False
+
+
+async def test_model_repro_report_records_local_and_remote_artifacts():
+    local_path = r"D:\codexP\aaa\runtime\workspaces\86\PhotoDoodle\PhotoDoodle_Final_Repro_Report.docx"
+    markdown_path = r"D:\codexP\aaa\runtime\workspaces\86\PhotoDoodle\PhotoDoodle_Final_Repro_Report.md"
+    remote_path = "/workspace/user-data/codelab/PhotoDoodle/PhotoDoodle_Final_Repro_Report.docx"
+    metadata = {
+        "workflow_results": {},
+        "workflow_steps": [
+            {
+                "id": "step_8_generate_report",
+                "name": "Report",
+                "status": "running",
+                "output": "",
+                "depends_on": [],
+                "expected_output": "",
+                "evidence": {},
+                "artifacts": [],
+                "tool_calls": [],
+                "progress": [],
+            }
+        ],
+    }
+    result = ToolResult(
+        "repro_report",
+        "ok",
+        metadata={
+            "report_path": remote_path,
+            "local_report_path": local_path,
+            "markdown_report_path": markdown_path,
+            "remote_report_path": remote_path,
+            "artifact_paths": [remote_path, local_path, markdown_path],
+        },
+    )
+
+    updated = _apply_model_tool_result_to_workflow(
+        metadata,
+        "step_8_generate_report",
+        "repro_report",
+        {},
+        result,
+    )
+
+    step_state = workflow_step_state(updated, "step_8_generate_report")
+    assert updated["workflow_results"]["word_report_path"] == local_path
+    assert step_state["evidence"]["report_path"] == local_path
+    assert step_state["evidence"]["local_report_path"] == local_path
+    assert step_state["evidence"]["markdown_report_path"] == markdown_path
+    assert step_state["evidence"]["remote_report_path"] == remote_path
+    assert updated["workflow_results"]["markdown_report_path"] == markdown_path
+    assert remote_path in step_state["artifacts"]
+    assert local_path in step_state["artifacts"]
+    assert markdown_path in step_state["artifacts"]
 
 
 async def test_step_model_tool_use_fails_on_unresolved_templates(monkeypatch):

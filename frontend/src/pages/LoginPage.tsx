@@ -63,7 +63,7 @@ export default function LoginPage() {
           <svg className="w-6 h-6 text-orange-600" viewBox="0 0 24 24" fill="currentColor">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v1.85c2.95 1.3 5 4.25 5 7.65 0 1.61-.46 3.1-1.2 4.36z" />
           </svg>
-          <span className="font-bold tracking-widest text-slate-800 text-ui-title">LOBSTER</span>
+          <span className="font-bold tracking-wide text-slate-800 text-ui-title">AutoResearch24</span>
         </div>
 
         <div className="bg-white rounded-2xl shadow-[0_12px_40px_-12px_rgba(0,0,0,0.05),0_1px_3px_rgba(0,0,0,0.02)] border border-slate-100 p-8">

@@ -23,6 +23,9 @@ class RuntimeState:
     pending_user_input: dict[str, Any] | None = None
     token_budget: dict[str, int] = field(default_factory=lambda: {"planning": 2048, "final": 8192})
     cleanup_required: bool = False
+    instruction_plans: dict[str, Any] = field(default_factory=dict)
+    instruction_failures: dict[str, list[str]] = field(default_factory=dict)
+    last_tool_results: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def new(cls, *, conversation_id: int, model: str) -> RuntimeState:
@@ -51,6 +54,11 @@ class RuntimeState:
             pending_user_input=self.pending_user_input,
             token_budget=dict(self.token_budget),
             cleanup_required=self.cleanup_required,
+            instruction_plans=dict(self.instruction_plans),
+            instruction_failures={
+                str(key): list(value) for key, value in self.instruction_failures.items()
+            },
+            last_tool_results=[dict(item) for item in self.last_tool_results],
         )
 
     def mark_waiting_for_user(
@@ -80,6 +88,11 @@ class RuntimeState:
             "pending_user_input": self.pending_user_input,
             "token_budget": dict(self.token_budget),
             "cleanup_required": self.cleanup_required,
+            "instruction_plans": dict(self.instruction_plans),
+            "instruction_failures": {
+                str(key): list(value) for key, value in self.instruction_failures.items()
+            },
+            "last_tool_results": [dict(item) for item in self.last_tool_results],
         }
 
 
@@ -115,4 +128,13 @@ def load_runtime_state(metadata: dict[str, Any], *, conversation_id: int) -> Run
         else None,
         token_budget=dict(raw.get("token_budget") or {"planning": 2048, "final": 8192}),
         cleanup_required=bool(raw.get("cleanup_required") or False),
+        instruction_plans=dict(raw.get("instruction_plans") or {}),
+        instruction_failures={
+            str(key): [str(item) for item in value]
+            for key, value in dict(raw.get("instruction_failures") or {}).items()
+            if isinstance(value, list)
+        },
+        last_tool_results=[
+            dict(item) for item in raw.get("last_tool_results") or [] if isinstance(item, dict)
+        ],
     )

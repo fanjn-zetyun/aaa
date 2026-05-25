@@ -19,6 +19,10 @@ class Lab4AICredentials:
     password: str
 
 
+def mask_lab4ai_phone(phone: str) -> str:
+    return phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else "***"
+
+
 async def _get_setting(session: AsyncSession, key: str) -> str | None:
     setting = await session.get(AdminSetting, key)
     return setting.value if setting else None

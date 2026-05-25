@@ -344,6 +344,66 @@ async def test_repro_report_maps_final_path_to_remote_codelab(
     ]
 
 
+async def test_repro_report_returns_workspace_markdown_report_artifact(
+    monkeypatch,
+    tmp_path,
+    test_user,
+    db_session,
+):
+    registry = ToolRegistry()
+    local_report = tmp_path / "demo_Final_Repro_Report.docx"
+    markdown_report = tmp_path / "demo_Final_Repro_Report.md"
+    local_report.write_bytes(b"docx")
+    markdown_report.write_text("# demo 自动化复现报告", encoding="utf-8")
+
+    async def fake_skill_invoke(name, payload):
+        assert name == "generate_repro_report"
+        return SkillRuntimeResult(
+            name,
+            f"报告生成成功：`{local_report}`",
+            metadata={
+                "report_path": str(local_report),
+                "markdown_report_path": str(markdown_report),
+                "artifact_paths": [str(local_report), str(markdown_report)],
+            },
+        )
+
+    async def fake_publish(local_path, remote_path, payload, context):
+        return ToolResult(
+            "repro_report_publish",
+            "uploaded",
+            metadata={"remote_report_path": remote_path, "server_id": "gpu-1"},
+        )
+
+    monkeypatch.setattr(registry._skill_runtime, "invoke", fake_skill_invoke)
+    monkeypatch.setattr(registry, "_publish_report_to_codelab", fake_publish)
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=778,
+        session=db_session,
+    )
+
+    result = await registry.invoke(
+        "repro_report",
+        {
+            "repo_name": "demo",
+            "workflow_results": {},
+            "resource_kind": "GPU",
+            "remote_report_path": "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx",
+        },
+        context=context,
+    )
+
+    assert result.ok is True
+    assert result.metadata["markdown_report_path"] == str(markdown_report)
+    assert result.metadata["artifact_paths"] == [
+        "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx",
+        str(local_report),
+        str(markdown_report),
+    ]
+    assert result.metadata["report_path_mapping"]["markdown_report_path"] == str(markdown_report)
+
+
 async def test_unadapted_skill_tool_returns_structured_failure():
     registry = ToolRegistry()
 
@@ -412,6 +472,52 @@ async def test_lab4ai_create_instance_records_cloud_instance(
     assert cloud.server_id == "server-1"
     assert cloud.status == CloudInstanceStatus.RUNNING
     assert "simulated" not in result.metadata
+
+
+async def test_lab4ai_create_instance_infers_gpu_from_workflow_step(
+    monkeypatch,
+    test_user,
+    db_session,
+):
+    requested: list[dict] = []
+
+    async def fake_credentials(session):
+        return type("Creds", (), {"phone": "13800138000", "password": "secret"})()
+
+    async def fake_create_instance(*args, **kwargs):
+        requested.append(kwargs)
+        return Lab4AIInstance(
+            server_id="gpu-server",
+            instance_id="gpu-inst",
+            rule_name="GPU",
+            gpu_count=1,
+            ssh_host="127.0.0.1",
+            ssh_port="2222",
+            ssh_user="root",
+            ssh_pass="pass",
+            raw_payload={"serverId": "gpu-server"},
+        )
+
+    monkeypatch.setattr("app.services.tools.load_lab4ai_credentials", fake_credentials)
+    monkeypatch.setattr("app.services.tools.create_instance", fake_create_instance)
+    registry = ToolRegistry()
+    context = ToolExecutionContext(
+        user_id=test_user.id,
+        conversation_id=457,
+        session=db_session,
+    )
+
+    result = await registry.invoke(
+        "lab4ai_create_instance",
+        {"workflow_step_id": "step_6_deploy_gpu"},
+        context=context,
+    )
+
+    cloud = await db_session.get(CloudInstance, result.metadata["cloud_instance_id"])
+    assert requested[0]["target_model"] == "GPU"
+    assert cloud is not None
+    assert cloud.instance_type == CloudInstanceType.GPU
+    assert result.metadata["resource_kind"] == "GPU"
 
 
 async def test_lab4ai_stop_instance_updates_cloud_instance(monkeypatch, test_user, db_session):

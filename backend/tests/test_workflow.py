@@ -7,6 +7,7 @@ from app.services.conversation_memory import mark_running, resolve_pending_user_
 from app.services.tools import ToolResult
 from app.services.workflow import (
     SkillWorkflowRunner,
+    _cpu_clone_command,
     add_workflow_tool_call,
     cleanup_workflow_resources,
     ensure_workflow_metadata,
@@ -61,6 +62,16 @@ tasks:
     assert audit["progress"] == []
     assert audit["error"] is None
     assert cpu["allowed_tools"] == ["lab4ai_create_instance"]
+
+
+def test_cpu_clone_command_clears_non_git_code_dir_before_clone():
+    command = _cpu_clone_command(
+        {"github_url": "https://github.com/showlab/PhotoDoodle"},
+        "PhotoDoodle",
+    )
+
+    assert "find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +" in command
+    assert "git clone --recursive 'https://gh-proxy.org/https://github.com/showlab/PhotoDoodle' ." in command
 
 
 @pytest.mark.asyncio
@@ -329,6 +340,174 @@ tasks:
     assert step["evidence"]["project_prep_completed"] is True
     assert step["evidence"]["completion_source"] == "model_tool_use"
     assert step["output"] == "file_system_read: ok"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_continues_fixed_executor_when_model_tool_hook_misses_contract():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_4_cpu_env_setup
+    name: CPU setup
+"""
+    )
+    events: list[dict] = []
+    hook_calls: list[str] = []
+    tool_calls: list[str] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        tool_calls.append(tool_name)
+        return (
+            ToolResult(
+                tool_name,
+                f"{tool_name} ok",
+                metadata={"exit_code": 0, "stdout": "ok", "stderr": ""},
+            ),
+            metadata,
+            False,
+        )
+
+    async def write(metadata):
+        return None
+
+    async def step_hook(metadata, step):
+        hook_calls.append(step.id)
+        metadata = add_workflow_tool_call(
+            metadata,
+            step,
+            tool_call_id="model-tool-clone",
+            tool_name="ssh_execute",
+            status="running",
+        )
+        metadata = update_workflow_tool_call(
+            metadata,
+            step.id,
+            "model-tool-clone",
+            status="completed",
+            ok=True,
+            result_metadata={"exit_code": 0},
+        )
+        metadata = set_workflow_step_evidence(
+            metadata,
+            step,
+            clone_completed=True,
+            remote_workspace_verified=True,
+            git_repo_verified=True,
+            completion_source="model_tool_use",
+        )
+        return metadata, ["ssh_execute: clone ok"], False, True
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+        run_step_model_tools=step_hook,
+    )
+
+    result = await runner.run(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "github_url": "https://github.com/example/demo",
+                "workflow_resources": {"cpu": {"server_id": "cpu-1"}},
+            }
+        )
+    )
+
+    assert result.paused is False
+    assert result.failed is False
+    assert hook_calls == ["step_4_cpu_env_setup"]
+    assert "remote_project_prep" in tool_calls
+    step = workflow_step_state(result.metadata, "step_4_cpu_env_setup")
+    assert step["status"] == "completed"
+    assert step["evidence"]["dependency_install_attempted"] is True
+    assert step["evidence"]["project_prep_completed"] is True
+    assert step["evidence"]["completion_source"] == "skill_contract_executor"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_skips_clone_executor_when_model_tool_hook_already_cloned():
+    workflow = parse_workflow(
+        """
+version: demo/v1
+name: demo
+tasks:
+  - id: step_4_cpu_env_setup
+    name: CPU setup
+"""
+    )
+    events: list[dict] = []
+    tool_calls: list[str] = []
+
+    async def invoke(metadata, tool_name, tool_input):
+        tool_calls.append(tool_name)
+        return (
+            ToolResult(
+                tool_name,
+                f"{tool_name} ok",
+                metadata={"exit_code": 0, "stdout": "ok", "stderr": ""},
+            ),
+            metadata,
+            False,
+        )
+
+    async def write(metadata):
+        return None
+
+    async def step_hook(metadata, step):
+        metadata = add_workflow_tool_call(
+            metadata,
+            step,
+            tool_call_id="model-tool-clone",
+            tool_name="claw_shell_run",
+            status="running",
+        )
+        metadata = update_workflow_tool_call(
+            metadata,
+            step.id,
+            "model-tool-clone",
+            status="completed",
+            ok=True,
+            result_metadata={"exit_code": 0},
+        )
+        metadata = set_workflow_step_evidence(
+            metadata,
+            step,
+            clone_completed=True,
+            remote_workspace_verified=True,
+            git_repo_verified=True,
+            completion_source="model_tool_use",
+        )
+        return metadata, ["claw_shell_run: clone ok"], False, True
+
+    runner = SkillWorkflowRunner(
+        workflow,
+        skill_name="lab4ai-auto-reproduct",
+        invoke_tool=invoke,
+        write_metadata=write,
+        publish=events.append,
+        run_step_model_tools=step_hook,
+    )
+
+    result = await runner.run(
+        mark_running(
+            {
+                "task_type": "reproduce",
+                "github_url": "https://github.com/example/demo",
+                "workflow_resources": {"cpu": {"server_id": "cpu-1"}},
+            }
+        )
+    )
+
+    assert result.failed is False
+    assert tool_calls[0] == "remote_project_prep"
+    assert tool_calls.count("claw_shell_run") == 0
+    step = workflow_step_state(result.metadata, "step_4_cpu_env_setup")
+    assert step["status"] == "completed"
 
 
 @pytest.mark.asyncio

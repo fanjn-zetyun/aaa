@@ -1,4 +1,4 @@
-# LOBSTER 科研助手平台
+# AutoResearch24 科研助手平台
 
 多用户共享 Lab4AI 算力资源的 Web 应用，通过自建 Agent Loop 自动化完成论文/项目复现任务。
 
@@ -88,7 +88,7 @@ npm run dev
 
 **Skills 全量加载：** 用户无需手动选择 skills，Agent 启动后自动分析仓库内容并决定使用哪些 skill。
 
-**参考实现边界：** [claude-code-analysis/](claude-code-analysis/) 只作为 Agent Loop、Tool、Skill、Memory 机制的架构参考，不作为直接底座。LOBSTER 仍以 FastAPI 后端和 React Web UI 为主。
+**参考实现边界：** [claude-code-analysis/](claude-code-analysis/) 只作为 Agent Loop、Tool、Skill、Memory 机制的架构参考，不作为直接底座。AutoResearch24 仍以 FastAPI 后端和 React Web UI 为主。
 
 ## 当前开发状态
 

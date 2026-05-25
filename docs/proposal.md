@@ -1,4 +1,4 @@
-# LOBSTER 自建 Agent Loop 科研助手 Web 应用 — 设计提案
+# AutoResearch24 自建 Agent Loop 科研助手 Web 应用 — 设计提案
 
 > 本文是当前需求与架构的单一真源。已确认：项目彻底切换到自建 Agent Loop，不再接入外部 Agent CLI，也不再维护 CLI 进程、多实例 Runner 或相关 workspace 方案。
 
@@ -19,7 +19,7 @@
 
 | 维度 | 决策 |
 |---|---|
-| 产品名 | LOBSTER |
+| 产品名 | AutoResearch24 |
 | 交互形态 | 对话式 AI 科研助手 |
 | 智能核心 | 后端自建 Agent Loop |
 | LLM 调用 | 后端直接调用，用户配置 `base_url / api_key / model`；输出 token 预算由 Agent Loop 按阶段控制 |
@@ -35,13 +35,13 @@
 
 ## 3. 架构参考：claude-code-analysis
 
-仓库内的 [claude-code-analysis/](../claude-code-analysis/) 是 Claude Code 相关源码的静态分析与源码镜像。它不作为本项目的直接代码底座，也不作为可直接部署的 Web 工程使用；原因是它主要面向本地 CLI/TUI、Ink 渲染、终端权限交互、远程 bridge 和本地代码执行场景，和 LOBSTER 的 FastAPI 多用户 Web 服务形态不同。
+仓库内的 [claude-code-analysis/](../claude-code-analysis/) 是 Claude Code 相关源码的静态分析与源码镜像。它不作为本项目的直接代码底座，也不作为可直接部署的 Web 工程使用；原因是它主要面向本地 CLI/TUI、Ink 渲染、终端权限交互、远程 bridge 和本地代码执行场景，和 AutoResearch24 的 FastAPI 多用户 Web 服务形态不同。
 
 本项目借鉴它的**系统设计**，不复制它的 CLI/TUI 实现。
 
 可借鉴内容：
 
-| 模块 | `claude-code-analysis` 中的参考 | LOBSTER 中的落地方向 |
+| 模块 | `claude-code-analysis` 中的参考 | AutoResearch24 中的落地方向 |
 |---|---|---|
 | Agent 主循环 | `src/query.ts`、`src/QueryEngine.ts` | Python 版 `AgentLoopManager`，负责模型调用、tool-use 循环和事件流 |
 | Tool 协议 | `src/Tool.ts` | Python `Tool` / `ToolRegistry`，统一 schema、权限、执行、结果格式 |
@@ -166,6 +166,37 @@ async def agent_loop(conversation: Conversation, llm_config: LLMConfig):
 5. 调用模型生成总结。
 
 已确认目标态升级为 **Skill 契约驱动 Workflow + step 内模型 tool-use + SkillRuntime 真实 Tool 注册**。这里的核心不是让模型自由规划，也不是让后端用固定 executor 大概复刻流程，而是把 `skills/` 中声明的内容视为任务契约：后端运行时负责解释、渲染、适配和执行该契约。
+
+下一阶段采用 **Agent Runtime First**：`AgentRuntime` 是 conversation 的顶层执行循环，Workflow 只作为 contract layer 约束当前 step 的 `allowed_tools`、`required_evidence`、postconditions、recovery 和 cleanup。新增能力不得继续以 `if step.id == "step_1_audit"` 这类固定 executor 作为主路径；确需兼容旧 workflow 时必须通过 compatibility adapter，并把缺失能力暴露为结构化错误或 HITL，不能用语义不等价 fallback 冒充执行成功。
+
+### AgentRuntime-First Skill Execution
+
+目标执行链路：
+
+```text
+User message
+-> Skill selection
+-> Skill context activation
+-> Workflow step activation
+-> Instruction checklist compilation
+-> Model tool-use loop
+-> ToolExecutor / ToolRegistry
+-> tool_result persistence
+-> Instruction evaluator
+-> Workflow postcondition validation
+-> next step or recovery/HITL
+```
+
+`SKILL.md` 和 workflow 文件是持久运行上下文，不是一次性 prompt。每个 workflow step 的 `instruction` 必须在 step 执行前转换为可追踪的 checklist/evidence item，模型可以通过 tool-use 补齐这些证据，但不能用自然语言声明替代证据。
+
+运行时必须满足四条不变量：
+
+1. 模型只能调用当前 step allowlist 中的 Tool，以及 `ask_user` 等 Runtime 控制 Tool。
+2. 所有有副作用的动作必须经过 `ToolExecutor -> ToolRegistry`，并持久化结构化 `tool_result`。
+3. workflow step 不能在 required tools/effects/evidence 和 instruction checklist 全部满足前完成。
+4. Tool 失败必须作为结构化上下文回流给模型，再进入重试、恢复或 HITL，不能只写后端日志。
+
+现有固定 `SkillWorkflowRunner` 在迁移期只作为兼容适配层。新能力优先落在 `AgentRuntime`，固定 executor 只用于资源清理、旧 workflow 兼容或显式 recovery fallback。
 
 - `SKILL.md`、`project_reproduce.yaml`、`tools.yaml`、`manifest.yaml` 是 skill 的执行边界。除非用户明确确认迁移方案，否则不得为了让流程跑通而修改 `skills/` 目录。
 - Workflow 文件是复现类强流程任务的单一执行源，负责 step 顺序、依赖、状态持久化、前端展示和资源兜底释放。后端内置代码只能作为解释器和安全适配层，不能绕开 workflow instruction 另写一套语义不等价的流程。
@@ -314,18 +345,19 @@ allowed_tools:
 
 1. 启动时扫描 `skills/`。
 2. 解析 frontmatter 或 YAML 元数据。
-3. 读取 `SKILL.md` 正文，必要时读取同目录的 `project_reproduce.yaml` 等工作流文件。
-4. 把 skill 摘要注入 system prompt，用于模型选择；选中后，完整 skill 契约由 Skill Workflow Runtime 执行，不只作为提示词。
-5. 根据用户输入、前端 intent hint、`triggers` / `when_to_use` 选择 skill。
-6. 将选中 skill 的正文、workflow、工具声明和 `allowed_tools` 交给 Skill Workflow Runtime，生成可追踪的 step 状态机和当前 step 的 Tool 白名单。
-7. Agent Loop 在当前 step 内调用模型时，只允许模型补充决策、组装参数或请求 allowlist 内 Tool；最终 Tool 调用仍需由 runtime 渲染、适配、校验后执行。
+3. 读取 `SKILL.md` 正文，并由后端固定加载同目录的 `project_reproduce.yaml` 等 workflow 文件；workflow 是否存在由 `SkillLoader` registry 中的 `SkillDefinition` 记录。
+4. 把只含 `name / description / when_to_use / triggers / allowed_tools / has_workflow` 的 skill 摘要注入模型选择上下文；正文、workflow 原文和其他实现细节不进入选择摘要。
+5. 本轮改造完成后，目标 skill 选择链路采用模型优先、规则兜底：模型只能基于用户输入、前端 intent hint、`triggers` / `when_to_use` 返回候选 `skill_name`；后端只接受 `SkillLoader` registry 中实际存在的 `skill_name`，并由后端生成选择原因与 metadata。
+6. 当目标链路中的模型不可用、返回未知 skill、候选 skill 缺少必需 workflow，或不满足当前任务最低执行条件时，后端使用显式规则 fallback 并记录 fallback 原因：带 GitHub URL 或 `task_type=reproduce` 的任务回退到 `lab4ai-auto-reproduct`，其他任务回退到 `general-chat`；如果 fallback skill 不在 registry 中，则不强行构造虚假 skill。
+7. 将选中 skill 的正文、workflow、工具声明和 `allowed_tools` 交给 Skill Workflow Runtime，生成可追踪的 step 状态机和当前 step 的 Tool 白名单。
+8. Agent Loop 在当前 step 内调用模型时，只允许模型补充决策、组装参数或请求 allowlist 内 Tool；最终 Tool 调用仍需由 runtime 渲染、适配、校验后执行。
 
 Skill 执行链路：
 
 ```text
 用户消息
   -> SkillLoader 扫描并解析 skills/<name>/SKILL.md
-  -> SkillSelector 选择合适 skill
+  -> 目标链路由模型优先选择 skill_name；后端校验 registry，必要时规则 fallback
   -> Skill Workflow Runtime 解析 workflow / instruction / tool mapping
   -> LLM 在当前 step 内产生受控 tool_use 或决策补充
   -> Runtime 渲染模板、解析 step 输出、映射历史工具名
@@ -333,6 +365,8 @@ Skill 执行链路：
   -> tool_result 回流到 Conversation
   -> LLM 继续下一轮或总结完成
 ```
+
+无论 skill 来源于模型选择还是 fallback，workflow 执行仍受 `project_reproduce.yaml`、`SkillWorkflowRunner`、当前 step `allowed_tools`、`ToolRegistry`、Tool 审计策略和 HITL 确认共同约束。fallback 只决定默认 skill 名称，不能绕过 workflow、allowlist、工具权限或用户确认。
 
 ### 5.5.1 SkillRuntime（目标态：所有 skill 真实可执行）
 
@@ -360,14 +394,14 @@ Skill 执行链路：
 | `lab4ai-project-analysis` | `tools.yaml` | `analyze_repo` / `repo_audit` | 调用 `scripts/main.py:audit_repo`，真实 clone 或读取仓库，输出依赖、启动命令、风险、评分和 audit artifact |
 | `lab4ai-paper-analysis` | `tools.yaml` | `analyze_paper` / `paper_analyze` | 补齐 `scripts/analyze_paper.py:analyze_paper_tool`，复用现有解析逻辑，返回方法、数据集、指标、超参、baseline 和 markdown artifact |
 | `lab4ai-project-prep` | `manifest.yaml` | `remote_project_prep` | 调用 `prep_runner.py:run_remote_prep` 或等价后端服务，通过 `ssh_execute` / SFTP 上传和执行脚本，不直接依赖 `sshpass` |
-| `lab4ai-repro-report` | `manifest.yaml` | `repro_report` | 调用 `report_generator.py:generate_report`，生成真实 `.docx` 并记录 artifact |
+| `lab4ai-repro-report` | `manifest.yaml` | `repro_report` | 调用 `report_generator.py:generate_report`，生成真实 `.docx`，并在任务 workspace 同步生成同名 Markdown 预览报告，两个路径都记录为 artifact |
 | `lab4ai-image-manage` | `manifest.yaml` | `lab4ai_image_*` | 查询、筛选和确认镜像时返回结构化候选，不让模型猜镜像名称 |
 | `lab4ai-instance-manage` | `manifest.yaml` | `lab4ai_create_instance` / `lab4ai_stop_instance` / `lab4ai_list_instances` | 以当前后端 Lab4AI API Tool 为权威实现，skill 脚本只能作为适配层或测试参考 |
 
 历史兼容策略：
 
 - `claw-shell`、`file-system`、`ssh-essentials` 这类 CLI/本地机 skill 不直接在 Web 后端执行，只映射为受控的 `ssh_execute`、`file_write`、workspace 读取等后端 Tool。
-- `skills/` 中出现的 `openclaw`、`claw-workflow`、`/root/.openclaw` 等历史命名应通过兼容层转换为当前 LOBSTER runtime 语义；迁移模板本身需要另行确认，避免擅自改动 `skills/`。
+- `skills/` 中出现的 `openclaw`、`claw-workflow`、`/root/.openclaw` 等历史命名应通过兼容层转换为当前 AutoResearch24 runtime 语义；迁移模板本身需要另行确认，避免擅自改动 `skills/`。
 - 本地分析 artifact 统一写入 `runtime/workspaces/<conversation_id>/<repo_name>/...`；远程实验 artifact 统一写入 `/workspace/user-data/codelab/<repo_name>/...`，并通过 metadata 记录。
 - 旧 OpenClaw / vendor skill 的完整适配矩阵、优先级和验收标准见 [docs/skill-adapter-plan.md](skill-adapter-plan.md)。实施顺序按 P0（复现 workflow 安全闭环）→ P1（阻断任意 shell 与文件越界）→ P2（旧路径与脚本入口收敛）推进。
 - P0/P1 适配完成前，模型即使读到 `claw-shell`、`sshpass`、`ssh-essentials` 或 `file-system` 指令，也只能通过当前 step allowlist 触发后端 Tool；不得直接运行 vendor `handler.js`、本机 `tmux`、本机 `sshpass` 或任意 shell。
@@ -499,7 +533,7 @@ Step 自主排错与修复循环：
 - `step_3_deploy_cpu` 和 `step_6_deploy_gpu` 必须把 Lab4AI 返回的 `server_id / ssh_host / ssh_port / ssh_user` 写入 `CloudInstance` 与 `workflow_resources`。`ssh_pass` 等敏感字段只能保存在后端加密存储或受控 secret 字段，不能进入模型上下文和前端事件。
 - `step_4_cpu_env_setup` 必须通过 `remote_project_prep` 或 `ssh_execute` 的结构化输入执行。后端负责渲染 `repo_url / repo_name / workspace / proxy` 等变量；如果命令中仍包含 `{{step_...}}`，必须失败并提示模板未渲染。
 - `step_7_reproduce_on_gpu` 必须基于真实 GPU 实例执行训练、推理或最小 smoke test，并记录远程日志、退出码和结果 artifact。
-- `step_8_generate_report` 必须调用 `repro_report` 生成真实 `.docx` 或同等报告 artifact，报告内容来自前序 step 的结构化结果和日志，不由模型凭空补写。
+- `step_8_generate_report` 必须调用 `repro_report` 生成真实 `.docx` 或同等报告 artifact，报告内容来自前序 step 的结构化结果和日志，不由模型凭空补写；同时必须在本地任务 workspace 输出同名 `.md` 报告副本，并通过 `markdown_report_path` 记录，供右侧工作区 Markdown 预览使用。
 - step 是否完成只能依据 `ToolResult.ok`、退出码和 artifact 记录判断，不能依据模型自然语言“看起来完成了”判断。
 
 Workflow step 状态：
@@ -628,7 +662,7 @@ WebSocket 推送内容：
   "workflow_state": "idle | running | waiting_for_user | completed | failed | stopped",
   "pending_user_input": {
     "question": "需要用户确认的问题",
-    "options": ["继续", "修改方案", "停止"],
+    "options": ["继续", "停止"],
     "step": "human_checkpoint",
     "tool_name": "lab4ai_create_instance",
     "tool_call_id": "toolu_01...",
@@ -758,7 +792,7 @@ CloudInstance
 ├── instance_id
 ├── instance_type
 ├── gpu_count
-├── ssh_host / ssh_port / ssh_user
+├── ssh_host / ssh_port / ssh_user / ssh_pass
 ├── status
 ├── start_time
 ├── stop_time
@@ -782,6 +816,9 @@ CloudInstance
 - `GET /api/conversations/{id}`：对话详情，含历史消息。
 - `POST /api/conversations/{id}/messages`：发送消息并触发 Agent Loop。
 - `POST /api/conversations/{id}/stop`：中断当前执行。
+- `GET /api/conversations/{id}/runtime-credentials`：当前任务绑定的 Lab4AI 实例连接信息，包含实例用户名、密码、SSH host/port 和可复制的 SSH 命令；同时返回平台统一 Lab4AI 登录凭证的配置状态和脱敏账号，不返回平台登录密码；仅当前任务拥有者可访问，不进入模型上下文、WebSocket 事件或普通日志。
+- `GET /api/conversations/{id}/workspace-files`：列出当前任务 workspace 内可展示的文件和目录。
+- `GET /api/conversations/{id}/workspace-files/content?path=...`：只读预览当前任务 workspace 内的 Markdown 文件内容，仅允许 `.md/.markdown` 且路径不得逃逸 workspace。最终复现报告的 Markdown 副本位于同一 workspace 文件树中，作为可预览报告 artifact 展示。
 - `WS /api/conversations/{id}/stream`：实时事件流。
 
 ### 7.3 LLM Config
@@ -810,9 +847,9 @@ CloudInstance
 
 - 登录 / 注册。
 - WelcomePage：创建科研任务入口。
-- ChatPage：多轮对话、Agent 回复 Markdown 渲染、每条消息的时间与复制按钮、停止按钮、结果回看。
+- ChatPage：多轮对话、Agent 回复 Markdown 渲染、每条消息的时间与复制按钮、停止按钮、结果回看。Agent 输出必须分层展示：模型思考过程只展示可审计的计划/进度摘要，执行过程展示 workflow/tool 事件。思考过程和执行过程在对话区以可折叠事件卡片展示；workflow 看板独立渲染为 step 级表格区，按 `workflow_step_started / workflow_step_progress / workflow_step_completed / workflow_step_failed / workflow_step_waiting` 实时更新每一行，展示序号、执行步骤、当前状态、最近执行过程、工具调用、成功产出、失败原因或等待用户确认原因。某一步失败时应明确暴露原因；如果失败原因需要 human 确认或补充信息，则该 step 进入 `waiting_for_user`，看板显示“等待确认”，对话区展示 HITL 确认卡，用户确认后从当前 step 继续。最终回答单独渲染为干净答案区，只保留结论、问题和下一步操作，不把工具日志、workflow 表格或中间过程塞进最终回答。对于 `reproduce` 任务，Agent 展示面板必须以前端 workflow metadata 为主数据源，严格按 `skills/lab4ai-auto-reproduct/SKILL.md` 的“页面展示规范”生成：展示 `复现流水线实时看板: [项目名]`、固定 9 个 YAML task 行、`序号 / 执行步骤 (对应 YAML Task) / 当前状态 / 核心产出 / 详情` 四列、`[等待中...] / [执行中] / [完成] / [中止]` 状态文案；`核心产出 / 详情` 列必须按 skill 模板中的 9 个槽位含义填充对应真实信息，例如评分、论文 Baseline、超参数、serverId、SSH、clone 状态、依赖安装结果、实测指标、VRAM、Word 报告路径和释放确认，缺失数据时显示待生成或待记录提示；复现面板必须在 Agent 气泡宽度内自动换行，不在气泡底部产生横向滚动条；复现面板下方不显示 skill 选择证据折叠区，普通 HITL 确认卡不显示“修改方案”按钮；以及结项后的 `任务完成`、核心指标对比、H100 架构优化洞察、Word 报告路径和资源监控核对区。Agent 原始 Markdown 可作为普通回答补充，但不再作为复现面板是否完整展示的前置条件。
 - Sidebar：历史对话、配额展示、任务类型导航。
-- RightPanel：Tool Events 流、当前对话详情、云实例、任务 metadata。
+- RightPanel：右上角「权限与环境配置」展示平台统一 Lab4AI 登录凭证的已配置状态、脱敏账号，以及当前任务 Lab4AI 实例的用户名、密码和 SSH 连接信息；平台登录密码不在前端返回或展示；流程看板、Tool Events、任务 metadata 不再放在该区域。下方保留工作区文件浏览，Markdown 文件可点击进入只读预览，使用站内 Markdown 渲染组件展示内容，并可返回文件列表；最终报告 Markdown artifact 需要高亮为“最终报告”，预览页提供返回、刷新、文件路径和报告式正文阅读区域。
 - ModelSettings：用户模型配置和连通性测试。
 - Admin 页面：用户管理、云实例总览、Lab4AI 凭证、用量报表。
 

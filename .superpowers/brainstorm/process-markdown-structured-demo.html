@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LOBSTER Process Markdown Structured Demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, "Microsoft YaHei", Arial, sans-serif;
+      background: #f6f8fb;
+      color: #172033;
+    }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 300px minmax(720px, 1fr) 310px;
+    }
+    .sidebar,
+    .right-panel {
+      background: #fff;
+      padding: 28px 20px;
+      border-right: 1px solid #e5ebf3;
+    }
+    .right-panel {
+      border-right: 0;
+      border-left: 1px solid #e5ebf3;
+      overflow: hidden;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 24px;
+      font-weight: 850;
+      letter-spacing: 3px;
+      margin-bottom: 58px;
+    }
+    .brand-mark {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #f24d18;
+    }
+    .nav {
+      display: grid;
+      gap: 8px;
+      color: #657590;
+      font-size: 17px;
+    }
+    .nav div {
+      padding: 14px 16px;
+      border-radius: 12px;
+    }
+    .nav .active {
+      background: #eef3f9;
+      color: #10213d;
+      font-weight: 760;
+    }
+    .history {
+      margin-top: 330px;
+      border-top: 1px solid #edf1f6;
+      padding-top: 18px;
+    }
+    .history h3 {
+      margin: 0 0 12px;
+      color: #49607f;
+      font-size: 16px;
+    }
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #5d6f8c;
+      font-size: 14px;
+      margin: 10px 0;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #22c55e; }
+    .dot.red { background: #ef4444; }
+    .main {
+      height: 100vh;
+      overflow: auto;
+      padding: 40px 48px 120px;
+      position: relative;
+    }
+    .chat-width {
+      max-width: 950px;
+      margin: 0 auto;
+    }
+    .user-bubble {
+      margin-left: auto;
+      width: fit-content;
+      max-width: 760px;
+      border-radius: 20px 20px 5px 20px;
+      background: #eef3f9;
+      padding: 18px 24px;
+      font-size: 20px;
+      color: #10213d;
+      line-height: 1.55;
+    }
+    .agent-row {
+      display: flex;
+      gap: 18px;
+      margin-top: 54px;
+    }
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: #172033;
+      color: white;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      font-weight: 800;
+    }
+    .agent {
+      min-width: 0;
+      flex: 1;
+    }
+    .agent-name {
+      font-size: 18px;
+      font-weight: 720;
+      margin: 2px 0 12px;
+    }
+    .workbench {
+      background: #fff;
+      border: 1px solid #dfe7f1;
+      border-radius: 14px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+      overflow: hidden;
+    }
+    .step-header {
+      padding: 20px 24px 18px;
+      border-bottom: 1px solid #edf1f6;
+    }
+    .step-title-line {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .step-num {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: #f59e0b;
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 850;
+      font-size: 17px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    .step-title {
+      font-size: 22px;
+      color: #10213d;
+      font-weight: 820;
+    }
+    .code-chip {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      background: #eef3f9;
+      border-radius: 8px;
+      padding: 5px 8px;
+      color: #40516e;
+      font-size: 14px;
+      font-weight: 760;
+    }
+    .status {
+      border: 1px solid #fde68a;
+      background: #fffbeb;
+      color: #b45309;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .step-sub {
+      margin: 14px 0 0 46px;
+      color: #556987;
+      line-height: 1.6;
+      font-size: 15px;
+    }
+    .section {
+      padding: 18px 24px;
+      border-bottom: 1px solid #edf1f6;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .section-label {
+      color: #7c8eaa;
+      font-size: 13px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-weight: 820;
+    }
+    .count-pill {
+      border: 1px solid #e5ebf3;
+      border-radius: 999px;
+      background: #f8fafc;
+      color: #5c6f8d;
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+    .judgement {
+      border: 1px solid #dbeafe;
+      background: #eff6ff;
+      border-radius: 12px;
+      padding: 14px 15px;
+      color: #1e3a5f;
+      line-height: 1.68;
+      font-size: 15px;
+    }
+    .judgement strong {
+      color: #0f3f82;
+    }
+    .snapshot {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .snapshot-card {
+      border: 1px solid #e3eaf3;
+      border-radius: 10px;
+      padding: 11px;
+      background: #fff;
+    }
+    .snapshot-label {
+      color: #8a99b4;
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .snapshot-value {
+      margin-top: 5px;
+      color: #172033;
+      font-weight: 820;
+      font-size: 14px;
+    }
+    .queue {
+      display: grid;
+      gap: 9px;
+    }
+    .queue-item {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid #e5ebf3;
+      background: #fff;
+      border-radius: 10px;
+      padding: 11px 12px;
+    }
+    .badge {
+      width: fit-content;
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 12px;
+      font-weight: 820;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .badge.todo { background: #f8fafc; border-color: #dbe4ef; color: #52647f; }
+    .badge.done { background: #ecfdf5; border-color: #bbf7d0; color: #047857; }
+    .badge.fail { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+    .badge.wait { background: #fffbeb; border-color: #fde68a; color: #b45309; }
+    .queue-title {
+      color: #23344f;
+      font-weight: 760;
+      min-width: 0;
+    }
+    .queue-detail {
+      color: #697a95;
+      font-size: 13px;
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .queue-source {
+      color: #8a99b4;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .tool-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .tool-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 999px;
+      border: 1px solid #dbe4ef;
+      background: #fff;
+      padding: 8px 11px;
+      font-size: 13px;
+      color: #33445f;
+      font-weight: 720;
+    }
+    .tool-chip.fail {
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: #b91c1c;
+    }
+    .tool-chip.done {
+      border-color: #bbf7d0;
+      background: #ecfdf5;
+      color: #047857;
+    }
+    .tool-chip.wait {
+      border-color: #fde68a;
+      background: #fffbeb;
+      color: #b45309;
+    }
+    .logs {
+      display: grid;
+      gap: 9px;
+    }
+    .log-line {
+      display: flex;
+      gap: 9px;
+      color: #536680;
+      font-size: 14px;
+      line-height: 1.58;
+    }
+    .log-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #60a5fa;
+      margin-top: 8px;
+      flex: 0 0 auto;
+    }
+    details.raw {
+      border: 1px solid #e5ebf3;
+      border-radius: 12px;
+      background: #f8fafc;
+      overflow: hidden;
+    }
+    details.raw summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 13px 15px;
+      color: #40516e;
+      font-weight: 760;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    details.raw summary::-webkit-details-marker { display: none; }
+    .raw-body {
+      border-top: 1px solid #e5ebf3;
+      background: #111827;
+      color: #d1d5db;
+      padding: 16px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      font-size: 13px;
+      line-height: 1.55;
+      max-height: 280px;
+      overflow: auto;
+    }
+    .before-after {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .comparison {
+      border: 1px solid #e5ebf3;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .comparison h3 {
+      padding: 12px 14px;
+      border-bottom: 1px solid #e5ebf3;
+      font-size: 14px;
+      color: #52647f;
+      background: #f8fafc;
+    }
+    .comparison .body {
+      padding: 14px;
+      font-size: 13px;
+      color: #52647f;
+      line-height: 1.58;
+    }
+    .bad-markdown {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      max-height: 220px;
+      overflow: hidden;
+      color: #5d6f8c;
+    }
+    .right-panel h2 {
+      margin: 0 0 8px;
+      color: #10213d;
+      font-size: 24px;
+    }
+    .panel-muted {
+      color: #8a99b4;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+    .instance-card {
+      margin-top: 18px;
+      border: 1px solid #dbe4ef;
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .instance-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: #10213d;
+      font-weight: 820;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 86px minmax(0, 1fr);
+      gap: 8px;
+      margin-top: 13px;
+      color: #52647f;
+      font-size: 14px;
+    }
+    .workspace {
+      margin-top: 24px;
+      border-top: 1px solid #e5ebf3;
+      padding-top: 20px;
+    }
+    .file {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+      color: #304767;
+      font-size: 14px;
+      align-items: center;
+    }
+    .input-bar {
+      position: fixed;
+      bottom: 0;
+      left: 300px;
+      right: 310px;
+      border-top: 1px solid #e5ebf3;
+      background: #fff;
+      padding: 14px 48px;
+    }
+    .input-inner {
+      max-width: 950px;
+      margin: 0 auto;
+      border: 1px solid #dbe4ef;
+      border-radius: 14px;
+      background: #f8fafc;
+      color: #c2ccda;
+      padding: 17px 20px;
+      font-size: 18px;
+    }
+    @media (max-width: 1200px) {
+      .app { grid-template-columns: 240px minmax(680px, 1fr); }
+      .right-panel { display: none; }
+      .input-bar { left: 240px; right: 0; }
+      .snapshot { grid-template-columns: repeat(2, 1fr); }
+      .before-after { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark"></span>LOBSTER</div>
+      <nav class="nav">
+        <div>智能论文检索</div>
+        <div class="active">代码与论文复现</div>
+        <div>纯论文(无代码)复现</div>
+        <div>自动化实验矩阵</div>
+        <div>智能论文润色</div>
+        <div>模型设置</div>
+      </nav>
+      <div class="history">
+        <h3>历史任务</h3>
+        <div class="history-item"><span class="dot"></span>Lab4AI real CPU/GPU...</div>
+        <div class="history-item"><span class="dot red"></span>motion-guided-flow</div>
+        <div class="history-item"><span class="dot red"></span>PhotoDoodle</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="chat-width">
+        <div class="user-bubble">继续执行，帮我完成 CPU 环境构建。</div>
+
+        <div class="agent-row">
+          <div class="avatar">⚡</div>
+          <div class="agent">
+            <div class="agent-name">LOBSTER Agent</div>
+            <section class="workbench">
+              <header class="step-header">
+                <div class="step-title-line">
+                  <div class="step-num">4</div>
+                  <h1 class="step-title">在 CPU 上拉取代码与智能环境/数据构建</h1>
+                  <span class="code-chip">step_4_cpu_env_setup</span>
+                  <span class="status">等待确认</span>
+                </div>
+                <p class="step-sub">等待用户确认后继续。中间过程的 Markdown 已被拆成结构化执行记录，原文保留在“原始记录”里。</p>
+              </header>
+
+              <section class="section">
+                <div class="section-head">
+                  <div class="section-label">实验判断</div>
+                  <span class="count-pill">由模型 Markdown 摘要生成</span>
+                </div>
+                <div class="judgement">
+                  <strong>当前判断：</strong>用户已确认继续，当前进入 Step 4。CPU 实例已连通，但远程代码目录可能存在历史残留；
+                  建议先清理旧目录，再克隆仓库并读取 `repo_audit.md`，避免复用上一次失败环境。
+                </div>
+                <div class="snapshot">
+                  <div class="snapshot-card">
+                    <div class="snapshot-label">流程快照</div>
+                    <div class="snapshot-value">2/9 完成</div>
+                  </div>
+                  <div class="snapshot-card">
+                    <div class="snapshot-label">当前 Step</div>
+                    <div class="snapshot-value">Step 4</div>
+                  </div>
+                  <div class="snapshot-card">
+                    <div class="snapshot-label">阻塞点</div>
+                    <div class="snapshot-value">等待确认</div>
+                  </div>
+                  <div class="snapshot-card">
+                    <div class="snapshot-label">下一动作</div>
+                    <div class="snapshot-value">SSH + 清理 + 克隆</div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-head">
+                  <div class="section-label">执行队列</div>
+                  <span class="count-pill">4 项</span>
+                </div>
+                <div class="queue">
+                  <div class="queue-item">
+                    <span class="badge done">已完成</span>
+                    <div>
+                      <div class="queue-title">读取仓库审计报告</div>
+                      <div class="queue-detail">file_system_read 返回 `repo_audit.md`，可作为环境构建依据。</div>
+                    </div>
+                    <span class="queue-source">repo_audit.md</span>
+                  </div>
+                  <div class="queue-item">
+                    <span class="badge fail">失败</span>
+                    <div>
+                      <div class="queue-title">执行远程环境探测</div>
+                      <div class="queue-detail">ssh_execute 失败，需要基于 tool_result 重新诊断命令或连接状态。</div>
+                    </div>
+                    <span class="queue-source">ssh_execute</span>
+                  </div>
+                  <div class="queue-item">
+                    <span class="badge wait">待确认</span>
+                    <div>
+                      <div class="queue-title">清理历史代码目录</div>
+                      <div class="queue-detail">删除旧 `code/` 目录后重新 clone，避免污染当前复现。</div>
+                    </div>
+                    <span class="queue-source">file_write / ssh</span>
+                  </div>
+                  <div class="queue-item">
+                    <span class="badge todo">待执行</span>
+                    <div>
+                      <div class="queue-title">克隆 PhotoDoodle 并读取依赖线索</div>
+                      <div class="queue-detail">优先解析 README、imports、demo 入口，生成最小依赖清单。</div>
+                    </div>
+                    <span class="queue-source">git clone</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-head">
+                  <div class="section-label">工具证据</div>
+                  <span class="count-pill">3 项</span>
+                </div>
+                <div class="tool-grid">
+                  <div class="tool-chip fail">执行远程命令 · 失败</div>
+                  <div class="tool-chip done">file_system_read · 完成</div>
+                  <div class="tool-chip wait">执行远程命令 · 待确认</div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-head">
+                  <div class="section-label">运行日志</div>
+                  <span class="count-pill">仅保留关键事件</span>
+                </div>
+                <div class="logs">
+                  <div class="log-line"><span class="log-dot"></span><span>步骤开始。</span></div>
+                  <div class="log-line"><span class="log-dot"></span><span>file_system_read 完成：读取 `repo_audit.md`。</span></div>
+                  <div class="log-line"><span class="log-dot"></span><span>ssh_execute 失败：等待模型基于 tool_result 诊断，而不是继续堆长段落。</span></div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-head">
+                  <div class="section-label">原始记录</div>
+                  <span class="count-pill">审计保留</span>
+                </div>
+                <details class="raw">
+                  <summary>
+                    <span>展开查看模型原始 Markdown</span>
+                    <span>⌄</span>
+                  </summary>
+                  <div class="raw-body">制定执行计划：好的！用户已确认继续，我现在就为你创建 Lab4AI CPU 实例。
+
+--- ### 📊 复现流水线实时看板：`motion-guided-flow`
+| 序号 | 执行步骤（对应 YAML Task） | 当前状态 | 核心产出 / 详情 |
+| :--- | :--- | :--- | :--- |
+| 1 | `step_1_audit`: 项目与论文双重审计 | ✅ 完成 | score=60, BF16 精度 |
+| 2 | `step_2_condition_check`: 复现可行性熔断判断 | ✅ 通过 | score>=60 |
+| 3 | `step_3_deploy_cpu`: 创建 CPU 实例 | ✅ 完成 | 2 核 CPU |
+| 4 | `step_4_cpu_env_setup`: SSH 探活 + 克隆代码 + 智能环境构建 | ⏳ 等待中... | - |
+
+模型规划工具调用：现在开始执行 Step 4。先并行做三件事：SSH 探活 + 克隆代码 + 读取审计报告。
+模型规划工具调用：SSH 连接成功，但代码目录已存在。清理后重新克隆，同时读取项目关键文件。</div>
+                </details>
+              </section>
+            </section>
+
+            <div class="before-after">
+              <div class="comparison">
+                <h3>现在的问题：原始 Markdown 直接显示</h3>
+                <div class="body bad-markdown">制定执行计划：好的！用户已确认继续，我现在就为你创建 Lab4AI CPU 实例。
+--- #### 📊 复现流水线实时看板
+| 序号 | 执行步骤 | 当前状态 | 核心产出 |
+| 1 | step_1_audit | ✅ 完成 | score=60 |
+| 2 | step_2_condition_check | ✅ 通过 | score>=60 |
+模型规划工具调用：好的，现在开始执行 Step 4...</div>
+              </div>
+              <div class="comparison">
+                <h3>优化后：结构化过程记录</h3>
+                <div class="body">
+                  实验判断、流程快照、执行队列、工具证据、运行日志、原始记录分开显示。默认只看摘要，原始 Markdown 仍可展开审计。
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="right-panel">
+      <h2>权限与环境配置</h2>
+      <p class="panel-muted">运行中</p>
+      <div class="instance-card">
+        <div class="instance-title">
+          <span>CPU 实例 · adf...</span>
+          <span class="badge done">运行中</span>
+        </div>
+        <div class="kv">
+          <span>用户名</span><strong>root</strong>
+          <span>密码</span><strong>JBvhPHQ2VM</strong>
+          <span>SSH Host</span><strong>182.242.159.112</strong>
+          <span>SSH Port</span><strong>37509</strong>
+        </div>
+      </div>
+      <div class="workspace">
+        <h2>工作区文件</h2>
+        <p class="panel-muted">runtime/workspaces/7</p>
+        <div class="file"><span>📁</span><span>motion-guided-flow</span></div>
+        <div class="file"><span>📄</span><span>repo_audit.md · 1.3 KB</span></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="input-bar">
+    <div class="input-inner">任务执行中，完成后可继续对话...</div>
+  </div>
+</body>
+</html>

@@ -32,6 +32,8 @@ describe("LoginPage", () => {
 
   it("renders login form by default", () => {
     renderLogin();
+    expect(screen.getByText("AutoResearch24")).toBeInTheDocument();
+    expect(screen.queryByText("LOBSTER")).not.toBeInTheDocument();
     expect(screen.getByText("欢迎回来")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("手机号")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("密码")).toBeInTheDocument();

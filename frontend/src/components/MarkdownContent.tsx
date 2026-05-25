@@ -1,4 +1,4 @@
-import type { ComponentPropsWithoutRef } from "react";
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -6,9 +6,12 @@ import remarkGfm from "remark-gfm";
 
 interface MarkdownContentProps {
   content: string;
+  variant?: MarkdownVariant;
 }
 
-const markdownComponents: Components = {
+type MarkdownVariant = "default" | "reproduction" | "workspace";
+
+const markdownComponents = (variant: MarkdownVariant): Components => ({
   h1: ({ children, ...props }: ComponentPropsWithoutRef<"h1">) => (
     <h1 className="text-md-h1 font-semibold leading-snug text-slate-800" {...props}>
       {children}
@@ -85,7 +88,12 @@ const markdownComponents: Components = {
   hr: (props: ComponentPropsWithoutRef<"hr">) => <hr className="my-3 border-slate-200" {...props} />,
   table: ({ children, ...props }: ComponentPropsWithoutRef<"table">) => (
     <div className="max-w-full overflow-x-auto rounded-lg border border-slate-200">
-      <table className="min-w-full border-collapse text-ui-small" {...props}>
+      <table
+        className={`min-w-full border-collapse text-ui-small ${
+          variant === "reproduction" ? "reproduction-markdown-table" : ""
+        }`}
+        {...props}
+      >
         {children}
       </table>
     </div>
@@ -110,7 +118,7 @@ const markdownComponents: Components = {
   ),
   td: ({ children, align, ...props }: ComponentPropsWithoutRef<"td">) => (
     <td className={`border-t border-slate-100 px-3 py-2 align-top text-slate-600 ${alignClass(align)}`} {...props}>
-      {children}
+      {variant === "reproduction" ? renderReproductionCell(children) : children}
     </td>
   ),
   code: ({ children, className, ...props }: ComponentPropsWithoutRef<"code">) => {
@@ -147,21 +155,59 @@ const markdownComponents: Components = {
       {children}
     </del>
   ),
-};
+});
 
-export function MarkdownContent({ content }: MarkdownContentProps) {
+export function MarkdownContent({ content, variant = "default" }: MarkdownContentProps) {
   return (
-    <div className="space-y-3 whitespace-normal break-words">
+    <div
+      data-testid="markdown-content"
+      className={`space-y-3 whitespace-normal break-words ${
+        variant === "reproduction"
+          ? "markdown-reproduction"
+          : variant === "workspace"
+            ? "markdown-workspace text-ui-small leading-relaxed text-slate-700"
+            : ""
+      }`}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize]}
-        components={markdownComponents}
+        components={markdownComponents(variant)}
         urlTransform={normalizeHref}
       >
         {content}
       </ReactMarkdown>
     </div>
   );
+}
+
+function renderReproductionCell(children: ReactNode) {
+  const text = reactNodeText(children).trim();
+  const status = reproductionStatus(text);
+  if (!status) return children;
+  return (
+    <span
+      data-testid={`reproduction-status-${status}`}
+      className={`reproduction-status reproduction-status-${status}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+function reactNodeText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(reactNodeText).join("");
+  return "";
+}
+
+function reproductionStatus(text: string) {
+  if (!/^\[.+\]$/.test(text)) return null;
+  if (text.includes("完成") || text.includes("通过")) return "done";
+  if (text.includes("执行中") || text.includes("运行中")) return "running";
+  if (text.includes("等待")) return "waiting";
+  if (text.includes("中止") || text.includes("失败")) return "error";
+  return null;
 }
 
 function normalizeHref(href: string) {

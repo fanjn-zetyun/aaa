@@ -103,6 +103,12 @@ async def test_existing_skill_loads_through_skill_invoke_not_fixed_workflow(db_s
 
     result = await runtime.run_conversation(conversation.id, model="claude-test")
 
-    assert result.status == "completed"
+    assert result.status == "running"
     assert result.metadata["runtime"]["active_skill"]["name"] == "lab4ai-auto-reproduct"
     assert result.metadata["runtime"]["active_workflow"]["current_step_id"] == "step_1_audit"
+    assert "step_1_audit" in result.metadata["runtime"]["instruction_plans"]
+    step = result.metadata["runtime"]["active_workflow"]["steps"]["step_1_audit"]
+    assert step["status"] == "recovery"
+    assert "model text cannot complete workflow step without tool evidence" in step[
+        "validation_failures"
+    ]

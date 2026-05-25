@@ -6,7 +6,7 @@
 
 ## 1. 项目概述
 
-本项目是一个 **LOBSTER 自建 Agent Loop 科研助手 Web 应用**，目标是让多用户通过浏览器使用同一个 Lab4AI 账号的算力资源，各自管理自己的对话式科研任务，完成自动化科研工作流（以论文/项目复现为主）。
+本项目是一个 **AutoResearch24 自建 Agent Loop 科研助手 Web 应用**，目标是让多用户通过浏览器使用同一个 Lab4AI 账号的算力资源，各自管理自己的对话式科研任务，完成自动化科研工作流（以论文/项目复现为主）。
 
 完整的需求和设计方案见：[docs/proposal.md](docs/proposal.md)
 
@@ -243,7 +243,7 @@ npm run dev    # Vite dev server → http://localhost:5173
   - Agent Loop：先 MVP 固定工具链，后续升级为完整 tool-use 循环
   - 前端工具链：Vite + React + TypeScript
   - Lab4AI 凭证：通过管理员后台页面配置
-  - 前端交互模式：对话式 AI 科研助手（产品名 LOBSTER），非传统管理后台
+  - 前端交互模式：对话式 AI 科研助手（产品名 AutoResearch24），非传统管理后台
 - [x] 项目目录结构初始化（backend/、frontend/、runtime/）
 - [x] FastAPI 后端骨架（配置、数据库、依赖注入）
 - [x] 用户认证模块（注册/登录/JWT）

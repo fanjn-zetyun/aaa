@@ -51,7 +51,24 @@ class ToolExecutor:
 
         runtime_tool = self.runtime_tools.get(tool_call.name)
         if runtime_tool is not None:
+            await self.event_sink.publish(
+                {
+                    "type": "tool_started",
+                    "tool_name": tool_call.name,
+                    "tool_call_id": tool_call.id,
+                    "workflow_step_id": _workflow_step_id(state),
+                }
+            )
             result, updated_state = await runtime_tool.call(tool_call.input, state=state)
+            await self.event_sink.publish(
+                {
+                    "type": "tool_completed" if result.ok else "tool_error",
+                    "tool_name": tool_call.name,
+                    "tool_call_id": tool_call.id,
+                    "workflow_step_id": _workflow_step_id(updated_state),
+                    "ok": result.ok,
+                }
+            )
             executed = self._as_executed(tool_call, result)
             executed.updated_state = updated_state
             return executed

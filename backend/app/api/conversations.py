@@ -21,7 +21,9 @@ from app.schemas.conversation import (
     ConversationResponse,
     MessageCreateRequest,
     RuntimeCredentialInstanceResponse,
+    RuntimeLab4AICredentialsResponse,
     RuntimeCredentialsResponse,
+    WorkspaceFileContentResponse,
     WorkspaceFileListResponse,
     WorkspaceFileResponse,
 )
@@ -29,6 +31,7 @@ from app.core.config import get_settings
 from app.services.agent_loop import get_agent_manager
 from app.services.conversation_memory import ensure_memory
 from app.services.conversation_store import conversation_log_path
+from app.services.lab4ai.credentials import load_lab4ai_credentials, mask_lab4ai_phone
 from app.services.tools import infer_task_type
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -169,6 +172,7 @@ async def get_runtime_credentials(
     conversation_id: int, user: CurrentUser, session: DbSession
 ) -> RuntimeCredentialsResponse:
     await _get_owned_conversation(conversation_id, user.id, session)
+    lab4ai_credentials = await load_lab4ai_credentials(session)
     instances = (
         await session.execute(
             select(CloudInstance)
@@ -180,6 +184,12 @@ async def get_runtime_credentials(
         )
     ).scalars().all()
     return RuntimeCredentialsResponse(
+        lab4ai_credentials=RuntimeLab4AICredentialsResponse(
+            configured=lab4ai_credentials is not None,
+            phone_masked=mask_lab4ai_phone(lab4ai_credentials.phone)
+            if lab4ai_credentials
+            else "",
+        ),
         instances=[
             RuntimeCredentialInstanceResponse(
                 id=item.id,
@@ -212,6 +222,49 @@ async def get_workspace_files(
         exists=root.exists(),
         root=_display_workspace_root(root, settings.project_root),
         files=files,
+    )
+
+
+@router.get(
+    "/{conversation_id}/workspace-files/content",
+    response_model=WorkspaceFileContentResponse,
+)
+async def get_workspace_file_content(
+    conversation_id: int, path: str, user: CurrentUser, session: DbSession
+) -> WorkspaceFileContentResponse:
+    await _get_owned_conversation(conversation_id, user.id, session)
+    if not _is_markdown_path(path):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅支持预览 Markdown 文件")
+
+    settings = get_settings()
+    root = settings.workspace_root_path / str(conversation_id)
+    target = _resolve_workspace_file(root, path)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件路径不在工作区内")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
+
+    max_bytes = 512 * 1024
+    try:
+        if target.stat().st_size > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="文件过大，无法预览",
+            )
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="文件读取失败"
+        ) from exc
+
+    normalized_path = str(target.relative_to(root.resolve())).replace("\\", "/")
+    return WorkspaceFileContentResponse(
+        path=normalized_path,
+        name=target.name,
+        kind="markdown",
+        content=content,
     )
 
 
@@ -335,6 +388,23 @@ def _list_workspace_files(root: Path) -> list[WorkspaceFileResponse]:
 
     walk(root, 0)
     return items
+
+
+def _is_markdown_path(path: str) -> bool:
+    suffix = Path(path).suffix.lower()
+    return suffix in {".md", ".markdown"}
+
+
+def _resolve_workspace_file(root: Path, path: str) -> Path | None:
+    if Path(path).is_absolute():
+        return None
+    try:
+        resolved_root = root.resolve()
+        target = (resolved_root / path).resolve()
+        target.relative_to(resolved_root)
+        return target
+    except (OSError, ValueError):
+        return None
 
 
 def _display_workspace_root(root: Path, project_root: Path) -> str:

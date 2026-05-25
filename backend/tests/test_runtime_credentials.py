@@ -13,6 +13,7 @@ from app.models import (
     ConversationTaskType,
     User,
 )
+from app.services.lab4ai.credentials import save_lab4ai_credentials
 from tests.conftest import auth_headers
 
 
@@ -52,6 +53,8 @@ async def test_runtime_credentials_returns_owned_instance_ssh_secret(
     db_session.add(instance)
     await db_session.commit()
 
+    await save_lab4ai_credentials(db_session, "13812348000", "lab4ai-secret")
+
     response = await client.get(
         f"/api/conversations/{conv.id}/runtime-credentials",
         headers=auth_headers(test_user),
@@ -59,6 +62,11 @@ async def test_runtime_credentials_returns_owned_instance_ssh_secret(
 
     assert response.status_code == 200
     data = response.json()
+    assert data["lab4ai_credentials"] == {
+        "configured": True,
+        "phone_masked": "138****8000",
+    }
+    assert "lab4ai-secret" not in response.text
     assert len(data["instances"]) == 1
     item = data["instances"][0]
     assert item["id"] == instance.id
@@ -73,6 +81,34 @@ async def test_runtime_credentials_returns_owned_instance_ssh_secret(
     assert item["ssh_command"] == "ssh -p 2222 root@10.0.0.8"
     assert item["started_at"]
     assert item["stopped_at"] is None
+
+
+async def test_runtime_credentials_reports_missing_lab4ai_login(
+    client: AsyncClient,
+    test_user: User,
+    db_session: AsyncSession,
+):
+    conv = Conversation(
+        user_id=test_user.id,
+        task_type=ConversationTaskType.REPRODUCE,
+        title="missing lab4ai login",
+        status=ConversationStatus.ACTIVE,
+        metadata_={},
+    )
+    db_session.add(conv)
+    await db_session.commit()
+    await db_session.refresh(conv)
+
+    response = await client.get(
+        f"/api/conversations/{conv.id}/runtime-credentials",
+        headers=auth_headers(test_user),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["lab4ai_credentials"] == {
+        "configured": False,
+        "phone_masked": "",
+    }
 
 
 async def test_runtime_credentials_keeps_user_isolation(

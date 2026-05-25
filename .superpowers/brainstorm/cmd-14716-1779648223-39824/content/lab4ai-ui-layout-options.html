@@ -1,0 +1,84 @@
+<h2>复现流程 UI 改造：先选展示结构</h2>
+<p class="subtitle">
+  目标是让前端严格承接 `lab4ai-auto-reproduct/SKILL.md` 的展示规范：9 步实时看板、过程播报、HITL 确认、最终交付页。
+</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A：对话区优先</div>
+        <div class="mockup-body">
+          <div class="mock-nav">AutoResearch24 · 任务复现</div>
+          <div style="display:flex; gap:12px; margin-top:12px;">
+            <div class="mock-sidebar" style="width:18%;">历史任务</div>
+            <div class="mock-content" style="width:58%;">
+              <div class="placeholder" style="height:54px;">Agent 最终回答</div>
+              <div class="placeholder" style="height:110px; margin-top:10px;">9 步流程表格嵌在当前 Agent 消息中</div>
+              <div class="placeholder" style="height:70px; margin-top:10px;">思考/执行事件卡片</div>
+            </div>
+            <div class="mock-sidebar" style="width:24%;">凭证 + 文件</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 保持当前对话结构，强化消息内看板</h3>
+      <p>改动较小；用户在聊天流里看到流程表格和事件卡片，但长任务时页面会比较拥挤。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B：流程看板优先</div>
+        <div class="mockup-body">
+          <div class="mock-nav">AutoResearch24 · Lab4AI 复现流水线</div>
+          <div style="display:flex; gap:12px; margin-top:12px;">
+            <div class="mock-sidebar" style="width:18%;">历史任务</div>
+            <div class="mock-content" style="width:58%;">
+              <div class="placeholder" style="height:145px;">固定 9 步实时看板：序号 / YAML Task / 状态 / 核心产出</div>
+              <div style="display:flex; gap:10px; margin-top:10px;">
+                <div class="placeholder" style="height:82px; flex:1;">执行播报</div>
+                <div class="placeholder" style="height:82px; flex:1;">最终交付摘要</div>
+              </div>
+            </div>
+            <div class="mock-sidebar" style="width:24%;">凭证 + 文件</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 在 ChatPage 中独立固定 9 步实时看板</h3>
+      <p>最贴近 SKILL.md 的“实时进度看板”要求；流程状态始终可见，对话区保留给 HITL 和最终回答。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C：专用复现工作台</div>
+        <div class="mockup-body">
+          <div class="mock-nav">Reproduction Workspace</div>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:12px;">
+            <div class="placeholder" style="height:128px;">9 步流程看板</div>
+            <div class="placeholder" style="height:128px;">指标对比 + 报告交付</div>
+            <div class="placeholder" style="height:86px;">执行日志</div>
+            <div class="placeholder" style="height:86px;">算力资源释放核对</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 新增专用复现工作台视图</h3>
+      <p>展示能力最强，但范围最大，会牵动路由、页面状态和更多测试；适合作为后续大版本。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>我的初步建议</h3>
+  <p>
+    优先选 B：在现有 ChatPage 内把 9 步 workflow 看板提升为独立固定区域，同时保留右侧面板只显示 Lab4AI 凭证和工作区文件，符合现有 proposal 约束，也能最直接对齐 SKILL.md。
+  </p>
+</div>

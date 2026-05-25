@@ -38,3 +38,24 @@ def test_runtime_state_waiting_for_user_stores_pending_tool_call():
     assert restored.status == "waiting_for_user"
     assert restored.pending_tool_call["tool_call_id"] == "toolu_1"
     assert restored.pending_user_input["question"] == "是否创建 CPU 实例？"
+
+
+def test_runtime_state_persists_instruction_plan():
+    state = RuntimeState.new(conversation_id=7, model="claude-test")
+    state.instruction_plans = {
+        "step_7_gpu_execution": {
+            "step_id": "step_7_gpu_execution",
+            "items": [{"id": "import_precheck", "status": "pending"}],
+        }
+    }
+    state.instruction_failures = {"step_7_gpu_execution": ["missing instruction item: import_precheck"]}
+    state.last_tool_results = [{"name": "ssh_execute", "ok": False}]
+
+    metadata = save_runtime_state({}, state)
+    restored = load_runtime_state(metadata, conversation_id=7)
+
+    assert restored.instruction_plans["step_7_gpu_execution"]["items"][0]["id"] == "import_precheck"
+    assert restored.instruction_failures["step_7_gpu_execution"] == [
+        "missing instruction item: import_precheck"
+    ]
+    assert restored.last_tool_results == [{"name": "ssh_execute", "ok": False}]

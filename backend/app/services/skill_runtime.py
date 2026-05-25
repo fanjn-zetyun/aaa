@@ -12,6 +12,9 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -148,7 +151,8 @@ async def _run_repo_audit(
         proxy_url = _proxy_url_from_payload(payload)
         _set_module_proxy(module, proxy_url)
         report = await asyncio.to_thread(
-            _invoke_with_proxy_env,
+            _invoke_with_repo_audit_env,
+            module,
             audit_repo,
             clone_url,
             proxy_url=proxy_url,
@@ -205,16 +209,23 @@ async def _run_paper_analyze(
     try:
         module = _load_module(spec.base_dir / "scripts" / "analyze_paper.py")
         pdf_path = Path(paper_path) if paper_path else output_dir / "paper.pdf"
+        full_text = ""
+        pages = 0
         if paper_url and not paper_path:
-            ok = await asyncio.to_thread(module.download_pdf, paper_url, str(pdf_path))
+            ok = await asyncio.to_thread(_download_pdf, paper_url, pdf_path)
             if not ok:
-                return SkillRuntimeResult(
-                    "paper_analyze",
-                    f"论文 PDF 下载失败：{paper_url}",
-                    ok=False,
-                    metadata={"error_code": "paper_download_failed", "paper_url": paper_url},
-                )
-        full_text, pages = await asyncio.to_thread(module.extract_text_from_pdf, str(pdf_path))
+                full_text = await asyncio.to_thread(_download_arxiv_abs_text, paper_url)
+                if not full_text:
+                    return SkillRuntimeResult(
+                        "paper_analyze",
+                        f"论文 PDF 下载失败：{paper_url}",
+                        ok=False,
+                        metadata={"error_code": "paper_download_failed", "paper_url": paper_url},
+                    )
+                pdf_path = output_dir / "paper_abs.html"
+                pdf_path.write_text(full_text, encoding="utf-8")
+        if not full_text:
+            full_text, pages = await asyncio.to_thread(module.extract_text_from_pdf, str(pdf_path))
         text_path = output_dir / "paper_text.txt"
         text_path.write_text(full_text, encoding="utf-8")
         info = await asyncio.to_thread(module.parse_paper_text, full_text)
@@ -294,25 +305,67 @@ async def _run_repro_report(
         )
 
     report_path = _extract_generated_report_path(str(result_text), repo_name)
+    markdown_path = _workspace_repro_markdown_report_path(runtime, payload, repo_name)
     if not report_path.exists():
+        fallback_path = _workspace_repro_report_path(runtime, payload, repo_name)
+        try:
+            _write_backend_repro_report(
+                fallback_path,
+                repo_name=repo_name,
+                project_profile=project_profile,
+                implementation_steps=implementation_steps,
+                results_comparison=results_comparison,
+                optimization_suggestions=optimization_suggestions,
+            )
+            _write_backend_repro_report_markdown(
+                markdown_path,
+                repo_name=repo_name,
+                project_profile=project_profile,
+                implementation_steps=implementation_steps,
+                results_comparison=results_comparison,
+                optimization_suggestions=optimization_suggestions,
+            )
+        except Exception as exc:
+            return SkillRuntimeResult(
+                "generate_repro_report",
+                f"复现报告生成后未找到 Word 文件：{report_path}",
+                ok=False,
+                metadata={
+                    "error_code": "report_artifact_missing",
+                    "report_path": str(report_path),
+                    "skill_output": str(result_text),
+                    "fallback_error": f"{type(exc).__name__}: {exc}",
+                },
+            )
         return SkillRuntimeResult(
             "generate_repro_report",
-            f"复现报告生成后未找到 Word 文件：{report_path}",
-            ok=False,
+            f"{result_text}\n已通过后端适配层生成报告 artifact：{fallback_path}",
             metadata={
-                "error_code": "report_artifact_missing",
-                "report_path": str(report_path),
+                "repo_name": repo_name,
+                "report_path": str(fallback_path),
+                "markdown_report_path": str(markdown_path),
+                "artifact_paths": [str(fallback_path), str(markdown_path)],
+                "generation_source": "backend_report_fallback",
                 "skill_output": str(result_text),
+                "legacy_report_path": str(report_path),
             },
         )
-
+    _write_backend_repro_report_markdown(
+        markdown_path,
+        repo_name=repo_name,
+        project_profile=project_profile,
+        implementation_steps=implementation_steps,
+        results_comparison=results_comparison,
+        optimization_suggestions=optimization_suggestions,
+    )
     return SkillRuntimeResult(
         "generate_repro_report",
         str(result_text),
         metadata={
             "repo_name": repo_name,
             "report_path": str(report_path),
-            "artifact_paths": [str(report_path)],
+            "markdown_report_path": str(markdown_path),
+            "artifact_paths": [str(report_path), str(markdown_path)],
             "generation_source": "lab4ai-repro-report",
         },
     )
@@ -326,6 +379,166 @@ def _extract_generated_report_path(skill_output: str, repo_name: str) -> Path:
     if match:
         return Path(match.group(1))
     return Path("/root/.openclaw/workspace") / repo_name / f"{repo_name}_Final_Repro_Report.docx"
+
+
+def _workspace_repro_report_path(
+    runtime: SkillRuntime,
+    payload: dict[str, Any],
+    repo_name: str,
+) -> Path:
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    base_dir = runtime.workspace_root / conversation_id / repo_name if conversation_id else runtime.workspace_root / repo_name
+    return base_dir / f"{repo_name}_Final_Repro_Report.docx"
+
+
+def _workspace_repro_markdown_report_path(
+    runtime: SkillRuntime,
+    payload: dict[str, Any],
+    repo_name: str,
+) -> Path:
+    return _workspace_repro_report_path(runtime, payload, repo_name).with_suffix(".md")
+
+
+def _write_backend_repro_report(
+    path: Path,
+    *,
+    repo_name: str,
+    project_profile: str,
+    implementation_steps: dict[str, Any],
+    results_comparison: list[Any],
+    optimization_suggestions: str,
+) -> None:
+    from docx import Document
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = Document()
+    document.add_heading(f"{repo_name} Reproduction Report", level=0)
+    document.add_heading("Project Profile", level=1)
+    document.add_paragraph(project_profile)
+    document.add_heading("Implementation Steps", level=1)
+    step_titles = [
+        ("Code Fetch", "code_fetch"),
+        ("Environment Setup", "env_setup"),
+        ("Data And Parameters", "data_params"),
+        ("Core Loop", "core_loop"),
+        ("Evaluation Process", "eval_process"),
+    ]
+    for title, key in step_titles:
+        document.add_heading(title, level=2)
+        document.add_paragraph(str(implementation_steps.get(key) or "Not provided."))
+    document.add_heading("Results Comparison", level=1)
+    if results_comparison:
+        table = document.add_table(rows=1, cols=3)
+        table.style = "Table Grid"
+        headers = table.rows[0].cells
+        headers[0].text = "Metric"
+        headers[1].text = "Official"
+        headers[2].text = "Reproduced"
+        for item in results_comparison:
+            row = table.add_row().cells
+            if isinstance(item, dict):
+                row[0].text = str(item.get("metric_name") or "-")
+                row[1].text = str(item.get("official_value") or "-")
+                row[2].text = str(item.get("reproduced_value") or "-")
+            else:
+                row[0].text = str(item)
+                row[1].text = "-"
+                row[2].text = "-"
+    else:
+        document.add_paragraph("No quantitative comparison data was captured.")
+    document.add_heading("Optimization Suggestions", level=1)
+    document.add_paragraph(optimization_suggestions)
+    document.save(path)
+
+
+def _write_backend_repro_report_markdown(
+    path: Path,
+    *,
+    repo_name: str,
+    project_profile: str,
+    implementation_steps: dict[str, Any],
+    results_comparison: list[Any],
+    optimization_suggestions: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# {repo_name} 自动化复现报告",
+        "",
+        "## 一、项目档案",
+        "",
+        _markdown_block(project_profile),
+        "",
+        "## 二、复现实施步骤",
+        "",
+    ]
+    step_titles = [
+        ("2.1 代码获取", "code_fetch"),
+        ("2.2 环境搭建与排坑记录", "env_setup"),
+        ("2.3 数据与参数配置", "data_params"),
+        ("2.4 训练/推理核心流程", "core_loop"),
+        ("2.5 评估流程", "eval_process"),
+    ]
+    for title, key in step_titles:
+        lines.extend(
+            [
+                f"### {title}",
+                "",
+                _markdown_block(implementation_steps.get(key) or "未提供信息。"),
+                "",
+            ]
+        )
+
+    lines.extend(["## 三、结果对比 (原论文 vs 当前复现)", ""])
+    if results_comparison:
+        lines.extend(
+            [
+                "| 评估维度/指标 | 官方/原论文基准 | 本次实际复现值 |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for item in results_comparison:
+            if isinstance(item, dict):
+                metric = item.get("metric_name") or "-"
+                official = item.get("official_value") or "-"
+                reproduced = item.get("reproduced_value") or "-"
+            else:
+                metric = item
+                official = "-"
+                reproduced = "-"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _markdown_table_cell(metric),
+                        _markdown_table_cell(official),
+                        _markdown_table_cell(reproduced),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("本次复现未捕获到可用于对比的量化指标数据。")
+
+    lines.extend(
+        [
+            "",
+            "## 四、后期全量训练与优化建议",
+            "",
+            _markdown_block(optimization_suggestions or "暂无。"),
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _markdown_block(value: Any) -> str:
+    text = str(value).strip()
+    return text or "-"
+
+
+def _markdown_table_cell(value: Any) -> str:
+    text = str(value).replace("\n", "<br>").replace("|", "\\|").strip()
+    return text or "-"
 
 
 def _adapter_for(name: str):
@@ -457,9 +670,11 @@ def _set_module_proxy(module: Any, proxy_url: str | None) -> None:
 def _invoke_with_proxy_env(func: Any, *args: Any, proxy_url: str | None) -> Any:
     proxy_keys = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
     old_proxy_env = {key: os.environ.get(key) for key in proxy_keys}
+    old_path = os.environ.get("PATH")
     try:
         for key in proxy_keys:
             os.environ.pop(key, None)
+        os.environ["PATH"] = _path_with_git_usr_bin(old_path)
         if proxy_url:
             os.environ["http_proxy"] = proxy_url
             os.environ["https_proxy"] = proxy_url
@@ -470,6 +685,138 @@ def _invoke_with_proxy_env(func: Any, *args: Any, proxy_url: str | None) -> Any:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        if old_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = old_path
+
+
+def _invoke_with_repo_audit_env(
+    module: Any,
+    func: Any,
+    *args: Any,
+    proxy_url: str | None,
+) -> Any:
+    original_run = module.subprocess.run
+
+    def run_without_submodules(cmd: Any, *run_args: Any, **run_kwargs: Any) -> Any:
+        return original_run(
+            _strip_recurse_submodules_from_git_clone(cmd),
+            *run_args,
+            **run_kwargs,
+        )
+
+    module.subprocess.run = run_without_submodules
+    try:
+        return _invoke_with_proxy_env(func, *args, proxy_url=proxy_url)
+    finally:
+        module.subprocess.run = original_run
+
+
+def _strip_recurse_submodules_from_git_clone(command: Any) -> Any:
+    if not isinstance(command, (list, tuple)):
+        return command
+    items = list(command)
+    if len(items) < 3:
+        return command
+    executable = str(items[0]).lower()
+    if not executable.endswith("git") and not executable.endswith("git.exe"):
+        return command
+    if "clone" not in [str(item).lower() for item in items[1:3]]:
+        return command
+    stripped = [item for item in items if item != "--recurse-submodules"]
+    return tuple(stripped) if isinstance(command, tuple) else stripped
+
+
+def _download_pdf(
+    url: str,
+    output_path: Path,
+    timeout: int = 120,
+    max_bytes: int = 3 * 1024 * 1024,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; LobsterPaperAnalysis/1.0)"},
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(request, timeout=min(timeout, 30)) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > max_bytes:
+                return False
+            target = output_path.open("wb")
+            with target:
+                total = 0
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"PDF download exceeded {timeout}s")
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise TimeoutError(f"PDF download exceeded {max_bytes} bytes")
+                    target.write(chunk)
+        return output_path.stat().st_size > 0
+    except Exception:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
+def _download_arxiv_abs_text(url: str, timeout: int = 30) -> str:
+    abs_url = _arxiv_abs_url_from_pdf_url(url)
+    if not abs_url:
+        return ""
+    try:
+        request = urllib.request.Request(
+            abs_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; LobsterPaperAnalysis/1.0)"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            html = response.read(512 * 1024).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    return _html_to_text(html)
+
+
+def _arxiv_abs_url_from_pdf_url(url: str) -> str:
+    match = re.search(r"https?://arxiv\.org/(?:pdf|abs)/(\d{4}\.\d{4,5})(?:\.pdf)?", url)
+    if not match:
+        return ""
+    return f"https://arxiv.org/abs/{match.group(1)}"
+
+
+def _html_to_text(html: str) -> str:
+    text = re.sub(r"<script\b.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _path_with_git_usr_bin(path_value: str | None) -> str:
+    current = path_value or ""
+    git_usr_bin = _git_usr_bin_from_git_executable(shutil.which("git"))
+    if git_usr_bin is None or not git_usr_bin.exists():
+        return current
+    entries = [item for item in current.split(os.pathsep) if item]
+    normalized = {str(Path(item)).casefold() for item in entries}
+    if str(git_usr_bin).casefold() in normalized:
+        return current
+    return os.pathsep.join([str(git_usr_bin), *entries])
+
+
+def _git_usr_bin_from_git_executable(git_executable: str | None) -> Path | None:
+    if not git_executable:
+        return None
+    git_path = Path(git_executable)
+    if git_path.parent.name.lower() == "cmd":
+        return git_path.parent.parent / "usr" / "bin"
+    return None
 
 
 def _safe_output_dir(runtime: SkillRuntime, payload: dict[str, Any], *, repo_url: str) -> Path:

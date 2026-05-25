@@ -19,6 +19,11 @@ interface PendingIntervention {
   [key: string]: unknown;
 }
 
+interface Lab4AICredentialsSaveResponse {
+  configured?: boolean;
+  phone_masked?: string;
+}
+
 interface PendingUserInput {
   question: string;
   options?: string[];
@@ -57,6 +62,7 @@ interface Conversation {
     workflow_steps?: WorkflowStepState[];
     workflow_resources?: Record<string, WorkflowResource>;
     workflow_results?: Record<string, unknown>;
+    runtime?: RuntimeMetadata;
     pending_user_input?: PendingUserInput | null;
     skill_selection?: SkillSelectionState;
   };
@@ -99,6 +105,45 @@ interface WorkflowStepState {
   tool_calls?: WorkflowToolCall[];
   evidence?: Record<string, unknown>;
   validation_failures?: unknown[];
+  instruction_plan?: RuntimeInstructionPlan;
+}
+
+interface RuntimeMetadata {
+  active_skill?: {
+    name?: string;
+  } | null;
+  active_workflow?: RuntimeWorkflowState | null;
+  instruction_plans?: Record<string, RuntimeInstructionPlan>;
+}
+
+interface RuntimeWorkflowState {
+  name?: string;
+  version?: string;
+  current_step_id?: string | null;
+  steps?: Record<string, RuntimeWorkflowStep>;
+  resources?: Record<string, WorkflowResource>;
+  results?: Record<string, unknown>;
+}
+
+interface RuntimeWorkflowStep extends Omit<WorkflowStepState, "instruction_plan"> {
+  instruction?: string;
+  allowed_tools?: string[];
+  required_evidence?: string[];
+  instruction_plan_id?: string;
+}
+
+interface RuntimeInstructionPlan {
+  step_id?: string;
+  step_name?: string;
+  items?: RuntimeInstructionItem[];
+}
+
+interface RuntimeInstructionItem {
+  id?: string;
+  text?: string;
+  status?: string;
+  required?: boolean;
+  missing_reason?: string;
 }
 
 interface WorkflowToolCall {
@@ -125,6 +170,7 @@ interface WorkflowState {
 interface WorkflowResource {
   server_id?: string;
   released?: boolean;
+  raw?: Record<string, unknown>;
 }
 
 interface TimelineEvent {
@@ -136,6 +182,36 @@ interface TimelineEvent {
   kind?: "thinking" | "execution";
   tool_name?: string;
   workflow_step_id?: string;
+}
+
+type StructuredProcessActionStatus = "done" | "failed" | "waiting" | "todo" | "risk";
+
+interface StructuredProcessAction {
+  title: string;
+  status: StructuredProcessActionStatus;
+  detail?: string;
+}
+
+interface StructuredWorkflowSnapshot {
+  completed: number;
+  total: number;
+  current?: string;
+  state?: string;
+}
+
+interface StructuredProcessRecord {
+  id: number | string;
+  title: string;
+  judgement: string;
+  snapshot?: StructuredWorkflowSnapshot;
+  actions: StructuredProcessAction[];
+  raw: string;
+}
+
+interface StructuredProcessParseInput {
+  id: number | string;
+  title: string;
+  content?: string;
 }
 
 interface ChatMessage {
@@ -150,6 +226,7 @@ interface ChatMessage {
   workflowPath?: string | null;
   streaming?: boolean;
   run_id?: string | null;
+  message_metadata?: Record<string, unknown>;
 }
 
 interface RunState {
@@ -167,6 +244,33 @@ const REPRO_WORKFLOW_STEPS: WorkflowStepState[] = [
   { id: "step_7_gpu_execution", name: "CUDA编译 + 推理/微调测试", status: "pending" },
   { id: "step_8_generate_report", name: "生成工业级报告", status: "pending" },
   { id: "step_9_release_gpu", name: "释放 GPU 实例", status: "pending" },
+];
+
+const REPRO_WORKFLOW_PHASES = [
+  {
+    id: "feasibility",
+    title: "阶段一：可行性分析",
+    subtitle: "仓库审计、论文基准与熔断判断",
+    stepIds: ["step_1_audit", "step_2_condition_check"],
+  },
+  {
+    id: "cpu",
+    title: "阶段二：CPU 准备与环境构建",
+    subtitle: "低成本实例、SSH 探活、依赖与工作区",
+    stepIds: ["step_3_deploy_cpu", "step_4_cpu_env_setup", "step_5_release_cpu"],
+  },
+  {
+    id: "gpu",
+    title: "阶段三：GPU 实测与指标采集",
+    subtitle: "GPU 实例、CUDA/推理/微调验证与日志",
+    stepIds: ["step_6_deploy_gpu", "step_7_gpu_execution"],
+  },
+  {
+    id: "delivery",
+    title: "阶段四：结项报告与资源释放",
+    subtitle: "Word 报告、证据汇总与算力释放",
+    stepIds: ["step_8_generate_report", "step_9_release_gpu"],
+  },
 ];
 
 const RUNTIME_LIFECYCLE_EVENT_TYPES = new Set([
@@ -347,7 +451,7 @@ export default function ChatPage() {
         status: runtimeEventStatus(payload.type),
         kind: "execution",
         workflow_step_id: streamPayloadWorkflowStepId(payload),
-      });
+      }, { createIfMissing: payload.type !== "runtime_completed" });
       if (["runtime_completed", "runtime_failed", "runtime_stopped"].includes(payload.type)) {
         freezeActiveAgentMessage();
       }
@@ -487,8 +591,18 @@ export default function ChatPage() {
     };
   }
 
-  function appendTimelineEvent(payload: StreamPayload, timelineEvent: TimelineEvent) {
+  function appendTimelineEvent(
+    payload: StreamPayload,
+    timelineEvent: TimelineEvent,
+    options: { createIfMissing?: boolean } = {}
+  ) {
     setMessages((prev) => {
+      if (
+        options.createIfMissing === false &&
+        !findTimelineTargetMessageId(prev, payload, activeAgentMessageIdRef.current)
+      ) {
+        return prev;
+      }
       const { messages: next, id } = ensureActiveAgentMessage(prev, payload);
       activeAgentMessageIdRef.current = id;
       return next.map((msg) => {
@@ -541,6 +655,7 @@ export default function ChatPage() {
         streaming: false,
         type: "text",
         run_id: runId ?? next[activeIndex].run_id,
+        message_metadata: message.message_metadata,
       };
       return next;
     });
@@ -654,7 +769,8 @@ export default function ChatPage() {
       await navigator.clipboard.writeText(
         cleanFinalAnswer(
           message.content,
-          !!message.skillSelection || !!message.workflow || !!message.events?.length
+          !!message.skillSelection || !!message.workflow || !!message.events?.length,
+          isReproduceConversation(conversation)
         )
       );
       setCopiedMessageId(message.id);
@@ -676,6 +792,7 @@ export default function ChatPage() {
               onCopy={() => copyMessage(msg)}
               pendingInput={pendingInput}
               onSubmit={submitMessage}
+              markdownVariant={isReproduceConversation(conversation) ? "reproduction" : "default"}
             />
           ))}
 
@@ -938,6 +1055,7 @@ function chatMessageFromConversation(msg: ConversationMessage): ChatMessage {
     content: msg.content,
     created_at: msg.created_at,
     type: msg.role === "system" ? "status" : "text",
+    message_metadata: msg.message_metadata,
   };
 }
 
@@ -981,11 +1099,17 @@ function stringValue(value: unknown) {
 function workflowStateFromConversation(conversation?: Conversation): WorkflowState | undefined {
   const metadata = conversation?.metadata;
   const selectedSkill = metadata?.selected_skill;
+  const runtimeWorkflow = metadata?.runtime?.active_workflow;
   const isReproduce =
     selectedSkill === "lab4ai-auto-reproduct" ||
     !!metadata?.workflow_name ||
-    !!metadata?.workflow_steps;
+    !!metadata?.workflow_steps ||
+    !!runtimeWorkflow;
   if (!isReproduce) return undefined;
+
+  if (!metadata?.workflow_steps?.length && runtimeWorkflow) {
+    return workflowStateFromRuntime(metadata?.runtime, conversation);
+  }
 
   return normalizeWorkflowState({
     name: metadata?.workflow_name,
@@ -995,6 +1119,34 @@ function workflowStateFromConversation(conversation?: Conversation): WorkflowSta
     steps: metadata?.workflow_steps,
     resources: metadata?.workflow_resources,
     results: metadata?.workflow_results,
+  });
+}
+
+function workflowStateFromRuntime(
+  runtime: RuntimeMetadata | undefined,
+  conversation?: Conversation
+): WorkflowState | undefined {
+  const workflow = runtime?.active_workflow;
+  if (!workflow) return undefined;
+  const instructionPlans = runtime?.instruction_plans || {};
+  const steps = Object.values(workflow.steps || {}).map((step) => {
+    const stepId = String(step.id || step.instruction_plan_id || "");
+    const instructionPlanId = String(step.instruction_plan_id || stepId);
+    return {
+      ...step,
+      id: stepId,
+      name: step.name || stepId,
+      instruction_plan: instructionPlans[instructionPlanId],
+    } satisfies WorkflowStepState;
+  });
+  return normalizeWorkflowState({
+    name: workflow.name,
+    version: workflow.version,
+    project_name: projectNameFromConversation(conversation),
+    current_step_id: workflow.current_step_id,
+    resources: workflow.resources,
+    results: workflow.results,
+    steps,
   });
 }
 
@@ -1061,6 +1213,23 @@ function findCurrentRunProcessMessageIndex(
       msg.role === "agent" &&
       (msg.streaming === true || isProcessOnlyRunMessage(msg) || options.includeCompletedAgent === true)
   );
+}
+
+function findTimelineTargetMessageId(
+  messages: ChatMessage[],
+  payload: StreamPayload,
+  activeId: number | string | null
+) {
+  if (activeId && messages.some((msg) => msg.id === activeId)) return activeId;
+  const runId = payload.run_id ?? null;
+  if (runId) {
+    const existing = [...messages]
+      .reverse()
+      .find((msg) => msg.role === "agent" && msg.run_id === runId && msg.streaming);
+    if (existing) return existing.id;
+  }
+  const processOnlyIndex = findCurrentRunProcessMessageIndex(messages);
+  return processOnlyIndex >= 0 ? messages[processOnlyIndex].id : null;
 }
 
 function workflowPathFromSelection(selection?: SkillSelectionState, payloadPath?: string | null) {
@@ -1158,6 +1327,7 @@ function workflowStepStatusLabel(status: string) {
     running: "执行中",
     waiting_for_user: "等待确认",
     completed: "完成",
+    recovery: "恢复中",
     failed: "中止",
     skipped: "跳过",
   };
@@ -1168,6 +1338,7 @@ function workflowStepStatusClass(status: string) {
   if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
   if (status === "running") return "border-blue-100 bg-blue-50 text-blue-700";
   if (status === "waiting_for_user") return "border-amber-100 bg-amber-50 text-amber-700";
+  if (status === "recovery") return "border-amber-100 bg-amber-50 text-amber-700";
   if (status === "failed") return "border-red-100 bg-red-50 text-red-700";
   if (status === "skipped") return "border-slate-100 bg-slate-50 text-slate-500";
   return "border-slate-100 bg-slate-50 text-slate-500";
@@ -1177,9 +1348,19 @@ function workflowStepNumberClass(status: string) {
   if (status === "completed") return "border-emerald-200 bg-emerald-500 text-white";
   if (status === "running") return "border-blue-200 bg-blue-500 text-white";
   if (status === "waiting_for_user") return "border-amber-200 bg-amber-500 text-white";
+  if (status === "recovery") return "border-amber-200 bg-amber-500 text-white";
   if (status === "failed") return "border-red-200 bg-red-500 text-white";
   if (status === "skipped") return "border-slate-200 bg-slate-200 text-slate-500";
   return "border-slate-200 bg-white text-slate-500";
+}
+
+function workflowStepRailClass(status: string) {
+  if (status === "completed") return "bg-emerald-400";
+  if (status === "running") return "bg-blue-400";
+  if (status === "waiting_for_user" || status === "recovery") return "bg-amber-400";
+  if (status === "failed") return "bg-red-400";
+  if (status === "skipped") return "bg-slate-300";
+  return "bg-slate-200";
 }
 
 function workflowStepDetail(step: WorkflowStepState) {
@@ -1211,9 +1392,14 @@ function escapeMarkdownTableCell(value: string) {
   return value.replace(/\|/g, "\\|").replace(/\s*\n+\s*/g, "；");
 }
 
-function cleanFinalAnswer(content: string, hasProcess: boolean) {
+function cleanFinalAnswer(
+  content: string,
+  hasProcess: boolean,
+  preserveReproductionMarkdown = false
+) {
   const trimmed = content.trim();
   if (!trimmed || !hasProcess) return trimmed;
+  if (preserveReproductionMarkdown && isReproductionTemplateMarkdown(trimmed)) return trimmed;
   const lines = trimmed.split(/\r?\n/);
   const result: string[] = [];
   let skippingWorkflowTable = false;
@@ -1239,6 +1425,19 @@ function cleanFinalAnswer(content: string, hasProcess: boolean) {
   return finalLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function isReproductionTemplateMarkdown(content: string) {
+  const hasWorkflowTable = /^#{1,6}\s*复现流水线实时看板/m.test(content);
+  const hasFinalDeliveryTemplate =
+    /^#{1,6}\s*任务完成/m.test(content) ||
+    /^#{1,6}\s*核心指标对比/m.test(content) ||
+    /^#{1,6}\s*资源监控核对/m.test(content) ||
+    content.includes("Word 报告");
+  return (
+    hasWorkflowTable ||
+    hasFinalDeliveryTemplate
+  );
+}
+
 function isProcessOnlyLine(line: string) {
   if (!line) return false;
   if (/^#{1,6}\s*复现流水线实时看板/.test(line)) return true;
@@ -1260,12 +1459,14 @@ function MessageBubble({
   onCopy,
   pendingInput,
   onSubmit,
+  markdownVariant,
 }: {
   message: ChatMessage;
   copied: boolean;
   onCopy: () => void;
   pendingInput?: PendingUserInput | null;
   onSubmit: (content: string) => Promise<void>;
+  markdownVariant: "default" | "reproduction";
 }) {
   if (message.role === "user") {
     return (
@@ -1282,11 +1483,16 @@ function MessageBubble({
     <div className="flex gap-4" data-testid="agent-message">
       <AgentAvatar />
       <div className="flex flex-col gap-2 max-w-[85%] min-w-0">
-        <span className="text-ui-small font-medium text-slate-800">LOBSTER Agent</span>
+        <span className="text-ui-small font-medium text-slate-800">AutoResearch24 Agent</span>
         {message.type === "status" ? (
           <StatusMessage content={message.content} />
         ) : (
-          <AgentResponse message={message} pendingInput={pendingInput} onSubmit={onSubmit} />
+          <AgentResponse
+            message={message}
+            pendingInput={pendingInput}
+            onSubmit={onSubmit}
+            markdownVariant={markdownVariant}
+          />
         )}
         <MessageMeta message={message} copied={copied} onCopy={onCopy} align="left" />
       </div>
@@ -1309,17 +1515,38 @@ function AgentResponse({
   message,
   pendingInput,
   onSubmit,
+  markdownVariant,
 }: {
   message: ChatMessage;
   pendingInput?: PendingUserInput | null;
   onSubmit: (content: string) => Promise<void>;
+  markdownVariant: "default" | "reproduction";
 }) {
   const hasProcess = !!message.skillSelection || !!message.workflow || !!message.events?.length;
-  const finalAnswer = cleanFinalAnswer(message.content, hasProcess);
+  const useReproductionPanel = markdownVariant === "reproduction" && !!message.workflow;
+  const isReproductionMarkdownAnswer =
+    markdownVariant === "reproduction" && isReproductionTemplateMarkdown(message.content);
+  const finalAnswer = cleanFinalAnswer(
+    message.content,
+    hasProcess,
+    markdownVariant === "reproduction"
+  );
+  const reproductionPanelHasFinalDelivery =
+    useReproductionPanel && !!message.workflow && workflowHasFinalDelivery(message.workflow);
+  const shouldShowFinalAnswer =
+    !!finalAnswer && !(useReproductionPanel && (isReproductionMarkdownAnswer || reproductionPanelHasFinalDelivery));
   const hasWorkflow = !!message.workflow;
   return (
     <div className="space-y-3">
-      {hasProcess && (
+      {useReproductionPanel && message.workflow ? (
+        <ReproductionAgentPanel
+          workflow={message.workflow}
+          pendingInput={pendingInput}
+          onSubmit={onSubmit}
+          skillSelection={message.skillSelection}
+          workflowPath={message.workflowPath}
+        />
+      ) : hasProcess && !isReproductionMarkdownAnswer ? (
         <div className="space-y-3">
           {!hasWorkflow && message.events && message.events.length > 0 && (
             <AgentProcessTimeline events={message.events} />
@@ -1341,9 +1568,9 @@ function AgentResponse({
             />
           )}
         </div>
-      )}
-      {finalAnswer ? (
-        <FinalAnswer content={finalAnswer} />
+      ) : null}
+      {shouldShowFinalAnswer ? (
+        <FinalAnswer content={finalAnswer} markdownVariant={markdownVariant} />
       ) : message.streaming ? (
         <RunningState />
       ) : null}
@@ -1351,13 +1578,534 @@ function AgentResponse({
   );
 }
 
-function FinalAnswer({ content }: { content: string }) {
+function ReproductionAgentPanel({
+  workflow,
+  pendingInput,
+  onSubmit,
+  skillSelection,
+  workflowPath,
+}: {
+  workflow: WorkflowState;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
+  skillSelection?: SkillSelectionState;
+  workflowPath?: string | null;
+}) {
+  const steps = reproductionPanelSteps(workflow);
+  const completedCount = steps.filter((step) => step.status === "completed").length;
+  const selectedSkill =
+    skillSelection?.selected_skill ||
+    skillSelection?.model_choice ||
+    skillSelection?.fallback_choice;
+  const skillSource = skillSelectionSourceMeta(skillSelection?.source);
+  const showFinalDelivery = workflowHasFinalDelivery(workflow);
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 text-chat-body leading-relaxed text-slate-700">
-      <div className="mb-2 text-ui-meta font-semibold uppercase text-slate-400">最终回答</div>
-      <MarkdownContent content={content} />
+    <section
+      data-testid="reproduction-agent-panel"
+      className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+    >
+      <div className="border-b border-slate-100 bg-white px-4 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+              Lab4AI Auto Reproduction
+            </div>
+            <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
+              复现流水线实时看板: {workflow.project_name || "项目"}
+            </h3>
+            {selectedSkill && (
+              <p className="mt-1 break-words text-ui-micro text-slate-500">
+                {skillSource.titlePrefix} {selectedSkill}
+              </p>
+            )}
+            {workflowPath && (
+              <p className="mt-1 break-words text-ui-micro text-slate-400">
+                已加载 {workflowPath}
+              </p>
+            )}
+          </div>
+          <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-ui-micro font-medium text-slate-500">
+            {completedCount}/{REPRO_WORKFLOW_STEPS.length} 完成
+          </span>
+        </div>
+      </div>
+
+      <div className="w-full">
+        <table className="w-full table-fixed border-collapse text-ui-small">
+          <thead className="bg-slate-50">
+            <tr>
+              <th className="w-10 border-b border-slate-200 px-2 py-2 text-left font-semibold text-slate-700 sm:w-12 sm:px-3">
+                序号
+              </th>
+              <th className="w-[34%] border-b border-slate-200 px-2 py-2 text-left font-semibold text-slate-700 sm:px-3">
+                执行步骤 (对应 YAML Task)
+              </th>
+              <th className="w-24 border-b border-slate-200 px-2 py-2 text-left font-semibold text-slate-700 sm:w-28 sm:px-3">
+                当前状态
+              </th>
+              <th className="border-b border-slate-200 px-2 py-2 text-left font-semibold text-slate-700 sm:px-3">
+                核心产出 / 详情
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {steps.map((step, index) => (
+              <ReproductionStepRow
+                key={step.id}
+                step={step}
+                index={index}
+                detail={reproductionCoreOutputDetail(step, workflow)}
+                pendingInput={pendingInputForStep(pendingInput, step, workflow)}
+                onSubmit={onSubmit}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showFinalDelivery && <ReproductionFinalDelivery workflow={workflow} />}
+    </section>
+  );
+}
+
+function workflowHasFinalDelivery(workflow: WorkflowState) {
+  const completedCount = reproductionPanelSteps(workflow).filter((step) => step.status === "completed").length;
+  return completedCount >= REPRO_WORKFLOW_STEPS.length || !!workflowReportPath(workflow);
+}
+
+function reproductionPanelSteps(workflow: WorkflowState) {
+  const byId = new Map((workflow.steps || []).map((step) => [step.id, step]));
+  return REPRO_WORKFLOW_STEPS.map((template) => ({
+    ...template,
+    ...(byId.get(template.id) || {}),
+    name: template.name,
+  }));
+}
+
+function ReproductionStepRow({
+  step,
+  index,
+  detail,
+  pendingInput,
+  onSubmit,
+}: {
+  step: WorkflowStepState;
+  index: number;
+  detail: string;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
+}) {
+  return (
+    <>
+      <tr data-testid={`reproduction-step-row-${step.id}`} className="odd:bg-white even:bg-slate-50/60">
+        <td className="border-t border-slate-100 px-2 py-2 align-top text-slate-600 sm:px-3">
+          {index + 1}
+        </td>
+        <td className="min-w-0 break-words border-t border-slate-100 px-2 py-2 align-top text-slate-700 sm:px-3">
+          <code className="break-all rounded bg-slate-100 px-1 py-0.5 text-ui-small text-slate-700">
+            {step.id}
+          </code>
+          <span className="break-words">: {step.name}</span>
+        </td>
+        <td className="border-t border-slate-100 px-2 py-2 align-top sm:px-3">
+          <ReproductionStatus status={step.status} />
+        </td>
+        <td className="min-w-0 whitespace-normal break-words border-t border-slate-100 px-2 py-2 align-top text-slate-600 [overflow-wrap:anywhere] sm:px-3">
+          {detail}
+        </td>
+      </tr>
+      {pendingInput && (
+        <tr>
+          <td className="border-t border-slate-100 px-3 py-3" colSpan={4}>
+            <HumanInputPanel input={pendingInput} onSubmit={onSubmit} stepId={step.id} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function reproductionCoreOutputDetail(step: WorkflowStepState, workflow: WorkflowState) {
+  const results = workflow.results || {};
+  const evidence = step.evidence || {};
+  if (step.id === "step_1_audit") {
+    return reproductionDetailText(
+      [
+        labeledValue("可行性评分", results.score ?? scoreFromText(step.output)),
+        labeledRecord("论文 Baseline", recordValue(results.baseline_metrics)),
+        labeledRecord("超参数", recordValue(results.hyperparams)),
+      ],
+      "可行性评分 / 论文 Baseline / 超参数"
+    );
+  }
+  if (step.id === "step_2_condition_check") {
+    const score = numberValue(results.score ?? scoreFromText(step.output) ?? scoreFromText(step.error));
+    const status =
+      typeof score === "number"
+        ? score >= 60
+          ? "是"
+          : "否"
+        : step.status === "completed"
+          ? "是"
+          : step.status === "failed"
+            ? "否"
+            : "待判断";
+    return reproductionDetailText(
+      [
+        `通过：${status}`,
+        step.status === "failed"
+          ? labeledValue("熔断原因", step.error || step.output || workflowValidationFailureText(step))
+          : "",
+      ],
+      "通过 / 熔断原因"
+    );
+  }
+  if (step.id === "step_3_deploy_cpu") {
+    return reproductionInstanceDetail("cpu", step, workflow);
+  }
+  if (step.id === "step_4_cpu_env_setup") {
+    return reproductionDetailText(
+      [
+        `clone完成：${booleanDetail(evidence.clone_completed)}`,
+        `依赖安装结果：${dependencyInstallDetail(evidence)}`,
+        labeledValue("workspace", step.artifacts?.find((artifact) => artifact.includes("/workspace"))),
+      ],
+      "clone完成 / 依赖安装结果"
+    );
+  }
+  if (step.id === "step_5_release_cpu") {
+    return reproductionReleaseDetail("cpu", step, workflow);
+  }
+  if (step.id === "step_6_deploy_gpu") {
+    return reproductionInstanceDetail("gpu", step, workflow);
+  }
+  if (step.id === "step_7_gpu_execution") {
+    const measured = recordValue(results.smoke_test_metrics);
+    const vramKey = Object.keys(measured).find((key) => /vram|显存/i.test(key));
+    const metrics = Object.fromEntries(
+      Object.entries(measured).filter(([key]) => !/stdout|stderr|vram|显存/i.test(key))
+    );
+    return reproductionDetailText(
+      [
+        `编译结果：${gpuExecutionResultDetail(step, evidence, measured)}`,
+        labeledRecord("实测指标", metrics),
+        labeledValue("VRAM", vramKey ? measured[vramKey] : undefined),
+      ],
+      "编译结果 / 实测指标 / VRAM"
+    );
+  }
+  if (step.id === "step_8_generate_report") {
+    return reproductionDetailText(
+      [
+        labeledValue("Word 文件路径", workflowReportPath(workflow) || evidence.report_path),
+        labeledValue("Markdown 预览报告", workflowMarkdownReportPath(workflow) || evidence.markdown_report_path),
+      ],
+      "Word 文件路径 / Markdown 预览报告"
+    );
+  }
+  if (step.id === "step_9_release_gpu") {
+    return reproductionReleaseDetail("gpu", step, workflow);
+  }
+  return reproductionDetailText([], defaultWorkflowStepDetail(step.id) || "核心产出");
+}
+
+function reproductionInstanceDetail(
+  resourceKey: "cpu" | "gpu",
+  step: WorkflowStepState,
+  workflow: WorkflowState
+) {
+  const resource = workflow.resources?.[resourceKey] || {};
+  const evidence = step.evidence || {};
+  const raw = resource.raw || {};
+  return reproductionDetailText(
+    [
+      labeledValue("serverId", evidence.server_id || resource.server_id),
+      labeledValue("SSH", sshConnectionDetail(raw)),
+    ],
+    "serverId / SSH 信息"
+  );
+}
+
+function reproductionReleaseDetail(
+  resourceKey: "cpu" | "gpu",
+  step: WorkflowStepState,
+  workflow: WorkflowState
+) {
+  const resource = workflow.resources?.[resourceKey] || {};
+  const evidence = step.evidence || {};
+  const releasedKey = `${resourceKey}_instance_released`;
+  return reproductionDetailText(
+    [
+      `关机确认：${resource.released || evidence[releasedKey] ? "已释放" : "待确认"}`,
+      "运行时长：待记录",
+      labeledValue("serverId", evidence.server_id || resource.server_id),
+    ],
+    "关机确认 / 运行时长"
+  );
+}
+
+function reproductionDetailText(parts: Array<string | undefined>, fallback: string) {
+  const text = parts.filter((part): part is string => !!part?.trim()).join("；");
+  return text || `待生成：${fallback}`;
+}
+
+function labeledValue(label: string, value: unknown) {
+  const text = readableWorkflowValue(value);
+  return text ? `${label}：${text}` : "";
+}
+
+function labeledRecord(label: string, value: Record<string, unknown>) {
+  const text = workflowRecordSummary(value);
+  return text ? `${label}：${text}` : "";
+}
+
+function scoreFromText(value: unknown) {
+  const text = readableWorkflowValue(value);
+  const match = text.match(/\bscore\s*[=:：]\s*(\d+(?:\.\d+)?)/i);
+  return match?.[1];
+}
+
+function numberValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function workflowRecordSummary(value: Record<string, unknown>) {
+  return Object.entries(value)
+    .filter(([, item]) => readableWorkflowValue(item))
+    .map(([key, item]) => `${key}=${readableWorkflowValue(item)}`)
+    .join(", ");
+}
+
+function booleanDetail(value: unknown) {
+  if (value === true) return "是";
+  if (value === false) return "否";
+  return "待记录";
+}
+
+function dependencyInstallDetail(evidence: Record<string, unknown>) {
+  if (evidence.project_prep_completed || evidence.dependency_install_attempted) return "已完成";
+  return "待记录";
+}
+
+function gpuExecutionResultDetail(
+  step: WorkflowStepState,
+  evidence: Record<string, unknown>,
+  measured: Record<string, unknown>
+) {
+  if (step.status === "failed") return "失败";
+  if (evidence.smoke_test_executed || measured.status || step.status === "completed") return "已完成";
+  return "待记录";
+}
+
+function sshConnectionDetail(raw: Record<string, unknown>) {
+  const host = stringValue(raw.ssh_host) || stringValue(raw.sshHost);
+  const port = raw.ssh_port ?? raw.sshPort;
+  const user = stringValue(raw.ssh_user) || stringValue(raw.sshUser) || "root";
+  if (!host && !port) return "";
+  return `${user}@${host || "-"}${port ? `:${readableWorkflowValue(port)}` : ""}`;
+}
+
+function ReproductionStatus({ status }: { status: string }) {
+  const meta = reproductionStatusMeta(status);
+  return (
+    <span
+      data-testid={`reproduction-status-${meta.testId}`}
+      className={`inline-flex rounded-md border px-2 py-0.5 text-ui-small font-semibold ${meta.className}`}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+function reproductionStatusMeta(status: string) {
+  if (status === "completed") {
+    return {
+      testId: "completed",
+      label: "[完成]",
+      className: "border-emerald-100 bg-emerald-50 text-emerald-700",
+    };
+  }
+  if (status === "running" || status === "recovery") {
+    return {
+      testId: "running",
+      label: "[执行中]",
+      className: "border-blue-100 bg-blue-50 text-blue-700",
+    };
+  }
+  if (status === "failed") {
+    return {
+      testId: "failed",
+      label: "[中止]",
+      className: "border-red-100 bg-red-50 text-red-700",
+    };
+  }
+  if (status === "waiting_for_user") {
+    return {
+      testId: "pending",
+      label: "[等待中...]",
+      className: "border-amber-100 bg-amber-50 text-amber-700",
+    };
+  }
+  return {
+    testId: "pending",
+    label: "[等待中...]",
+    className: "border-slate-100 bg-slate-50 text-slate-500",
+  };
+}
+
+function ReproductionFinalDelivery({ workflow }: { workflow: WorkflowState }) {
+  const projectName = workflow.project_name || "项目";
+  const reportPath = workflowReportPath(workflow) || "-";
+  const markdownReportPath = workflowMarkdownReportPath(workflow);
+  const metricRows = reproductionMetricRows(workflow.results || {});
+  return (
+    <section className="space-y-4 border-t border-emerald-100 bg-emerald-50/30 px-4 py-4">
+      <h3 className="break-words text-md-h3 font-semibold text-emerald-800">
+        任务完成：{projectName} 自动化复现已结项
+      </h3>
+
+      <section className="space-y-2">
+        <h4 className="text-ui-small font-semibold text-slate-800">
+          核心指标对比 (Smoke Test 实测)
+        </h4>
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <table className="min-w-[560px] w-full border-collapse text-ui-small">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">
+                  评估维度
+                </th>
+                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">
+                  原论文/官方基准
+                </th>
+                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">
+                  H100 实测数据
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {metricRows.map((row) => (
+                <tr key={row.name} className="odd:bg-white even:bg-slate-50/60">
+                  <td className="border-t border-slate-100 px-3 py-2 text-slate-700">{row.name}</td>
+                  <td className="border-t border-slate-100 px-3 py-2 text-slate-600">{row.baseline}</td>
+                  <td className="border-t border-slate-100 px-3 py-2 text-slate-600">{row.measured}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="space-y-2">
+        <h4 className="text-ui-small font-semibold text-slate-800">
+          H100 架构优化洞察
+        </h4>
+        <blockquote className="rounded-lg border-l-4 border-blue-300 bg-white px-3 py-2 text-ui-small leading-relaxed text-slate-600">
+          {reproductionOptimizationInsight(workflow)}
+        </blockquote>
+      </section>
+
+      <section className="space-y-2">
+        <h4 className="text-ui-small font-semibold text-slate-800">
+          工业级复现报告提取
+        </h4>
+        <p className="text-ui-small text-slate-600">
+          Word 报告已排版落盘，请前往该绝对路径获取：
+        </p>
+        <code className="block overflow-x-auto rounded-lg border border-slate-200 bg-white px-3 py-2 text-ui-small text-slate-700">
+          {reportPath}
+        </code>
+        {markdownReportPath && (
+          <>
+            <p className="text-ui-small text-slate-600">
+              Workspace 中同步生成的 Markdown 预览报告：
+            </p>
+            <code className="block overflow-x-auto rounded-lg border border-emerald-100 bg-white px-3 py-2 text-ui-small text-emerald-800">
+              {markdownReportPath}
+            </code>
+          </>
+        )}
+      </section>
+
+      <div className="rounded-lg border border-emerald-100 bg-white px-3 py-2 text-ui-small text-emerald-800">
+        <span className="font-semibold">资源监控核对</span>
+        ：本次流水线调用的 CPU 与 GPU 实例均已触发关机释放，已执行 step_5 和 step_9。
+      </div>
+    </section>
+  );
+}
+
+function reproductionMetricRows(results: Record<string, unknown>) {
+  const baseline = recordValue(results.baseline_metrics);
+  const measured = recordValue(results.smoke_test_metrics);
+  const keys = new Set([...Object.keys(baseline), ...Object.keys(measured)]);
+  const vramKey = [...keys].find((key) => /vram|显存/i.test(key));
+  if (vramKey) keys.delete(vramKey);
+  const rows = [...keys].map((key) => ({
+    name: key,
+    baseline: readableWorkflowValue(baseline[key] ?? "N/A"),
+    measured: readableWorkflowValue(measured[key] ?? "N/A"),
+  }));
+  rows.push({
+    name: "显存占用 (VRAM)",
+    baseline: vramKey ? readableWorkflowValue(baseline[vramKey] ?? "N/A") : "N/A",
+    measured: vramKey ? readableWorkflowValue(measured[vramKey] ?? "N/A") : "N/A",
+  });
+  return rows.length > 0
+    ? rows
+    : [{ name: "Smoke Test", baseline: "N/A", measured: "已完成" }];
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function reproductionOptimizationInsight(workflow: WorkflowState) {
+  const gpuStep = (workflow.steps || []).find((step) => step.id === "step_7_gpu_execution");
+  if (gpuStep?.output) return compactWorkflowText(gpuStep.output, 220);
+  return "已基于 H100 环境完成 Smoke Test 记录；后续可围绕显存峰值、batch size 与 CUDA 依赖版本继续优化。";
+}
+
+function FinalAnswer({
+  content,
+  markdownVariant,
+}: {
+  content: string;
+  markdownVariant: "default" | "reproduction";
+}) {
+  const isReport = isWorkflowFinalReport(content);
+  return (
+    <div
+      className={`rounded-xl border p-4 text-chat-body leading-relaxed ${
+        isReport
+          ? "border-emerald-100 bg-emerald-50/40 text-slate-700"
+          : "border-slate-200 bg-white text-slate-700"
+      }`}
+    >
+      <div
+        className={`mb-2 text-ui-meta font-semibold uppercase ${
+          isReport ? "text-emerald-700" : "text-slate-400"
+        }`}
+      >
+        {isReport ? "结项报告" : "最终回答"}
+      </div>
+      <MarkdownContent content={content} variant={markdownVariant} />
     </div>
   );
+}
+
+function isReproduceConversation(conversation?: Conversation) {
+  return conversation?.task_type === "reproduce" || conversation?.metadata?.task_type === "reproduce";
+}
+
+function isWorkflowFinalReport(content: string) {
+  return /^##\s*结项报告/m.test(content) || /复现\s*workflow.*完成全部\s*\d+\s*个步骤/.test(content);
 }
 
 function RunningState() {
@@ -1496,45 +2244,243 @@ function WorkflowBoard({
   const steps = workflow.steps || REPRO_WORKFLOW_STEPS;
   const completedCount = steps.filter((step) => step.status === "completed").length;
   const skillSelectionStepId = workflowSkillSelectionStepId(workflow);
+  const currentStep = workflowCurrentStep(workflow, steps);
+  const checklistStats = workflowChecklistStats(steps);
+  const issueCount = steps.filter((step) =>
+    ["failed", "recovery", "waiting_for_user"].includes(step.status)
+  ).length;
+  const evidenceStats = workflowEvidenceStats(steps);
+  const phaseSummaries = workflowPhaseSummaries(steps);
+  const pendingCount = Math.max(steps.length - completedCount, 0);
+  const reportPath = workflowReportPath(workflow);
+  const markdownReportPath = workflowMarkdownReportPath(workflow);
   return (
     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
-            Project Reproduction Workflow
+      <div className="border-b border-slate-100 bg-white px-4 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+              Research Reproduction Workbench
+            </div>
+            <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
+              {workflow.project_name || "项目"} 复现实验台
+            </h3>
+            <p className="mt-1 break-words text-ui-small text-slate-500">
+              按 project_reproduce.yaml 展示 9 步主流程、验收证据、受控工具和结项报告交付。
+            </p>
+            {workflowPath && (
+              <p className="mt-1 break-words text-ui-micro text-slate-400">
+                契约：{workflowPath}
+              </p>
+            )}
           </div>
-          <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
-            {workflow.project_name || "项目"} 复现流水线
-          </h3>
-          <p className="mt-1 text-ui-small text-slate-500">
-            按 YAML workflow step 展示当前复现运行状态、进度和工具调用。
-          </p>
+          <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-ui-micro font-medium text-slate-500">
+            {completedCount}/{steps.length} 完成
+          </span>
         </div>
-        <span className="shrink-0 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-ui-micro font-medium text-slate-500">
-          {completedCount}/{steps.length} 完成
-        </span>
+        <dl className="mt-4 grid gap-3 border-t border-slate-100 pt-3 sm:grid-cols-5">
+          <WorkflowSummaryMetric
+            label="当前步骤"
+            value={currentStep ? `${currentStep.name || currentStep.id}` : "未开始"}
+          />
+          <WorkflowSummaryMetric
+            label="YAML 步骤"
+            value={currentStep?.id || "-"}
+          />
+          <WorkflowSummaryMetric
+            label="验收证据"
+            value={`${checklistStats.completed}/${checklistStats.total}`}
+          />
+          <WorkflowSummaryMetric
+            label="工具执行"
+            value={`${workflowToolCallCount(steps)} 项`}
+          />
+          <WorkflowSummaryMetric
+            label={issueCount > 0 ? "待处理" : "剩余步骤"}
+            value={issueCount > 0 ? `${issueCount} 项待处理` : `${pendingCount} 项`}
+          />
+        </dl>
+        {(reportPath || evidenceStats.artifacts > 0) && (
+          <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-ui-small text-slate-600">
+            {reportPath ? `结项报告路径：${reportPath}` : `已记录 ${evidenceStats.artifacts} 个中间产物。`}
+            {markdownReportPath && (
+              <div className="mt-1 break-all text-emerald-700">
+                Markdown 预览报告：{markdownReportPath}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="border-b border-slate-100 bg-white px-4 py-2">
+        <div className="flex gap-1.5 overflow-x-auto pb-1">
+          {steps.map((step, index) => (
+            <span
+              key={`${step.id}-rail`}
+              title={`${index + 1}. ${step.name || step.id} · ${workflowStepStatusLabel(step.status)}`}
+              className={`h-2 min-w-8 flex-1 rounded-full ${workflowStepRailClass(step.status)}`}
+            />
+          ))}
+        </div>
       </div>
       <div className="divide-y divide-slate-100">
-        {steps.map((step, index) => (
-          <WorkflowStepRow
-            key={step.id}
-            step={step}
-            index={index}
-            isCurrent={workflow.current_step_id === step.id}
-            pendingInput={pendingInputForStep(pendingInput, step, workflow)}
-            onSubmit={onSubmit}
-            skillSelection={step.id === skillSelectionStepId ? skillSelection : undefined}
-            workflowPath={step.id === skillSelectionStepId ? workflowPath : undefined}
-            events={workflowTimelineEventsForStep(events || [], step, workflow)}
-          />
+        {phaseSummaries.map((phase) => (
+          <section key={`${phase.id}-section`}>
+            <div className="border-b border-slate-100 bg-slate-50/60 px-4 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-ui-small font-semibold text-slate-800">{phase.title}</div>
+                  <div className="text-ui-micro text-slate-500">{phase.subtitle}</div>
+                </div>
+                <span className={`rounded-full border px-2 py-0.5 text-ui-micro font-medium ${workflowPhaseStatusClass(phase.status)}`}>
+                  {phase.completed}/{phase.steps.length} 完成
+                </span>
+              </div>
+            </div>
+            <div className="divide-y divide-slate-100">
+              {phase.steps.map((step) => (
+                <WorkflowStepRow
+                  key={step.id}
+                  step={step}
+                  index={steps.findIndex((item) => item.id === step.id)}
+                  isCurrent={workflow.current_step_id === step.id}
+                  pendingInput={pendingInputForStep(pendingInput, step, workflow)}
+                  onSubmit={onSubmit}
+                  skillSelection={step.id === skillSelectionStepId ? skillSelection : undefined}
+                  workflowPath={step.id === skillSelectionStepId ? workflowPath : undefined}
+                  events={workflowTimelineEventsForStep(events || [], step, workflow)}
+                />
+              ))}
+            </div>
+          </section>
         ))}
       </div>
     </section>
   );
 }
 
+function WorkflowSummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+        {label}
+      </dt>
+      <dd className="mt-0.5 truncate text-ui-small font-medium text-slate-700" title={value}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+function workflowCurrentStep(workflow: WorkflowState, steps: WorkflowStepState[]) {
+  return (
+    steps.find((step) => step.id === workflow.current_step_id) ||
+    steps.find((step) => ["running", "waiting_for_user", "recovery"].includes(step.status)) ||
+    steps.find((step) => step.status !== "completed")
+  );
+}
+
+function workflowChecklistStats(steps: WorkflowStepState[]) {
+  const items = steps.flatMap((step) => step.instruction_plan?.items || []);
+  return {
+    total: items.length,
+    completed: items.filter((item) => item.status === "completed").length,
+  };
+}
+
+function workflowEvidenceStats(steps: WorkflowStepState[]) {
+  return steps.reduce(
+    (stats, step) => ({
+      evidence: stats.evidence + workflowEvidenceEntries(step).length,
+      artifacts: stats.artifacts + (step.artifacts?.length || 0),
+      risks: stats.risks + workflowRiskEntries(step).length,
+    }),
+    { evidence: 0, artifacts: 0, risks: 0 }
+  );
+}
+
+function workflowToolCallCount(steps: WorkflowStepState[]) {
+  return steps.reduce((count, step) => count + (step.tool_calls?.length || 0), 0);
+}
+
+function workflowReportPath(workflow: WorkflowState) {
+  const results = workflow.results || {};
+  return (
+    stringValue(results.word_report_path) ||
+    stringValue(results.local_report_path) ||
+    stringValue(results.remote_report_path) ||
+    stringValue(results.report_path)
+  );
+}
+
+function workflowMarkdownReportPath(workflow: WorkflowState) {
+  const results = workflow.results || {};
+  return stringValue(results.markdown_report_path);
+}
+
 function workflowSkillSelectionStepId(workflow: WorkflowState) {
   return (workflow.steps || [])[0]?.id || REPRO_WORKFLOW_STEPS[0]?.id;
+}
+
+interface WorkflowPhaseSummary {
+  id: string;
+  title: string;
+  subtitle: string;
+  steps: WorkflowStepState[];
+  completed: number;
+  status: "completed" | "running" | "blocked" | "pending";
+}
+
+function workflowPhaseSummaries(steps: WorkflowStepState[]): WorkflowPhaseSummary[] {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const assigned = new Set<string>();
+  const summaries = REPRO_WORKFLOW_PHASES.map((phase) => {
+    const phaseSteps = phase.stepIds
+      .map((stepId) => byId.get(stepId))
+      .filter((step): step is WorkflowStepState => !!step);
+    phaseSteps.forEach((step) => assigned.add(step.id));
+    return workflowPhaseSummary(phase.id, phase.title, phase.subtitle, phaseSteps);
+  });
+  const extraSteps = steps.filter((step) => !assigned.has(step.id));
+  if (extraSteps.length > 0) {
+    summaries.push(
+      workflowPhaseSummary("extra", "补充步骤", "运行时追加的 workflow step", extraSteps)
+    );
+  }
+  return summaries;
+}
+
+function workflowPhaseSummary(
+  id: string,
+  title: string,
+  subtitle: string,
+  steps: WorkflowStepState[]
+): WorkflowPhaseSummary {
+  const completed = steps.filter((step) => step.status === "completed").length;
+  const hasActive = steps.some((step) =>
+    ["running", "waiting_for_user", "recovery"].includes(step.status)
+  );
+  const hasBlocked = steps.some((step) => step.status === "failed");
+  return {
+    id,
+    title,
+    subtitle,
+    steps,
+    completed,
+    status: hasBlocked
+      ? "blocked"
+      : completed === steps.length && steps.length > 0
+        ? "completed"
+        : hasActive
+          ? "running"
+          : "pending",
+  };
+}
+
+function workflowPhaseStatusClass(status: WorkflowPhaseSummary["status"]) {
+  if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  if (status === "running") return "border-blue-100 bg-blue-50 text-blue-700";
+  if (status === "blocked") return "border-red-100 bg-red-50 text-red-700";
+  return "border-slate-100 bg-white text-slate-500";
 }
 
 function workflowTimelineEventsForStep(
@@ -1544,7 +2490,9 @@ function workflowTimelineEventsForStep(
 ) {
   const fallbackStepId =
     workflow.current_step_id ||
-    (workflow.steps || []).find((item) => ["running", "waiting_for_user"].includes(item.status))?.id ||
+    (workflow.steps || []).find((item) =>
+      ["running", "waiting_for_user", "recovery"].includes(item.status)
+    )?.id ||
     workflowSkillSelectionStepId(workflow);
 
   return events.filter((event) => {
@@ -1565,6 +2513,183 @@ function skillSelectionSummaryLines(
   if (workflowPath) lines.push(`已加载 ${workflowPath}`);
   if (selection.reason) lines.push(selection.reason);
   return lines;
+}
+
+function structuredProcessRecordFromEvent(event: TimelineEvent): StructuredProcessRecord | null {
+  return structuredProcessRecordFromInput(event);
+}
+
+function structuredProcessRecordFromProgress(
+  content: string,
+  index: number
+): StructuredProcessRecord | null {
+  return structuredProcessRecordFromInput({
+    id: `progress-${index}`,
+    title: workflowProgressTitle(content),
+    content,
+  });
+}
+
+function structuredProcessRecordFromInput(
+  input: StructuredProcessParseInput
+): StructuredProcessRecord | null {
+  const raw = processInputText(input);
+  if (!looksLikeStructuredProcessMarkdown(raw, input.title)) return null;
+  const snapshot = parseStructuredWorkflowSnapshot(raw);
+  const actions = parseStructuredProcessActions(raw);
+  if (!snapshot && actions.length === 0 && !raw.includes("|")) return null;
+  return {
+    id: input.id,
+    title: processRecordTitle(input.title),
+    judgement: extractProcessJudgement(raw, input.title),
+    snapshot,
+    actions,
+    raw,
+  };
+}
+
+function processInputText(input: StructuredProcessParseInput) {
+  const content = input.content?.trim();
+  if (!content) return input.title;
+  if (content.startsWith(`${input.title}:`) || content.startsWith(`${input.title}：`)) {
+    return content;
+  }
+  return `${input.title}：${content}`;
+}
+
+function looksLikeStructuredProcessMarkdown(text: string, title?: string) {
+  return (
+    text.includes("复现流水线实时看板") ||
+    text.includes("| 序号 |") ||
+    text.includes("模型规划工具调用") ||
+    text.includes("制定执行计划") ||
+    title === "制定执行计划" ||
+    title === "模型规划工具调用"
+  );
+}
+
+function processRecordTitle(title: string) {
+  if (title.includes("恢复")) return "恢复计划";
+  if (title.includes("GPU")) return "GPU 执行计划";
+  if (title.includes("工具")) return "模型工具计划";
+  if (title.includes("计划")) return "执行计划";
+  return "实验判断";
+}
+
+function workflowProgressTitle(content: string) {
+  if (/GPU|CUDA|推理|微调/.test(content)) return "GPU 执行计划";
+  if (/恢复|失败|重试|清理/.test(content)) return "恢复计划";
+  if (/工具|模型规划工具调用/.test(content)) return "模型工具计划";
+  if (/计划|看板|复现流水线/.test(content)) return "执行计划";
+  return "运行记录";
+}
+
+function extractProcessJudgement(raw: string, fallback: string) {
+  const cleaned = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      if (line.startsWith("|")) return false;
+      if (/^-{3,}/.test(line)) return false;
+      if (/^#{1,6}\s*/.test(line)) return false;
+      if (line.includes("复现流水线实时看板")) return false;
+      return true;
+    })
+    .join(" ")
+    .replace(/^(制定执行计划|模型规划工具调用)[：:]\s*/g, "")
+    .replace(/\s+(模型规划工具调用|制定执行计划)[：:]\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return compactWorkflowText(cleaned || fallback, 220);
+}
+
+function parseStructuredWorkflowSnapshot(raw: string): StructuredWorkflowSnapshot | undefined {
+  const rows = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^\|\s*\d+\s*\|/.test(line));
+
+  if (rows.length === 0) return undefined;
+
+  const completed = rows.filter((row) => /✅|完成|通过/.test(row)).length;
+  const currentRow =
+    rows.find((row) => /执行中|等待中|等待|⏳|运行中/.test(row)) ||
+    rows.find((row) => !/✅|完成|通过/.test(row));
+  const total = Math.max(REPRO_WORKFLOW_STEPS.length, rows.length);
+
+  return {
+    completed,
+    total,
+    current: currentRow ? workflowTableStepLabel(currentRow) : undefined,
+    state: currentRow ? workflowTableStatusLabel(currentRow) : undefined,
+  };
+}
+
+function workflowTableStepLabel(row: string) {
+  const cells = markdownTableCells(row);
+  const stepCell = cells[1] || row;
+  const match = stepCell.match(/`([^`]+)`\s*:?\s*(.*)/);
+  if (match) {
+    const name = match[2]?.trim();
+    return name ? `${match[1]} · ${name}` : match[1];
+  }
+  return compactWorkflowText(stepCell.replace(/`/g, ""), 80);
+}
+
+function workflowTableStatusLabel(row: string) {
+  const cells = markdownTableCells(row);
+  const statusCell = cells[2] || "";
+  return compactWorkflowText(statusCell.replace(/[✅⏳]/g, "").trim() || "待处理", 40);
+}
+
+function markdownTableCells(row: string) {
+  return row
+    .split("|")
+    .slice(1, -1)
+    .map((cell) => cell.trim());
+}
+
+function parseStructuredProcessActions(raw: string) {
+  const actions: StructuredProcessAction[] = [];
+  const normalized = raw.replace(/\s+/g, " ");
+
+  addStructuredAction(actions, "SSH 探活", actionStatus(normalized, ["SSH"], ["成功", "连通"], ["失败", "超时"]), "确认远程实例可连接。");
+  addStructuredAction(actions, "克隆项目代码", actionStatus(normalized, ["克隆", "clone"], [], ["失败"]), "拉取目标 GitHub 仓库到任务工作区。");
+  addStructuredAction(actions, "读取仓库审计报告", actionStatus(normalized, ["读取审计报告", "repo_audit"], [], ["失败"]), "加载前序审计结论作为环境构建依据。");
+  addStructuredAction(actions, "清理历史代码目录", actionStatus(normalized, ["清理", "目录已存在"], [], ["失败"]), "清除远端残留目录后重新克隆。");
+  addStructuredAction(actions, "读取项目关键文件", actionStatus(normalized, ["读取项目关键文件", "关键文件"], [], ["失败"]), "补充 README、依赖和入口信息。");
+  addStructuredAction(actions, "构建运行环境", actionStatus(normalized, ["环境构建", "依赖", "安装"], [], ["失败"]), "安装依赖并记录可复现环境。");
+  addStructuredAction(actions, "CUDA 编译", actionStatus(normalized, ["CUDA 编译", "编译"], [], ["失败"]), "编译或校验 GPU 运行入口。");
+  addStructuredAction(actions, "运行推理测试", actionStatus(normalized, ["推理测试", "运行推理", "推理"], [], ["失败"]), "执行样例推理并记录输出。");
+
+  return actions;
+}
+
+function addStructuredAction(
+  actions: StructuredProcessAction[],
+  title: string,
+  status: StructuredProcessActionStatus | null,
+  detail: string
+) {
+  if (!status) return;
+  if (actions.some((action) => action.title === title)) return;
+  actions.push({ title, status, detail });
+}
+
+function actionStatus(
+  text: string,
+  needles: string[],
+  doneMarkers: string[],
+  failedMarkers: string[]
+): StructuredProcessActionStatus | null {
+  if (!needles.some((needle) => text.includes(needle))) return null;
+  if (failedMarkers.some((marker) => text.includes(marker))) return "failed";
+  if (doneMarkers.some((marker) => text.includes(marker))) return "done";
+  if (text.includes("等待")) return "waiting";
+  if (text.includes("目录已存在") || text.includes("残留")) return "risk";
+  return "todo";
 }
 
 function WorkflowStepRow({
@@ -1590,23 +2715,59 @@ function WorkflowStepRow({
   const name = step.name || template?.name || step.id;
   const progressItems = (step.progress || []).slice(-3);
   const toolCalls = (step.tool_calls || []).slice(0, 4);
+  const checklistItems = step.instruction_plan?.items || [];
+  const checklistCompleted = checklistItems.filter((item) => item.status === "completed").length;
   const stepEvents = events || [];
   const thinkingEvents = stepEvents.filter((event) => event.kind === "thinking");
   const executionEvents = stepEvents.filter((event) => event.kind !== "thinking");
   const outcome = workflowStepOutcome(step);
+  const outcomePreview = compactWorkflowText(outcome, 180);
   const startLabel = workflowStepStartLabel(step);
   const skillSelectionLines = skillSelectionSummaryLines(skillSelection, workflowPath);
-  const hasThinking = skillSelectionLines.length > 0 || !!startLabel || thinkingEvents.length > 0;
+  const researchSummary = workflowStepResearchSummary(step);
+  const structuredThinkingRecords = thinkingEvents
+    .map((event) => structuredProcessRecordFromEvent(event))
+    .filter((record): record is StructuredProcessRecord => !!record);
+  const structuredThinkingEventIds = new Set(structuredThinkingRecords.map((record) => record.id));
+  const plainThinkingEvents = thinkingEvents.filter((event) => !structuredThinkingEventIds.has(event.id));
+  const progressRecords = progressItems.map((item, progressIndex) => ({
+    content: item,
+    record: structuredProcessRecordFromProgress(item, progressIndex),
+  }));
+  const structuredProgressRecords = progressRecords
+    .map((item) => item.record)
+    .filter((record): record is StructuredProcessRecord => !!record);
+  const plainProgressItems = progressRecords
+    .filter((item) => !item.record)
+    .map((item) => item.content);
+  const structuredExecutionRecords = executionEvents
+    .map((event) => structuredProcessRecordFromEvent(event))
+    .filter((record): record is StructuredProcessRecord => !!record);
+  const structuredExecutionEventIds = new Set(structuredExecutionRecords.map((record) => record.id));
+  const plainExecutionEvents = executionEvents.filter((event) => !structuredExecutionEventIds.has(event.id));
+  const hasObjective = skillSelectionLines.length > 0 || !!step.expected_output;
+  const hasThinking = !!startLabel || thinkingEvents.length > 0;
+  const hasProcessDetails = hasThinking || progressItems.length > 0 || executionEvents.length > 0;
   const hasExecution =
-    progressItems.length > 0 || toolCalls.length > 0 || executionEvents.length > 0 || !!pendingInput;
+    progressItems.length > 0 ||
+    toolCalls.length > 0 ||
+    checklistItems.length > 0 ||
+    executionEvents.length > 0 ||
+    !!pendingInput;
   const defaultOpen =
     !!pendingInput ||
     isCurrent ||
     !!skillSelection ||
-    ["running", "failed", "waiting_for_user"].includes(step.status);
+    ["running", "failed", "recovery", "waiting_for_user"].includes(step.status);
+  const detailSummary = workflowStepDetailSummary({
+    progressCount: progressItems.length,
+    thinkingCount: thinkingEvents.length,
+    executionCount: executionEvents.length,
+    hasPendingInput: !!pendingInput,
+  });
 
   return (
-    <details className="group" open={defaultOpen} data-testid={`workflow-step-${step.id}`}>
+    <details className="group bg-white" open={defaultOpen} data-testid={`workflow-step-${step.id}`}>
       <summary className="flex cursor-pointer list-none gap-3 px-4 py-3 hover:bg-slate-50">
         <span
           className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-ui-micro font-semibold ${workflowStepNumberClass(
@@ -1628,64 +2789,102 @@ function WorkflowStepRow({
             >
               {workflowStepStatusLabel(step.status)}
             </span>
+            {isCurrent && (
+              <span className="rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5 text-ui-micro font-medium text-blue-700">
+                当前
+              </span>
+            )}
           </div>
-          {outcome && <div className="break-words text-ui-small text-slate-600">{outcome}</div>}
+          {outcomePreview && (
+            <div className="break-words text-ui-small leading-relaxed text-slate-600" title={outcome}>
+              {outcomePreview}
+            </div>
+          )}
         </div>
         <ChevronIcon className="mt-1 h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
       </summary>
-      <div className="space-y-3 px-14 pb-4 text-ui-small">
-        {hasThinking && (
-          <WorkflowStepProcessSection title="思考过程">
+      <div className="space-y-4 px-14 pb-4 text-ui-small">
+        {hasObjective && (
+          <WorkflowStepProcessSection title="任务目标">
             {skillSelectionLines.map((line) => (
               <ProcessLine key={`${step.id}-selection-${line}`} content={line} tone="thinking" />
             ))}
             {skillSelection && (
               <SkillSelectionEvidenceDetails selection={skillSelection} workflowPath={workflowPath} />
             )}
+            {step.expected_output && (
+              <ProcessLine content={step.expected_output} tone="thinking" />
+            )}
+          </WorkflowStepProcessSection>
+        )}
+        <WorkflowStepResearchSummary summary={researchSummary} />
+        {toolCalls.length > 0 && (
+          <WorkflowStepProcessSection title="工具执行" summary={`${toolCalls.length} 项`}>
+            <div className="flex flex-wrap gap-1.5">
+              {toolCalls.map((call, toolIndex) => (
+                <span
+                  key={call.tool_call_id || `${step.id}-tool-${toolIndex}`}
+                  className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
+                    call
+                  )}`}
+                  title={call.error || undefined}
+                >
+                  <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
+                  <span>{toolCallStatusLabel(call)}</span>
+                </span>
+              ))}
+            </div>
+          </WorkflowStepProcessSection>
+        )}
+        {checklistItems.length > 0 && (
+          <WorkflowStepProcessSection title="验收项" summary={`${checklistCompleted}/${checklistItems.length}`}>
+            <InstructionChecklist items={checklistItems} />
+          </WorkflowStepProcessSection>
+        )}
+        {pendingInput && <HumanInputPanel input={pendingInput} onSubmit={onSubmit} stepId={step.id} />}
+        {hasProcessDetails && (
+          <WorkflowStepDetailsSection summary={detailSummary}>
             {startLabel && <ProcessLine content={startLabel} tone="thinking" />}
-            {thinkingEvents.map((event) => (
+            {structuredThinkingRecords.map((record) => (
+              <StructuredProcessRecordCard
+                key={`${step.id}-structured-${record.id}`}
+                record={record}
+              />
+            ))}
+            {plainThinkingEvents.map((event) => (
               <ProcessLine
                 key={`${step.id}-thinking-${event.id}`}
                 content={event.content ? `${event.title}: ${event.content}` : event.title}
                 tone="thinking"
               />
             ))}
-          </WorkflowStepProcessSection>
-        )}
-        {hasExecution && (
-          <WorkflowStepProcessSection title="执行过程">
-            {progressItems.map((item, progressIndex) => (
+            {structuredProgressRecords.map((record) => (
+              <StructuredProcessRecordCard
+                key={`${step.id}-progress-structured-${record.id}`}
+                record={record}
+              />
+            ))}
+            {structuredExecutionRecords.map((record) => (
+              <StructuredProcessRecordCard
+                key={`${step.id}-execution-structured-${record.id}`}
+                record={record}
+              />
+            ))}
+            {plainProgressItems.map((item, progressIndex) => (
               <ProcessLine
                 key={`${step.id}-progress-${progressIndex}`}
                 content={workflowProgressContent(item) || item}
                 tone="execution"
               />
             ))}
-            {executionEvents.map((event) => (
+            {plainExecutionEvents.map((event) => (
               <ProcessLine
                 key={`${step.id}-execution-${event.id}`}
                 content={event.content ? `${event.title}: ${event.content}` : event.title}
                 tone="execution"
               />
             ))}
-            {toolCalls.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {toolCalls.map((call, toolIndex) => (
-                  <span
-                    key={call.tool_call_id || `${step.id}-tool-${toolIndex}`}
-                    className={`inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-ui-micro ${toolCallStatusClass(
-                      call
-                    )}`}
-                    title={call.error || undefined}
-                  >
-                    <span className="truncate">{toolTitle(String(call.name || "tool"))}</span>
-                    <span>{toolCallStatusLabel(call)}</span>
-                  </span>
-                ))}
-              </div>
-            )}
-            {pendingInput && <HumanInputPanel input={pendingInput} onSubmit={onSubmit} />}
-          </WorkflowStepProcessSection>
+          </WorkflowStepDetailsSection>
         )}
         {!hasThinking && !hasExecution && !outcome && (
           <div className="text-slate-500">{workflowStepDetail(step)}</div>
@@ -1697,18 +2896,232 @@ function WorkflowStepRow({
 
 function WorkflowStepProcessSection({
   title,
+  summary,
   children,
 }: {
-  title: "思考过程" | "执行过程";
+  title: "任务目标" | "研究证据" | "工具执行" | "验收项";
+  summary?: string;
   children: ReactNode;
 }) {
   return (
     <section className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+          {title}
+        </div>
+        {summary && (
+          <span className="rounded-full border border-slate-100 bg-slate-50 px-2 py-0.5 text-ui-micro font-medium text-slate-500">
+            {summary}
+          </span>
+        )}
+      </div>
+      <div className="space-y-1.5">{children}</div>
+    </section>
+  );
+}
+
+function WorkflowStepDetailsSection({
+  summary,
+  children,
+}: {
+  summary?: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="rounded-lg border border-slate-100 bg-slate-50/60">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2 text-left text-ui-small font-medium text-slate-600"
+        aria-expanded={open}
+      >
+        <span>过程详情</span>
+        <span className="flex items-center gap-2">
+          {summary && (
+            <span className="rounded-full border border-slate-100 bg-white px-2 py-0.5 text-ui-micro font-medium text-slate-500">
+              {summary}
+            </span>
+          )}
+          <ChevronIcon className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      {open && <div className="space-y-2 border-t border-slate-100 px-3 py-3">{children}</div>}
+    </section>
+  );
+}
+
+function workflowStepDetailSummary({
+  progressCount,
+  thinkingCount,
+  executionCount,
+  hasPendingInput,
+}: {
+  progressCount: number;
+  thinkingCount: number;
+  executionCount: number;
+  hasPendingInput: boolean;
+}) {
+  const count = progressCount + thinkingCount + executionCount;
+  if (hasPendingInput && count > 0) return `${count} 条记录 / HITL`;
+  if (hasPendingInput) return "HITL";
+  return `${count} 条记录`;
+}
+
+function StructuredProcessRecordCard({ record }: { record: StructuredProcessRecord }) {
+  return (
+    <div className="space-y-3 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-3">
+      <div className="rounded-md border border-white bg-white px-3 py-2 text-slate-700 shadow-sm">
+        <div className="mb-1 text-ui-micro font-semibold uppercase tracking-wide text-slate-400">
+          {record.title}
+        </div>
+        <div className="break-words leading-relaxed">{record.judgement}</div>
+      </div>
+      {record.snapshot && (
+        <div className="grid gap-2 md:grid-cols-3">
+          <StructuredProcessMetric
+            label="流程快照"
+            value={`${record.snapshot.completed}/${record.snapshot.total} 完成`}
+          />
+          <StructuredProcessMetric label="当前节点" value={record.snapshot.current || "-"} />
+          <StructuredProcessMetric label="状态" value={record.snapshot.state || "-"} />
+        </div>
+      )}
+      {record.actions.length > 0 && (
+        <div className="rounded-md border border-white bg-white px-3 py-2 shadow-sm">
+          <div className="mb-2 text-ui-micro font-semibold uppercase tracking-wide text-slate-400">
+            执行队列
+          </div>
+          <div className="grid gap-1.5">
+            {record.actions.map((action) => (
+              <div
+                key={`${action.title}-${action.status}`}
+                className="flex min-w-0 items-start gap-2 text-slate-600"
+              >
+                <span
+                  className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${structuredActionStatusClass(
+                    action.status
+                  )}`}
+                />
+                <span className="min-w-0 break-words">
+                  <span className="font-medium text-slate-700">{action.title}</span>
+                  {action.detail && <span className="text-slate-500">：{action.detail}</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <details className="rounded-md border border-slate-100 bg-white px-3 py-2">
+        <summary className="cursor-pointer text-ui-micro font-semibold uppercase tracking-wide text-slate-400">
+          原始记录
+        </summary>
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950/95 p-3 text-ui-micro leading-relaxed text-slate-100">
+          {record.raw}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
+function StructuredProcessMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-white bg-white px-3 py-2 shadow-sm">
+      <div className="text-ui-micro font-semibold uppercase tracking-wide text-slate-400">
+        {label}
+      </div>
+      <div className="mt-1 break-words font-medium text-slate-700">{value}</div>
+    </div>
+  );
+}
+
+function structuredActionStatusClass(status: StructuredProcessActionStatus) {
+  if (status === "done") return "bg-emerald-500";
+  if (status === "failed") return "bg-red-500";
+  if (status === "risk") return "bg-amber-500";
+  if (status === "waiting") return "bg-orange-400";
+  return "bg-blue-400";
+}
+
+interface WorkflowStepResearchSummaryData {
+  evidence: Array<[string, string]>;
+  artifacts: string[];
+  risks: string[];
+}
+
+function WorkflowStepResearchSummary({ summary }: { summary: WorkflowStepResearchSummaryData }) {
+  const hasEvidence = summary.evidence.length > 0;
+  const hasArtifacts = summary.artifacts.length > 0;
+  const hasRisks = summary.risks.length > 0;
+  if (!hasEvidence && !hasArtifacts && !hasRisks) {
+    return (
+      <WorkflowStepProcessSection title="研究证据" summary="待采集">
+        <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-slate-500">
+          等待工具结果或验收项写入 evidence。
+        </div>
+      </WorkflowStepProcessSection>
+    );
+  }
+
+  return (
+    <WorkflowStepProcessSection
+      title="研究证据"
+      summary={`${summary.evidence.length} 证据 / ${summary.artifacts.length} 产物 / ${summary.risks.length} 风险`}
+    >
+      <div className="grid gap-2 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-3 md:grid-cols-3">
+        <WorkflowEvidenceColumn title="证据链">
+          {hasEvidence ? (
+            summary.evidence.map(([key, value]) => (
+              <div key={`${key}-${value}`} className="min-w-0">
+                <div className="truncate font-mono text-ui-micro text-slate-500">{key}</div>
+                <div className="break-words text-slate-700">{compactWorkflowText(value, 120)}</div>
+              </div>
+            ))
+          ) : (
+            <div className="text-slate-400">待写入</div>
+          )}
+        </WorkflowEvidenceColumn>
+        <WorkflowEvidenceColumn title="产物">
+          {hasArtifacts ? (
+            summary.artifacts.map((artifact) => (
+              <div key={artifact} className="break-words font-mono text-ui-micro text-slate-700">
+                {artifact}
+              </div>
+            ))
+          ) : (
+            <div className="text-slate-400">暂无 artifact</div>
+          )}
+        </WorkflowEvidenceColumn>
+        <WorkflowEvidenceColumn title="风险/缺口">
+          {hasRisks ? (
+            summary.risks.map((risk) => (
+              <div key={risk} className="break-words text-red-700">
+                {compactWorkflowText(risk, 140)}
+              </div>
+            ))
+          ) : (
+            <div className="text-emerald-700">无阻塞记录</div>
+          )}
+        </WorkflowEvidenceColumn>
+      </div>
+    </WorkflowStepProcessSection>
+  );
+}
+
+function WorkflowEvidenceColumn({
+  title,
+  children,
+}: {
+  title: "证据链" | "产物" | "风险/缺口";
+  children: ReactNode;
+}) {
+  return (
+    <div className="min-w-0 space-y-1.5">
       <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
         {title}
       </div>
       <div className="space-y-1.5">{children}</div>
-    </section>
+    </div>
   );
 }
 
@@ -1728,32 +3141,69 @@ function ProcessLine({
   );
 }
 
+function InstructionChecklist({ items }: { items: RuntimeInstructionItem[] }) {
+  return (
+    <div className="grid gap-1 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+      {items.map((item, index) => (
+        <div
+          key={item.id || `instruction-${index}`}
+          className="flex min-w-0 items-start gap-2 text-ui-small text-slate-600"
+        >
+          <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${instructionStatusClass(item.status)}`} />
+          <span className="min-w-0 break-words">
+            <span className="font-mono text-slate-500">{item.id || "instruction"}</span>
+            {": "}
+            {item.text || item.missing_reason || item.status || "-"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function instructionStatusClass(status?: string) {
+  if (status === "completed") return "bg-emerald-500";
+  if (status === "failed" || status === "blocked") return "bg-red-500";
+  return "bg-amber-400";
+}
+
 function HumanInputPanel({
   input,
   onSubmit,
+  stepId,
 }: {
   input: PendingUserInput;
   onSubmit: (content: string) => Promise<void>;
+  stepId?: string;
 }) {
   if (input.intervention?.type === "lab4ai_credentials_required") {
     return <Lab4AICredentialPanel input={input} onSubmit={onSubmit} />;
   }
+  const visibleOptions = humanInputVisibleOptions(input.options);
 
   return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3" data-testid="step-human-input">
-      <div className="text-ui-meta font-bold uppercase text-amber-700">等待你确认</div>
-      <div className="mt-1 text-ui-small font-semibold text-amber-800">需要你的输入</div>
-      {input.tool_name && (
-        <div className="mt-1 text-ui-micro text-amber-700">
-          操作：{toolTitle(input.tool_name)}
+    <div className="rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-3" data-testid="step-human-input">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-ui-meta font-bold uppercase text-amber-700">实验确认点</div>
+          <div className="mt-1 text-ui-small font-semibold text-amber-900">
+            需要你确认后继续执行受控动作
+          </div>
         </div>
-      )}
+        <span className="rounded-full border border-amber-200 bg-white px-2 py-0.5 text-ui-micro font-medium text-amber-700">
+          HITL
+        </span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-ui-micro text-amber-700">
+        {stepId && <span>步骤：{stepId}</span>}
+        {input.tool_name && <span>操作：{toolTitle(input.tool_name)}</span>}
+      </div>
       <div className="mt-2 whitespace-pre-wrap text-chat-body leading-relaxed text-slate-700">
         {input.question}
       </div>
-      {input.options && input.options.length > 0 && (
+      {visibleOptions.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
-          {input.options.map((option) => (
+          {visibleOptions.map((option) => (
             <button
               key={option}
               type="button"
@@ -1769,6 +3219,10 @@ function HumanInputPanel({
   );
 }
 
+function humanInputVisibleOptions(options?: string[]) {
+  return (options || []).filter((option) => option.trim() !== "修改方案");
+}
+
 function Lab4AICredentialPanel({
   input,
   onSubmit,
@@ -1780,6 +3234,7 @@ function Lab4AICredentialPanel({
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [savedCredential, setSavedCredential] = useState<Lab4AICredentialsSaveResponse | null>(null);
   const endpoint = String(input.intervention?.admin_endpoint || "/api/admin/settings/lab4ai");
 
   async function handleSave(e: FormEvent) {
@@ -1791,18 +3246,47 @@ function Lab4AICredentialPanel({
     setSaving(true);
     setError("");
     try {
-      await apiFetch(endpoint, {
+      const result = await apiFetch<Lab4AICredentialsSaveResponse>(endpoint, {
         method: "PUT",
         body: JSON.stringify({ phone: phone.trim(), password }),
       });
       setPhone("");
       setPassword("");
+      setSavedCredential(result || { configured: true });
       await onSubmit("已完成配置，继续执行");
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败，请检查账号权限后重试。");
     } finally {
       setSaving(false);
     }
+  }
+
+  if (savedCredential) {
+    return (
+      <div
+        className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-3"
+        data-testid="lab4ai-credential-panel"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-ui-meta font-bold uppercase text-emerald-700">
+              Lab4AI 凭证已安全配置
+            </div>
+            <div className="mt-1 text-ui-small leading-relaxed text-emerald-800">
+              已提交到后端配置接口，聊天正文只发送继续执行指令。
+            </div>
+            {savedCredential.phone_masked && (
+              <div className="mt-2 inline-flex rounded-full border border-emerald-100 bg-white px-2 py-0.5 font-mono text-ui-micro text-emerald-700">
+                {savedCredential.phone_masked}
+              </div>
+            )}
+          </div>
+          <span className="rounded-full border border-emerald-100 bg-white px-2 py-0.5 text-ui-micro font-medium text-emerald-700">
+            已保存
+          </span>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -1879,6 +3363,9 @@ function workflowStepOutcome(step: WorkflowStepState) {
   if (step.status === "failed") {
     return step.error || workflowValidationFailureText(step) || workflowStepDetail(step) || "执行失败，等待检查原因。";
   }
+  if (step.status === "recovery") {
+    return step.error || workflowValidationFailureText(step) || workflowStepDetail(step) || "正在根据工具结果恢复。";
+  }
   if (step.status === "waiting_for_user") {
     return step.error || step.output || workflowValidationFailureText(step) || "需要用户确认或补充信息后继续。";
   }
@@ -1887,17 +3374,63 @@ function workflowStepOutcome(step: WorkflowStepState) {
   return "";
 }
 
-function workflowValidationFailureText(step: WorkflowStepState) {
-  const failure = step.validation_failures?.[step.validation_failures.length - 1];
+function workflowStepResearchSummary(step: WorkflowStepState): WorkflowStepResearchSummaryData {
+  return {
+    evidence: workflowEvidenceEntries(step).slice(0, 6),
+    artifacts: (step.artifacts || []).slice(0, 4),
+    risks: workflowRiskEntries(step).slice(0, 4),
+  };
+}
+
+function workflowEvidenceEntries(step: WorkflowStepState): Array<[string, string]> {
+  return Object.entries(step.evidence || {})
+    .map(([key, value]) => [key, readableWorkflowValue(value)] as [string, string])
+    .filter(([, value]) => !!value.trim());
+}
+
+function workflowRiskEntries(step: WorkflowStepState): string[] {
+  const failures = step.validation_failures || [];
+  const failureText = failures.map((failure) => workflowFailureToText(failure)).filter(Boolean);
+  return [
+    ...failureText,
+    ...(step.status === "failed" && step.error ? [step.error] : []),
+    ...(step.status === "recovery" && step.error ? [step.error] : []),
+  ];
+}
+
+function workflowFailureToText(failure: unknown) {
   if (!failure) return "";
   if (typeof failure === "string") return failure;
   if (typeof failure !== "object") return String(failure);
-
   const record = failure as Record<string, unknown>;
   const reason = record.reason || record.message || record.error || record.postcondition;
   if (typeof reason === "string") return reason;
   if (reason !== undefined) return String(reason);
-  return "";
+  return JSON.stringify(record);
+}
+
+function readableWorkflowValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(readableWorkflowValue).filter(Boolean).join(", ");
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function compactWorkflowText(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function workflowValidationFailureText(step: WorkflowStepState) {
+  const failure = step.validation_failures?.[step.validation_failures.length - 1];
+  if (!failure) return "";
+  return workflowFailureToText(failure);
 }
 
 function toolCallStatusLabel(call: WorkflowToolCall) {

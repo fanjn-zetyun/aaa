@@ -87,6 +87,13 @@ class WorkspaceFileListResponse(BaseModel):
     files: list[WorkspaceFileResponse] = Field(default_factory=list)
 
 
+class WorkspaceFileContentResponse(BaseModel):
+    path: str
+    name: str
+    kind: Literal["markdown"]
+    content: str
+
+
 class RuntimeCredentialInstanceResponse(BaseModel):
     id: int
     server_id: str
@@ -102,5 +109,13 @@ class RuntimeCredentialInstanceResponse(BaseModel):
     stopped_at: datetime | None = None
 
 
+class RuntimeLab4AICredentialsResponse(BaseModel):
+    configured: bool
+    phone_masked: str = ""
+
+
 class RuntimeCredentialsResponse(BaseModel):
+    lab4ai_credentials: RuntimeLab4AICredentialsResponse = Field(
+        default_factory=lambda: RuntimeLab4AICredentialsResponse(configured=False)
+    )
     instances: list[RuntimeCredentialInstanceResponse] = Field(default_factory=list)

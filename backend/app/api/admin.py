@@ -9,7 +9,11 @@ from sqlalchemy import select
 from app.api.deps import AdminUser, DbSession
 from app.models import CloudInstance, User
 from app.schemas.auth import UserResponse
-from app.services.lab4ai.credentials import load_lab4ai_credentials, save_lab4ai_credentials
+from app.services.lab4ai.credentials import (
+    load_lab4ai_credentials,
+    mask_lab4ai_phone,
+    save_lab4ai_credentials,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -62,8 +66,7 @@ async def get_lab4ai_settings(_admin: AdminUser, session: DbSession) -> dict:
     creds = await load_lab4ai_credentials(session)
     if creds is None:
         return {"phone_masked": "", "configured": False}
-    masked = creds.phone[:3] + "****" + creds.phone[-4:] if len(creds.phone) >= 7 else "***"
-    return {"phone_masked": masked, "configured": True}
+    return {"phone_masked": mask_lab4ai_phone(creds.phone), "configured": True}
 
 
 @router.put("/settings/lab4ai", response_model=Lab4AICredentialResponse)
@@ -71,8 +74,7 @@ async def set_lab4ai_settings(
     payload: Lab4AICredentialRequest, _admin: AdminUser, session: DbSession
 ) -> dict:
     creds = await save_lab4ai_credentials(session, payload.phone, payload.password)
-    masked = creds.phone[:3] + "****" + creds.phone[-4:] if len(creds.phone) >= 7 else "***"
-    return {"phone_masked": masked, "configured": True}
+    return {"phone_masked": mask_lab4ai_phone(creds.phone), "configured": True}
 
 
 # --- 全局实例查看 ---

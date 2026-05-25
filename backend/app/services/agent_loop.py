@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import math
+from pathlib import Path
 import re
 from uuid import uuid4
 
@@ -488,26 +489,32 @@ class AgentLoopManager:
 
             metadata = _refresh_summary(metadata, latest_user, tool_outputs)
             await self._set_metadata(conversation_id, metadata)
-            await self._stream_model_or_fallback(
-                conversation_id,
-                llm_config,
-                system=system_prompt,
-                messages=[
-                    *initial_messages,
-                    {"role": "assistant", "content": plan},
-                    {
-                        "role": "user",
-                        "content": (
-                            "工具执行结果如下，请给用户一个真实场景运行总结，"
-                            "明确哪些步骤已经完成、哪些步骤还需要真实 Lab4AI/SSH 接入。\n"
-                            + "\n".join(tool_outputs)
-                            + f"\n用户最新需求：{latest_user}"
-                        ),
-                    },
-                ],
-                max_tokens=AGENT_REPLY_MAX_TOKENS,
-                fallback=self._build_reply(metadata, latest_user),
-            )
+            if _should_use_static_workflow_completion_reply(metadata):
+                await self._stream_static_assistant(
+                    conversation_id,
+                    self._build_reply(metadata, latest_user),
+                )
+            else:
+                await self._stream_model_or_fallback(
+                    conversation_id,
+                    llm_config,
+                    system=system_prompt,
+                    messages=[
+                        *initial_messages,
+                        {"role": "assistant", "content": plan},
+                        {
+                            "role": "user",
+                            "content": (
+                                "工具执行结果如下，请给用户一个真实场景运行总结，"
+                                "明确哪些步骤已经完成、哪些步骤还需要真实 Lab4AI/SSH 接入。\n"
+                                + "\n".join(tool_outputs)
+                                + f"\n用户最新需求：{latest_user}"
+                            ),
+                        },
+                    ],
+                    max_tokens=AGENT_REPLY_MAX_TOKENS,
+                    fallback=self._build_reply(metadata, latest_user),
+                )
             metadata = mark_completed(metadata)
             await self._set_status_and_metadata(
                 conversation_id, ConversationStatus.COMPLETED, metadata
@@ -747,11 +754,10 @@ class AgentLoopManager:
                 failed=True,
             )
         if not used_model_tools:
-            message = "模型未调用当前 step 允许的任何 Tool，已停止该 workflow step，避免回退到固定执行链路。"
+            message = "模型未调用当前 step 允许的任何 Tool，将由 workflow contract executor 继续执行。"
             return ModelToolRunResult(
                 metadata=metadata,
                 tool_outputs=[message],
-                failed=True,
             )
         return ModelToolRunResult(
             metadata=metadata,
@@ -824,7 +830,8 @@ class AgentLoopManager:
                 [f"{result.name}: {result.content}"],
                 False,
                 True,
-                result.ok is False,
+                result.ok is False
+                and not _can_contract_executor_recover_tool_failure(step.id, tool_name),
             )
 
         result = await self._run_model_tool_use_or_fallback(
@@ -1346,6 +1353,15 @@ def _requires_workflow_task(metadata: dict) -> bool:
     return metadata.get("task_type") == "reproduce" or bool(metadata.get("github_url"))
 
 
+def _should_use_static_workflow_completion_reply(metadata: dict) -> bool:
+    steps = [step for step in metadata.get("workflow_steps") or [] if isinstance(step, dict)]
+    if not steps:
+        return False
+    if metadata.get("workflow_state") == "completed":
+        return True
+    return all(step.get("status") == "completed" for step in steps)
+
+
 def _workflow_display_path_for_skill(skill: SkillDefinition | None) -> str | None:
     if not skill or not skill.workflow_context:
         return None
@@ -1674,21 +1690,42 @@ def _apply_model_tool_result_to_workflow(
         )
 
     if tool_name == "repro_report":
-        report_path = str(result_metadata.get("report_path") or "")
+        local_report_path = str(result_metadata.get("local_report_path") or "").strip()
+        markdown_report_path = str(result_metadata.get("markdown_report_path") or "").strip()
+        remote_report_path = str(result_metadata.get("remote_report_path") or "").strip()
+        report_path = local_report_path or str(result_metadata.get("report_path") or "").strip()
         metadata = ensure_memory(metadata)
         workflow_results = dict(metadata.get("workflow_results") or {})
         workflow_results["word_report_path"] = report_path
+        if local_report_path:
+            workflow_results["local_report_path"] = local_report_path
+        if markdown_report_path:
+            workflow_results["markdown_report_path"] = markdown_report_path
+        if remote_report_path:
+            workflow_results["remote_report_path"] = remote_report_path
         metadata["workflow_results"] = workflow_results
+        evidence = {
+            "report_generated": bool(report_path or remote_report_path),
+            "report_path": report_path or remote_report_path,
+            "completion_source": "model_tool_use",
+        }
+        if local_report_path:
+            evidence["local_report_path"] = local_report_path
+        if markdown_report_path:
+            evidence["markdown_report_path"] = markdown_report_path
+        if remote_report_path:
+            evidence["remote_report_path"] = remote_report_path
         metadata = set_workflow_step_evidence(
             metadata,
             step,
-            report_generated=bool(report_path),
-            report_path=report_path,
-            completion_source="model_tool_use",
+            **evidence,
         )
-        if report_path:
-            metadata = add_workflow_step_artifact(metadata, step, report_path)
-            metadata = remember_artifact(metadata, f"复现报告：{report_path}")
+        artifact_paths = _tool_artifact_paths(result_metadata, fallback=report_path)
+        if remote_report_path and remote_report_path not in artifact_paths:
+            artifact_paths.append(remote_report_path)
+        for artifact in artifact_paths:
+            metadata = add_workflow_step_artifact(metadata, step, artifact)
+            metadata = remember_artifact(metadata, f"复现报告：{artifact}")
 
     return metadata
 
@@ -1702,6 +1739,25 @@ def _workflow_step_ref(metadata: dict, workflow_step_id: str) -> WorkflowStep:
         depends_on=[str(item) for item in depends_on],
         expected_output=str(state.get("expected_output") or ""),
     )
+
+
+def _can_contract_executor_recover_tool_failure(workflow_step_id: str, tool_name: str) -> bool:
+    canonical_tool_name = _canonical_tool_name(tool_name)
+    return (
+        workflow_step_id in {"step_4_cpu_env_setup", "step_7_gpu_execution"}
+        and canonical_tool_name == "ssh_execute"
+    )
+
+
+def _tool_artifact_paths(metadata: dict[str, object], *, fallback: str = "") -> list[str]:
+    raw_paths = metadata.get("artifact_paths")
+    if isinstance(raw_paths, list):
+        paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+    else:
+        paths = []
+    if fallback and fallback not in paths:
+        paths.append(fallback)
+    return paths
 
 
 def _resource_kind_for_tool(workflow_step_id: str, tool_input: dict[str, object]) -> str | None:
@@ -1725,10 +1781,21 @@ def _prepare_model_tool_input(
     payload = dict(tool_input)
     if tool_name in {"ssh_execute", "remote_project_prep"}:
         payload = _strip_sensitive_skill_connection_fields(payload)
+    if tool_name in {"analyze_repo", "analyze_paper"}:
+        payload = _strip_remote_output_dir_for_local_analysis(payload)
     if not workflow_step_id:
         return _render_templates(payload, metadata)
 
     _set_if_missing_or_template(payload, "workflow_step_id", workflow_step_id)
+    if tool_name == "lab4ai_create_instance":
+        if workflow_step_id == "step_3_deploy_cpu":
+            _set_if_missing_or_template(payload, "resource_kind", "CPU")
+            _set_if_missing_or_template(payload, "cpu_cores", 2)
+        elif workflow_step_id == "step_6_deploy_gpu":
+            _set_if_missing_or_template(payload, "resource_kind", "GPU")
+            _set_if_missing_or_template(payload, "gpu_count", 1)
+        return _render_templates(payload, metadata)
+
     if tool_name not in {
         "ssh_execute",
         "remote_project_prep",
@@ -1753,6 +1820,43 @@ def _prepare_model_tool_input(
         if tool_name == "ssh_execute":
             payload = _compile_skill_ssh_payload(payload)
     return _render_templates(payload, metadata)
+
+
+def _strip_remote_output_dir_for_local_analysis(payload: dict[str, object]) -> dict[str, object]:
+    output_dir = payload.get("output_dir")
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        return payload
+    path_text = output_dir.strip()
+    if not _looks_like_absolute_path(path_text):
+        return payload
+
+    root = get_settings().workspace_root_path.resolve()
+    try:
+        resolved = Path(path_text).resolve()
+    except (OSError, RuntimeError):
+        resolved = Path(path_text).absolute()
+    if _path_is_relative_to(resolved, root):
+        return payload
+
+    sanitized = dict(payload)
+    sanitized.pop("output_dir", None)
+    return sanitized
+
+
+def _looks_like_absolute_path(path_text: str) -> bool:
+    return (
+        Path(path_text).is_absolute()
+        or path_text.startswith(("/", "\\"))
+        or bool(re.match(r"^[A-Za-z]:[\\/]", path_text))
+    )
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _strip_sensitive_skill_connection_fields(payload: dict[str, object]) -> dict[str, object]:

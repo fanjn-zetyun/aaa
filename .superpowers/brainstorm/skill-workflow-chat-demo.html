@@ -1,0 +1,801 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AutoResearch24 Workflow Chat Demo</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --line: #dbe3ef;
+      --soft-line: #edf2f7;
+      --text: #172033;
+      --muted: #66758d;
+      --faint: #94a3b8;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      --green: #059669;
+      --green-soft: #ecfdf5;
+      --amber: #d97706;
+      --amber-soft: #fffbeb;
+      --red: #dc2626;
+      --red-soft: #fef2f2;
+      --slate-soft: #f8fafc;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 272px minmax(720px, 1fr) 320px;
+      min-height: 100vh;
+    }
+
+    .sidebar,
+    .right {
+      background: var(--panel);
+      border-color: var(--soft-line);
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--soft-line);
+      padding: 28px 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      letter-spacing: .02em;
+      margin-bottom: 44px;
+    }
+
+    .brand-dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #f97316;
+      display: grid;
+      place-items: center;
+      color: white;
+      font-size: 12px;
+    }
+
+    .nav-item {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 14px;
+      border-radius: 8px;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+
+    .nav-item.active {
+      background: #eef4fb;
+      color: #12213a;
+      font-weight: 700;
+    }
+
+    .center {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    .chat {
+      flex: 1;
+      overflow: auto;
+      padding: 32px 48px 22px;
+    }
+
+    .stream {
+      max-width: 980px;
+      margin: 0 auto;
+      display: grid;
+      gap: 22px;
+    }
+
+    .user-row {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .user-bubble {
+      max-width: 72%;
+      border-radius: 18px 18px 4px 18px;
+      background: #edf2f7;
+      padding: 14px 18px;
+      line-height: 1.65;
+      font-size: 16px;
+    }
+
+    .agent-row {
+      display: grid;
+      grid-template-columns: 36px minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #172033;
+      color: #fff;
+      display: grid;
+      place-items: center;
+      margin-top: 3px;
+      font-weight: 800;
+    }
+
+    .agent-label {
+      font-size: 13px;
+      color: #334155;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .workbench {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 18px 45px rgba(15, 23, 42, .06);
+    }
+
+    .wb-head {
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--soft-line);
+      background: linear-gradient(180deg, #fff, #fbfdff);
+    }
+
+    .wb-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 20px;
+      margin-bottom: 16px;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #8ba0bd;
+      font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 5px;
+    }
+
+    .title {
+      font-size: 21px;
+      font-weight: 800;
+      margin: 0 0 6px;
+    }
+
+    .sub {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .status-pill {
+      border: 1px solid #f7d992;
+      background: var(--amber-soft);
+      color: #a15c00;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid var(--soft-line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .summary-cell {
+      padding: 12px 14px;
+      background: #fff;
+      border-right: 1px solid var(--soft-line);
+    }
+    .summary-cell:last-child { border-right: 0; }
+    .summary-label {
+      font-size: 12px;
+      color: #8ba0bd;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+    .summary-value {
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .progress-strip {
+      display: grid;
+      grid-template-columns: repeat(9, 1fr);
+      gap: 7px;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--soft-line);
+      background: #fbfdff;
+    }
+
+    .bar {
+      height: 9px;
+      border-radius: 999px;
+      background: #dbe3ef;
+    }
+    .bar.done { background: #10b981; }
+    .bar.active { background: #f59e0b; }
+
+    .steps {
+      display: grid;
+    }
+
+    .step {
+      border-bottom: 1px solid var(--soft-line);
+      background: #fff;
+    }
+    .step:last-child { border-bottom: 0; }
+
+    .step-summary {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: start;
+      padding: 15px 22px;
+    }
+
+    .num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      font-size: 13px;
+      border: 1px solid var(--line);
+      color: #64748b;
+      background: #fff;
+    }
+    .num.done { background: #10b981; color: white; border-color: #10b981; }
+    .num.active { background: #f59e0b; color: white; border-color: #f59e0b; }
+
+    .step-title {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 5px;
+    }
+    .step-name { font-weight: 800; }
+    code {
+      background: #eef2f7;
+      border-radius: 5px;
+      padding: 2px 6px;
+      color: #475569;
+      font-size: 12px;
+    }
+
+    .mini-pill {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 800;
+      border: 1px solid var(--line);
+    }
+    .mini-pill.done { background: var(--green-soft); color: var(--green); border-color: #bbf7d0; }
+    .mini-pill.active { background: var(--amber-soft); color: var(--amber); border-color: #fde68a; }
+    .mini-pill.pending { background: var(--slate-soft); color: #64748b; }
+
+    .step-outcome {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .step-body {
+      padding: 0 22px 18px 70px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .compact-section {
+      border: 1px solid var(--soft-line);
+      border-radius: 10px;
+      background: #fbfdff;
+      padding: 12px;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      color: #8ba0bd;
+      font-size: 12px;
+      text-transform: uppercase;
+      font-weight: 900;
+      letter-spacing: .06em;
+    }
+
+    .evidence-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .evidence-card {
+      background: #fff;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      padding: 10px;
+      min-height: 74px;
+    }
+    .evidence-label {
+      font-size: 12px;
+      color: #8ba0bd;
+      font-weight: 800;
+      margin-bottom: 5px;
+    }
+    .evidence-value {
+      font-size: 14px;
+      line-height: 1.45;
+      color: #26354e;
+    }
+
+    .hitl {
+      border: 1px solid #f5c96b;
+      background: #fff8e6;
+      border-radius: 12px;
+      padding: 15px;
+      display: grid;
+      gap: 13px;
+    }
+
+    .hitl-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: start;
+    }
+    .hitl h4 {
+      margin: 0 0 5px;
+      font-size: 16px;
+    }
+    .hitl p {
+      margin: 0;
+      color: #6b5a30;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .credential-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+      color: #8a6b19;
+      font-weight: 800;
+    }
+    input {
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid #f1c969;
+      padding: 0 10px;
+      background: #fff;
+      font: inherit;
+    }
+    button {
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      padding: 0 14px;
+      font-weight: 800;
+      cursor: pointer;
+      background: #172033;
+      color: #fff;
+    }
+    .ghost {
+      background: #fff;
+      border-color: #f1c969;
+      color: #8a6b19;
+    }
+
+    .saved {
+      display: none;
+      border-radius: 9px;
+      border: 1px solid #a7f3d0;
+      background: #ecfdf5;
+      color: #047857;
+      padding: 10px 12px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .hitl.saved-state .credential-form,
+    .hitl.saved-state .hitl-actions { display: none; }
+    .hitl.saved-state .saved { display: block; }
+
+    .detail-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+    }
+
+    details.raw {
+      border: 1px solid var(--soft-line);
+      border-radius: 9px;
+      background: #fff;
+      padding: 10px 12px;
+    }
+    details.raw summary {
+      cursor: pointer;
+      color: #64748b;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    pre {
+      margin: 10px 0 0;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 180px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .input-bar {
+      border-top: 1px solid var(--soft-line);
+      background: #fff;
+      padding: 14px 48px;
+    }
+    .input-inner {
+      max-width: 980px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 38px;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      border-radius: 12px;
+      padding: 10px;
+    }
+    .input-inner span {
+      color: #9aa8bb;
+      padding-left: 8px;
+    }
+    .send {
+      width: 38px;
+      padding: 0;
+      border-radius: 50%;
+      background: #cbd5e1;
+    }
+
+    .right {
+      border-left: 1px solid var(--soft-line);
+      display: flex;
+      flex-direction: column;
+    }
+    .right-section {
+      padding: 20px;
+      border-bottom: 1px solid var(--soft-line);
+    }
+    .right h3 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+    .secret-card {
+      border: 1px solid var(--soft-line);
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+    }
+    .secret-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) auto;
+      gap: 8px;
+      font-size: 13px;
+      padding: 7px 0;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .secret-row:last-child { border-bottom: 0; }
+    .secret-row b {
+      color: #94a3b8;
+      font-weight: 700;
+    }
+    .copy {
+      color: var(--blue);
+      font-weight: 800;
+      font-size: 12px;
+    }
+    .file-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 0;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 14px;
+      color: #475569;
+    }
+
+    @media (max-width: 1180px) {
+      .shell { grid-template-columns: 220px minmax(0, 1fr); }
+      .right { display: none; }
+      .chat { padding: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-dot">A</span>AutoResearch24</div>
+      <div class="nav-item">⌕ 智能论文检索</div>
+      <div class="nav-item active">⌘ 代码与论文复现</div>
+      <div class="nav-item">□ 纯论文复现</div>
+      <div class="nav-item">⚗ 自动化实验矩阵</div>
+      <div class="nav-item">✎ 智能论文润色</div>
+      <div class="nav-item">⚙ 模型设置</div>
+    </aside>
+
+    <main class="center">
+      <div class="chat">
+        <div class="stream">
+          <div class="user-row">
+            <div class="user-bubble">
+              帮我复现这个项目：https://github.com/showlab/PhotoDoodle。论文链接：https://arxiv.org/pdf/2502.14397。
+            </div>
+          </div>
+
+          <div class="agent-row">
+            <div class="avatar">⚡</div>
+            <div>
+              <div class="agent-label">AutoResearch24 Agent</div>
+              <section class="workbench">
+                <div class="wb-head">
+                  <div class="wb-meta">
+                    <div>
+                      <div class="eyebrow">Project Reproduction Workflow</div>
+                      <h1 class="title">PhotoDoodle 复现实验台</h1>
+                      <div class="sub">
+                        按 <b>lab4ai-auto-reproduct / project_reproduce.yaml</b> 执行 9 步流水线。当前暂停在 CPU 实例创建前，需要补充 Lab4AI 平台凭证。
+                      </div>
+                    </div>
+                    <div class="status-pill">等待人工介入</div>
+                  </div>
+
+                  <div class="summary-grid">
+                    <div class="summary-cell">
+                      <div class="summary-label">当前步骤</div>
+                      <div class="summary-value">创建 CPU 实例</div>
+                    </div>
+                    <div class="summary-cell">
+                      <div class="summary-label">流程进度</div>
+                      <div class="summary-value">2/9 完成</div>
+                    </div>
+                    <div class="summary-cell">
+                      <div class="summary-label">验收证据</div>
+                      <div class="summary-value">3 项</div>
+                    </div>
+                    <div class="summary-cell">
+                      <div class="summary-label">待处理</div>
+                      <div class="summary-value">Lab4AI 凭证</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="progress-strip">
+                  <div class="bar done"></div>
+                  <div class="bar done"></div>
+                  <div class="bar active"></div>
+                  <div class="bar"></div>
+                  <div class="bar"></div>
+                  <div class="bar"></div>
+                  <div class="bar"></div>
+                  <div class="bar"></div>
+                  <div class="bar"></div>
+                </div>
+
+                <div class="steps">
+                  <div class="step">
+                    <div class="step-summary">
+                      <div class="num done">1</div>
+                      <div>
+                        <div class="step-title">
+                          <span class="step-name">项目与论文双重审计</span>
+                          <code>step_1_audit</code>
+                          <span class="mini-pill done">完成</span>
+                        </div>
+                        <div class="step-outcome">仓库结构、依赖风险、论文目标与 H100 适配性已记录；复现评分 80/100。</div>
+                      </div>
+                      <span class="mini-pill done">证据 4</span>
+                    </div>
+                  </div>
+
+                  <div class="step">
+                    <div class="step-summary">
+                      <div class="num done">2</div>
+                      <div>
+                        <div class="step-title">
+                          <span class="step-name">复现可行性熔断判断</span>
+                          <code>step_2_condition_check</code>
+                          <span class="mini-pill done">通过</span>
+                        </div>
+                        <div class="step-outcome">score=80，满足继续执行阈值；进入 CPU 低成本准备阶段。</div>
+                      </div>
+                      <span class="mini-pill done">通过</span>
+                    </div>
+                  </div>
+
+                  <div class="step">
+                    <div class="step-summary">
+                      <div class="num active">3</div>
+                      <div>
+                        <div class="step-title">
+                          <span class="step-name">创建 CPU 实例</span>
+                          <code>step_3_deploy_cpu</code>
+                          <span class="mini-pill active">等待确认</span>
+                        </div>
+                        <div class="step-outcome">需要配置 Lab4AI 平台凭证后，才能通过 ToolRegistry 创建计费 CPU 实例。</div>
+                      </div>
+                      <span class="mini-pill active">HITL</span>
+                    </div>
+
+                    <div class="step-body">
+                      <div class="compact-section">
+                        <div class="section-head">
+                          <span>验收证据</span>
+                          <span>来自 YAML postconditions</span>
+                        </div>
+                        <div class="evidence-grid">
+                          <div class="evidence-card">
+                            <div class="evidence-label">目标资源</div>
+                            <div class="evidence-value">廉价 CPU 实例，用于 SSH 探活、clone、依赖预检。</div>
+                          </div>
+                          <div class="evidence-card">
+                            <div class="evidence-label">必需工具</div>
+                            <div class="evidence-value">lab4ai_create_instance</div>
+                          </div>
+                          <div class="evidence-card">
+                            <div class="evidence-label">完成条件</div>
+                            <div class="evidence-value">server_id、ssh_host、ssh_port 已落库并归属当前任务。</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="hitl" id="hitl">
+                        <div class="hitl-top">
+                          <div>
+                            <h4>需要配置 Lab4AI 平台凭证</h4>
+                            <p>这是一次会产生远程资源和潜在费用的受控 Tool 调用。凭证只保存到后端配置，不会作为聊天消息发送给模型。</p>
+                          </div>
+                          <span class="mini-pill active">人工介入</span>
+                        </div>
+
+                        <div class="credential-form">
+                          <label>
+                            Lab4AI 手机号
+                            <input value="13800138000" aria-label="Lab4AI 手机号" />
+                          </label>
+                          <label>
+                            Lab4AI 密码
+                            <input value="••••••••••" aria-label="Lab4AI 密码" />
+                          </label>
+                          <button onclick="document.getElementById('hitl').classList.add('saved-state')">保存并继续</button>
+                        </div>
+
+                        <div class="hitl-actions">
+                          <button class="ghost">我已在后台配置，继续执行</button>
+                          <button class="ghost">停止任务</button>
+                        </div>
+
+                        <div class="saved">
+                          凭证已保存，当前 tool_call_id 将继续执行。对话区只记录“Lab4AI 凭证已配置，继续执行当前步骤”，不会记录账号密码。
+                        </div>
+                      </div>
+
+                      <details class="raw">
+                        <summary>过程详情 / 原始记录</summary>
+                        <pre>Tool: lab4ai_create_instance
+status: waiting_for_user
+reason: lab4ai_credentials_required
+workflow_step_id: step_3_deploy_cpu
+tool_call_id: toolu_cpu_01
+
+原始 Markdown、stdout/stderr、模型规划和 ToolResult 会放在这里，默认收起。</pre>
+                      </details>
+                    </div>
+                  </div>
+
+                  <div class="step">
+                    <div class="step-summary">
+                      <div class="num">4</div>
+                      <div>
+                        <div class="step-title">
+                          <span class="step-name">SSH 探活 + 克隆代码 + 智能环境构建</span>
+                          <code>step_4_cpu_env_setup</code>
+                          <span class="mini-pill pending">等待中</span>
+                        </div>
+                        <div class="step-outcome">CPU 实例创建成功后自动开始。默认折叠，不展示未发生的噪声。</div>
+                      </div>
+                      <span class="mini-pill pending">待执行</span>
+                    </div>
+                  </div>
+
+                  <div class="step">
+                    <div class="step-summary">
+                      <div class="num">8</div>
+                      <div>
+                        <div class="step-title">
+                          <span class="step-name">生成工业级报告</span>
+                          <code>step_8_generate_report</code>
+                          <span class="mini-pill pending">等待中</span>
+                        </div>
+                        <div class="step-outcome">只有 step_9 资源释放完成后，主对话区才显示结项报告。</div>
+                      </div>
+                      <span class="mini-pill pending">最终交付</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="input-bar">
+        <div class="input-inner">
+          <span>当前等待 Lab4AI 凭证配置；你也可以回复“停止任务”或“稍后继续”。</span>
+          <button class="send">→</button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="right">
+      <section class="right-section">
+        <h3>权限与环境配置</h3>
+        <div class="secret-card">
+          <div class="secret-row"><b>状态</b><span>等待 Lab4AI 凭证</span><span></span></div>
+          <div class="secret-row"><b>CPU</b><span>未创建</span><span></span></div>
+          <div class="secret-row"><b>GPU</b><span>未创建</span><span></span></div>
+        </div>
+      </section>
+      <section class="right-section">
+        <h3>实例连接信息</h3>
+        <div class="secret-card">
+          <div class="secret-row"><b>用户</b><span>root</span><span class="copy">复制</span></div>
+          <div class="secret-row"><b>密码</b><span>••••••••••</span><span class="copy">显示</span></div>
+          <div class="secret-row"><b>SSH</b><span>ssh -p 37509 root@182.242.159.112</span><span class="copy">复制</span></div>
+        </div>
+      </section>
+      <section class="right-section">
+        <h3>工作区文件</h3>
+        <div class="file-row">📁 PhotoDoodle</div>
+        <div class="file-row">📄 repo_audit.md</div>
+        <div class="file-row">📄 paper_notes.md</div>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>

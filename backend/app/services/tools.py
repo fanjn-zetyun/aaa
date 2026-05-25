@@ -305,14 +305,17 @@ class ToolRegistry:
         payload: dict[str, Any],
         context: ToolExecutionContext | None,
     ) -> ToolResult:
-        resource_kind = str(payload.get("resource_kind") or "instance").lower()
+        resource_kind = str(payload.get("resource_kind") or "").upper()
+        if resource_kind not in {"CPU", "GPU"}:
+            workflow_step_id = str(payload.get("workflow_step_id") or "")
+            resource_kind = "GPU" if workflow_step_id == "step_6_deploy_gpu" else "CPU"
         if context is None:
             raise RuntimeError("缺少 Tool 执行上下文，无法创建 Lab4AI 实例")
         creds = await load_lab4ai_credentials(context.session)
         if creds is None:
             raise RuntimeError("Lab4AI 凭证未配置，请先由管理员配置平台账号")
 
-        target_model = "GPU" if resource_kind == "gpu" else "CPU"
+        target_model = resource_kind
         instance = await create_instance(
             creds.phone,
             creds.password,
@@ -350,6 +353,7 @@ class ToolRegistry:
             "lab4ai_create_instance",
             f"已创建 Lab4AI {target_model} 实例：{instance.server_id}",
             metadata={
+                **payload,
                 "cloud_instance_id": cloud.id,
                 "server_id": instance.server_id,
                 "instance_id": instance.instance_id,
@@ -357,7 +361,6 @@ class ToolRegistry:
                 "ssh_host": instance.ssh_host,
                 "ssh_port": instance.ssh_port,
                 "ssh_user": instance.ssh_user or "root",
-                **payload,
             },
         )
 
@@ -1023,6 +1026,7 @@ class ToolRegistry:
         metadata = {**payload, **result.metadata}
         if result.ok and context:
             local_report_path = str(result.metadata.get("report_path") or "")
+            markdown_report_path = str(result.metadata.get("markdown_report_path") or "").strip()
             remote_report_path = str(
                 payload.get("remote_report_path") or _remote_codelab_report_path(repo_name)
             )
@@ -1042,11 +1046,17 @@ class ToolRegistry:
             metadata = {
                 **metadata,
                 "local_report_path": local_report_path,
+                "markdown_report_path": markdown_report_path,
                 "remote_report_path": remote_report_path,
                 "report_path": remote_report_path,
-                "artifact_paths": [remote_report_path, local_report_path],
+                "artifact_paths": [
+                    path
+                    for path in [remote_report_path, local_report_path, markdown_report_path]
+                    if path
+                ],
                 "report_path_mapping": {
                     "skill_output_path": local_report_path,
+                    "markdown_report_path": markdown_report_path,
                     "codelab_output_path": remote_report_path,
                 },
             }

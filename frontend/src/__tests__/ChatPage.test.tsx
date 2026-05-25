@@ -126,7 +126,7 @@ describe("ChatPage", () => {
     expect(screen.queryByText("body")).not.toBeInTheDocument();
   });
 
-  it("nests skill selection evidence inside the first workflow step", async () => {
+  it("shows skill selection summary without evidence details inside the SKILL.md reproduction panel", async () => {
     conversationPayload.metadata = {
       task_type: "reproduce",
       github_url: "https://github.com/jsnzwu/motion-guided-flow",
@@ -154,11 +154,13 @@ describe("ChatPage", () => {
 
     renderChat();
 
-    const step = await screen.findByTestId("workflow-step-step_1_audit");
-    expect(within(step).getByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
     expect(
-      within(step).getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
+      within(panel).getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
     ).toBeInTheDocument();
+    expect(within(panel).queryByText("查看选择证据")).not.toBeInTheDocument();
+    expect(within(panel).getByTestId("reproduction-step-row-step_1_audit")).toBeInTheDocument();
   });
 
   it("attaches metadata skill evidence to a new agent bubble after the latest user", async () => {
@@ -202,7 +204,7 @@ describe("ChatPage", () => {
     const currentUser = await screen.findByText("current user starts new run");
     const skillHeading = await screen.findByText("模型选择了 lab4ai-auto-reproduct");
 
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(2);
     expect(currentUser.compareDocumentPosition(skillHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -266,7 +268,7 @@ describe("ChatPage", () => {
 
     const skillHeading = screen.getByText("模型选择了 lab4ai-auto-reproduct");
     const agentBubble = skillHeading.closest('[data-testid="agent-message"]');
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(2);
     expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
     expect(agentBubble).toHaveTextContent("streamed assistant content");
   });
@@ -309,7 +311,7 @@ describe("ChatPage", () => {
     expect(
       screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
     ).toBeInTheDocument();
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
   });
 
   it("merges refetched metadata run state into the current streamed agent bubble", async () => {
@@ -356,7 +358,7 @@ describe("ChatPage", () => {
     });
 
     expect(await screen.findByText("streamed active content")).toBeInTheDocument();
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
 
     conversationPayload.updated_at = "2026-05-20T00:00:10Z";
     conversationPayload.metadata = {
@@ -386,7 +388,7 @@ describe("ChatPage", () => {
     const content = screen.getByText("streamed active content");
     const agentBubble = content.closest('[data-testid="agent-message"]');
     await waitFor(() => {
-      expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+      expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
     });
     expect(agentBubble).toHaveTextContent("lab4ai-auto-reproduct");
     expect(agentBubble).toHaveTextContent("skills/lab4ai-auto-reproduct/project_reproduce.yaml");
@@ -475,22 +477,14 @@ describe("ChatPage", () => {
 
     const content = screen.getByText("streamed partial content");
     const agentBubble = content.closest('[data-testid="agent-message"]');
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
     await waitFor(() => {
       expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
-      expect(agentBubble).toHaveTextContent("metadata step marker");
+      expect(agentBubble).toHaveTextContent("复现流水线实时看板: PhotoDoodle");
     });
 
-    fireEvent.click(within(agentBubble as HTMLElement).getByText("查看选择证据"));
-
-    expect(within(agentBubble as HTMLElement).getByText("source")).toBeInTheDocument();
-    expect(within(agentBubble as HTMLElement).getByText("model")).toBeInTheDocument();
-    expect(within(agentBubble as HTMLElement).getByText("model_choice")).toBeInTheDocument();
-    expect(
-      within(agentBubble as HTMLElement).getAllByText(
-        "Refetched metadata supplied the complete skill selection evidence."
-      ).length
-    ).toBeGreaterThan(0);
+    expect(within(agentBubble as HTMLElement).queryByText("查看选择证据")).not.toBeInTheDocument();
+    expect(within(agentBubble as HTMLElement).queryByText("model_choice")).not.toBeInTheDocument();
   });
 
   it("merges refetched metadata run state into a completed streamed agent bubble", async () => {
@@ -539,7 +533,7 @@ describe("ChatPage", () => {
     });
 
     expect(await screen.findByText("completed stream answer")).toBeInTheDocument();
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
 
     conversationPayload.updated_at = "2026-05-20T00:00:10Z";
     conversationPayload.metadata = {
@@ -575,9 +569,9 @@ describe("ChatPage", () => {
     const answer = screen.getByText("completed stream answer");
     const agentBubble = answer.closest('[data-testid="agent-message"]');
     await waitFor(() => {
-      expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+      expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
       expect(agentBubble).toHaveTextContent("模型选择了 lab4ai-auto-reproduct");
-      expect(agentBubble).toHaveTextContent("completed metadata step marker");
+      expect(agentBubble).toHaveTextContent("复现流水线实时看板: PhotoDoodle");
     });
   });
 
@@ -642,7 +636,7 @@ describe("ChatPage", () => {
     expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
     expect(screen.getByText("已加载 runtime/workflows/run-delta-skill/project_reproduce.yaml")).toBeInTheDocument();
     expect(screen.getByText("delta content with skill")).toBeInTheDocument();
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
   });
 
   it("merges skill evidence from assistant delta without text into the active agent bubble", async () => {
@@ -678,7 +672,7 @@ describe("ChatPage", () => {
 
     expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
     expect(screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")).toBeInTheDocument();
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(1);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(1);
   });
 
   it("updates inferred workflow path when a later stream payload includes explicit workflow path", async () => {
@@ -766,7 +760,7 @@ describe("ChatPage", () => {
       });
     });
 
-    expect(await screen.findByText("LOBSTER Agent")).toBeInTheDocument();
+    expect(await screen.findByText("AutoResearch24 Agent")).toBeInTheDocument();
     expect(screen.queryByText("Skill Selection")).not.toBeInTheDocument();
     expect(screen.queryByText("未选择")).not.toBeInTheDocument();
   });
@@ -790,7 +784,7 @@ describe("ChatPage", () => {
       });
     });
 
-    expect(await screen.findByText("LOBSTER Agent")).toBeInTheDocument();
+    expect(await screen.findByText("AutoResearch24 Agent")).toBeInTheDocument();
     expect(screen.queryByText("Skill Selection")).not.toBeInTheDocument();
     expect(screen.queryByText("未选择")).not.toBeInTheDocument();
   });
@@ -886,23 +880,22 @@ describe("ChatPage", () => {
       });
     });
 
-    expect(await screen.findByText("模型选择了 lab4ai-auto-reproduct")).toBeInTheDocument();
+    const panel = await screen.findByTestId("reproduction-agent-panel");
     expect(
-      screen.getByText("已加载 skills/lab4ai-auto-reproduct/project_reproduce.yaml")
+      within(panel).getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "PhotoDoodle 复现流水线" })).toBeInTheDocument();
-    expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(screen.getByText("Project Reproduction Workflow")).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("columnheader", { name: "执行步骤 (对应 YAML Task)" })
+    ).toBeInTheDocument();
+    expect(within(panel).getAllByTestId(/^reproduction-step-row-/)).toHaveLength(9);
+    expect(screen.queryByText("Research Reproduction Workbench")).not.toBeInTheDocument();
     expect(screen.getByText("1/9 完成")).toBeInTheDocument();
     expect(screen.getAllByText(/项目与论文双重审计/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("完成").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("正在分析仓库。").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("分析仓库完成。").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("分析 GitHub 仓库").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("score=75；已完成项目与论文审计的 MVP 记录。").length).toBeGreaterThan(0);
-    const workflowStep = screen.getByTestId("workflow-step-step_1_audit");
-    expect(within(workflowStep).getByText("思考过程")).toBeInTheDocument();
-    expect(within(workflowStep).getByText("执行过程")).toBeInTheDocument();
+    expect(screen.getAllByText("[完成]").length).toBeGreaterThan(0);
+    expect(within(panel).getByText(/可行性评分：75/)).toBeInTheDocument();
+    expect(
+      within(panel).queryByText("score=75；已完成项目与论文审计的 MVP 记录。")
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("工作流已加载")).not.toBeInTheDocument();
     expect(screen.queryByText("选择复现流程")).not.toBeInTheDocument();
     expect(screen.getByText("最终结论：仓库审计已完成，下一步需要创建 CPU 实例。")).toBeInTheDocument();
@@ -945,6 +938,144 @@ describe("ChatPage", () => {
     expect(card).toHaveTextContent("最终结论：复现报告已生成。");
     expect(card).not.toHaveTextContent("工具执行结果如下");
     expect(card).not.toHaveTextContent("| 序号 |");
+  });
+
+  it("renders workflow completion as the SKILL.md final delivery section", async () => {
+    conversationPayload.messages = [
+      ...conversationPayload.messages,
+      {
+        id: 2,
+        role: "assistant",
+        content:
+          "## 结项报告\n\n复现 workflow 已按 project_reproduce.yaml 完成全部 9 个步骤。\n\n交付物：\n- Word 报告：runtime/workspaces/7/repro_report.docx\n\n资源状态：\n- GPU 实例已释放：gpu-1",
+        message_metadata: { workflow_final_report: true },
+        created_at: "2026-05-20T00:00:30Z",
+      },
+    ];
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: {
+        repo_name: "motion-guided-flow",
+        word_report_path: "runtime/workspaces/7/repro_report.docx",
+      },
+      workflow_steps: [
+        { id: "step_1_audit", name: "项目复现可行性分析", status: "completed" },
+        { id: "step_8_generate_report", name: "生成工业级报告", status: "completed" },
+        { id: "step_9_release_gpu", name: "释放 GPU 实例", status: "completed" },
+      ],
+    };
+
+    renderChat();
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("任务完成：motion-guided-flow 自动化复现已结项")).toBeInTheDocument();
+    expect(within(panel).getByText("核心指标对比 (Smoke Test 实测)")).toBeInTheDocument();
+    expect(within(panel).getByText("runtime/workspaces/7/repro_report.docx")).toBeInTheDocument();
+    expect(within(panel).getByText("资源监控核对")).toBeInTheDocument();
+    expect(screen.queryByText("结项报告")).not.toBeInTheDocument();
+    expect(screen.queryByText("最终回答")).not.toBeInTheDocument();
+  });
+
+  it("does not append execution process after workflow final report completion", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "workflow_loaded",
+        run_id: "run-final",
+        workflow: {
+          name: "Lab4AI_Auto_Reproduction_Pipeline",
+          project_name: "PhotoDoodle",
+          current_step_id: "step_8_generate_report",
+          results: { word_report_path: "runtime/workspaces/7/PhotoDoodle_Final_Repro_Report.docx" },
+          steps: [
+            { id: "step_1_audit", name: "项目与论文双重审计", status: "completed" },
+            { id: "step_8_generate_report", name: "生成工业级报告", status: "completed" },
+          ],
+        },
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "tool_completed",
+        run_id: "run-final",
+        tool_name: "repro_report",
+        tool_call_id: "tool-report",
+        ok: true,
+        timestamp: "2026-05-20T00:00:02Z",
+      });
+      ws.emit({
+        seq: 3,
+        type: "assistant_completed",
+        run_id: "run-final",
+        message: {
+          id: 2,
+          conversation_id: 7,
+          role: "assistant",
+          content:
+            "## 结项报告\n\n复现 workflow 已按 project_reproduce.yaml 完成全部 9 个步骤。\n\n交付物：\n- Word 报告：runtime/workspaces/7/PhotoDoodle_Final_Repro_Report.docx",
+          message_metadata: { workflow_final_report: true },
+          created_at: "2026-05-20T00:00:03Z",
+        },
+      });
+      ws.emit({
+        seq: 4,
+        type: "runtime_completed",
+        run_id: "run-final",
+        timestamp: "2026-05-20T00:00:04Z",
+      });
+    });
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("任务完成：PhotoDoodle 自动化复现已结项")).toBeInTheDocument();
+    expect(screen.queryByText("执行过程")).not.toBeInTheDocument();
+    expect(screen.queryByText("结项报告")).not.toBeInTheDocument();
+    expect(screen.queryByText("最终回答")).not.toBeInTheDocument();
+  });
+
+  it("hides the final answer card when the completed reproduction panel already has final delivery", async () => {
+    conversationPayload.messages = [
+      ...conversationPayload.messages,
+      {
+        id: 2,
+        role: "assistant",
+        content: "最终结论：PhotoDoodle 自动化复现已完成，报告已生成。",
+        message_metadata: {},
+        created_at: "2026-05-20T00:00:30Z",
+      },
+    ];
+    conversationPayload.status = "completed";
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: {
+        repo_name: "PhotoDoodle",
+        word_report_path: "runtime/workspaces/7/PhotoDoodle_Final_Repro_Report.docx",
+      },
+      workflow_steps: [
+        { id: "step_1_audit", name: "项目与论文双重审计", status: "completed" },
+        { id: "step_2_condition_check", name: "复现可行性熔断判断", status: "completed" },
+        { id: "step_3_deploy_cpu", name: "创建 CPU 实例", status: "completed" },
+        { id: "step_4_cpu_env_setup", name: "SSH探活 + 克隆代码 + 智能环境构建", status: "completed" },
+        { id: "step_5_release_cpu", name: "释放 CPU 实例", status: "completed" },
+        { id: "step_6_deploy_gpu", name: "创建 GPU 实例", status: "completed" },
+        { id: "step_7_gpu_execution", name: "CUDA编译 + 推理/微调测试", status: "completed" },
+        { id: "step_8_generate_report", name: "生成工业级报告", status: "completed" },
+        { id: "step_9_release_gpu", name: "释放 GPU 实例", status: "completed" },
+      ],
+    };
+
+    renderChat();
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("任务完成：PhotoDoodle 自动化复现已结项")).toBeInTheDocument();
+    expect(screen.queryByText("最终回答")).not.toBeInTheDocument();
+    expect(screen.queryByText("最终结论：PhotoDoodle 自动化复现已完成，报告已生成。")).not.toBeInTheDocument();
   });
 
   it("preserves tool and cleanup timeline events", async () => {
@@ -1081,7 +1212,7 @@ describe("ChatPage", () => {
       ],
       pending_user_input: {
         question: "是否继续创建 CPU 实例？",
-        options: ["继续执行"],
+        options: ["继续执行", "修改方案"],
         tool_name: "lab4ai_create_instance",
         workflow_step_id: "step_3_deploy_cpu",
       },
@@ -1089,14 +1220,15 @@ describe("ChatPage", () => {
 
     renderChat();
 
-    const step = await screen.findByTestId("workflow-step-step_3_deploy_cpu");
-    expect(within(step).getByText("等待你确认")).toBeInTheDocument();
-    expect(within(step).getByText("需要你的输入")).toBeInTheDocument();
-    expect(within(step).getByText("是否继续创建 CPU 实例？")).toBeInTheDocument();
-    expect(within(step).getByRole("button", { name: "继续执行" })).toBeInTheDocument();
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("实验确认点")).toBeInTheDocument();
+    expect(within(panel).getByText("需要你确认后继续执行受控动作")).toBeInTheDocument();
+    expect(within(panel).getByText("是否继续创建 CPU 实例？")).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "继续执行" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "修改方案" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("inline-human-decision")).not.toBeInTheDocument();
 
-    fireEvent.click(within(step).getByRole("button", { name: "继续执行" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "继续执行" }));
 
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -1109,11 +1241,32 @@ describe("ChatPage", () => {
     });
   });
 
-  it("shows workflow steps as a vertical run card with the current step expanded", async () => {
+  it("renders reproduce workflow metadata as the SKILL.md nine-step agent panel", async () => {
     conversationPayload.metadata = {
       workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
       workflow_current_step_id: "step_4_cpu_env_setup",
-      workflow_results: { repo_name: "motion-guided-flow" },
+      workflow_results: {
+        repo_name: "motion-guided-flow",
+        score: 83,
+        baseline_metrics: {
+          PSNR: "28.4",
+          SSIM: "0.91",
+        },
+        hyperparams: {
+          lr: "1e-4",
+          batch_size: 4,
+        },
+      },
+      workflow_resources: {
+        cpu: {
+          server_id: "cpu-123",
+          raw: {
+            ssh_host: "10.0.0.12",
+            ssh_port: 22022,
+            ssh_user: "root",
+          },
+        },
+      },
       workflow_steps: [
         {
           id: "step_1_audit",
@@ -1122,10 +1275,26 @@ describe("ChatPage", () => {
           output: "Audit completed: repo structure and baseline notes captured.",
         },
         {
+          id: "step_3_deploy_cpu",
+          name: "CPU deployment",
+          status: "completed",
+          evidence: {
+            cpu_instance_created: true,
+            server_id: "cpu-123",
+          },
+        },
+        {
           id: "step_4_cpu_env_setup",
           name: "CPU environment setup",
           status: "running",
           output: "Preparing CPU workspace for motion-guided-flow.",
+          artifacts: ["remote:/workspace/user-data/codelab/motion-guided-flow"],
+          evidence: {
+            clone_completed: true,
+            dependency_install_attempted: true,
+            project_prep_completed: true,
+            remote_workspace_verified: true,
+          },
           progress: [
             "Start step: CPU environment setup",
             "Invoking tool: ssh_execute",
@@ -1151,20 +1320,338 @@ describe("ChatPage", () => {
 
     renderChat();
 
+    const panel = await screen.findByTestId("reproduction-agent-panel");
     expect(
-      await screen.findByRole("heading", { name: "motion-guided-flow 复现流水线" })
+      within(panel).getByRole("heading", { name: "复现流水线实时看板: motion-guided-flow" })
     ).toBeInTheDocument();
-    expect(screen.queryByRole("table")).toBeNull();
-    expect(screen.getByText("1/9 完成")).toBeInTheDocument();
-    expect(screen.getByText("step_1_audit")).toBeInTheDocument();
+    expect(within(panel).getAllByTestId(/^reproduction-step-row-/)).toHaveLength(9);
+    expect(within(panel).getByRole("columnheader", { name: "序号" })).toBeInTheDocument();
     expect(
-      screen.getByText("Audit completed: repo structure and baseline notes captured.")
+      within(panel).getByRole("columnheader", { name: "执行步骤 (对应 YAML Task)" })
     ).toBeInTheDocument();
-    expect(screen.getByText("step_4_cpu_env_setup")).toBeInTheDocument();
-    expect(screen.getByText("Preparing CPU workspace for motion-guided-flow.")).toBeInTheDocument();
-    expect(screen.getByText("Installing dependencies on CPU instance.")).toBeInTheDocument();
-    expect(screen.getByText("执行远程命令")).toBeInTheDocument();
-    expect(screen.getByText("lab4ai_project_prep")).toBeInTheDocument();
+    expect(within(panel).getByRole("columnheader", { name: "当前状态" })).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("columnheader", { name: "核心产出 / 详情" })
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("2/9 完成")).toBeInTheDocument();
+    expect(within(panel).getByText("step_1_audit")).toBeInTheDocument();
+    expect(within(panel).getAllByText("[完成]").length).toBeGreaterThan(0);
+    expect(within(panel).getByText(/可行性评分：83/)).toBeInTheDocument();
+    expect(within(panel).getByText(/论文 Baseline：PSNR=28.4, SSIM=0.91/)).toBeInTheDocument();
+    expect(within(panel).getByText(/超参数：lr=1e-4, batch_size=4/)).toBeInTheDocument();
+    expect(within(panel).queryByText("[可行性评分 / 论文 Baseline / 超参数]")).not.toBeInTheDocument();
+    const cpuDeployRow = within(panel).getByTestId("reproduction-step-row-step_3_deploy_cpu");
+    expect(within(cpuDeployRow).getByText(/serverId：cpu-123/)).toBeInTheDocument();
+    expect(within(cpuDeployRow).getByText(/SSH：root@10.0.0.12:22022/)).toBeInTheDocument();
+    expect(within(panel).getByText("step_4_cpu_env_setup")).toBeInTheDocument();
+    expect(within(panel).getByText("[执行中]")).toBeInTheDocument();
+    expect(within(panel).getByText(/clone完成：是/)).toBeInTheDocument();
+    expect(within(panel).getByText(/依赖安装结果：已完成/)).toBeInTheDocument();
+    expect(within(panel).getByText(/workspace：remote:\/workspace\/user-data\/codelab\/motion-guided-flow/)).toBeInTheDocument();
+    expect(within(panel).queryByText("[clone完成 / 依赖安装结果]")).not.toBeInTheDocument();
+    expect(within(panel).getAllByText("[等待中...]").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Research Reproduction Workbench")).not.toBeInTheDocument();
+  });
+
+  it("renders the reproduction panel without a horizontal scrollbar inside the agent bubble", async () => {
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: { repo_name: "motion-guided-flow" },
+      workflow_steps: [
+        {
+          id: "step_4_cpu_env_setup",
+          name: "CPU environment setup",
+          status: "running",
+          artifacts: ["remote:/workspace/user-data/codelab/motion-guided-flow"],
+          evidence: {
+            clone_completed: true,
+            dependency_install_attempted: true,
+          },
+        },
+      ],
+    };
+
+    renderChat();
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    const table = within(panel).getByRole("table");
+    expect(panel.querySelector(".overflow-x-auto")).not.toBeInTheDocument();
+    expect(table.className).not.toContain("min-w-[860px]");
+    expect(table.className).toContain("table-fixed");
+    expect(within(panel).getByTestId("reproduction-step-row-step_4_cpu_env_setup")).toHaveTextContent(
+      "remote:/workspace/user-data/codelab/motion-guided-flow"
+    );
+  });
+
+  it("maps reproduce workflow statuses to the SKILL.md status labels", async () => {
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: { repo_name: "PhotoDoodle" },
+      workflow_steps: [
+        { id: "step_1_audit", name: "项目与论文双重审计", status: "completed" },
+        { id: "step_2_condition_check", name: "复现可行性熔断判断", status: "failed", error: "score < 60" },
+        { id: "step_3_deploy_cpu", name: "创建 CPU 实例", status: "running" },
+      ],
+    };
+
+    renderChat();
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByTestId("reproduction-status-completed")).toHaveTextContent("[完成]");
+    expect(within(panel).getByTestId("reproduction-status-running")).toHaveTextContent("[执行中]");
+    expect(within(panel).getByTestId("reproduction-status-failed")).toHaveTextContent("[中止]");
+    expect(within(panel).getAllByTestId("reproduction-status-pending").length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText("[等待中...]").length).toBeGreaterThan(0);
+  });
+
+  it("renders the SKILL.md final delivery section from completed workflow metadata", async () => {
+    conversationPayload.status = "completed";
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_results: {
+        repo_name: "PhotoDoodle",
+        baseline_metrics: {
+          PSNR: "28.4",
+          SSIM: "0.91",
+        },
+        smoke_test_metrics: {
+          PSNR: "27.9",
+          SSIM: "0.89",
+          VRAM: "18.2GB",
+        },
+        word_report_path: "runtime/workspaces/7/PhotoDoodle_Final_Repro_Report.docx",
+      },
+      workflow_resources: {
+        cpu: { server_id: "cpu-final", released: true },
+        gpu: { server_id: "gpu-final", released: true },
+      },
+      workflow_steps: [
+        { id: "step_1_audit", name: "项目与论文双重审计", status: "completed" },
+        { id: "step_2_condition_check", name: "复现可行性熔断判断", status: "completed" },
+        { id: "step_3_deploy_cpu", name: "创建 CPU 实例", status: "completed" },
+        { id: "step_4_cpu_env_setup", name: "SSH探活 + 克隆代码 + 智能环境构建", status: "completed" },
+        {
+          id: "step_5_release_cpu",
+          name: "释放 CPU 实例",
+          status: "completed",
+          evidence: {
+            cpu_instance_released: true,
+            server_id: "cpu-final",
+          },
+        },
+        { id: "step_6_deploy_gpu", name: "创建 GPU 实例", status: "completed" },
+        {
+          id: "step_7_gpu_execution",
+          name: "CUDA编译 + 推理/微调测试",
+          status: "completed",
+          evidence: {
+            smoke_test_executed: true,
+            gpu_runtime_env_configured: true,
+          },
+        },
+        {
+          id: "step_8_generate_report",
+          name: "生成工业级报告",
+          status: "completed",
+          evidence: {
+            report_path: "runtime/workspaces/7/PhotoDoodle_Final_Repro_Report.docx",
+          },
+        },
+        {
+          id: "step_9_release_gpu",
+          name: "释放 GPU 实例",
+          status: "completed",
+          evidence: {
+            gpu_instance_released: true,
+            server_id: "gpu-final",
+          },
+        },
+      ],
+    };
+
+    renderChat();
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("任务完成：PhotoDoodle 自动化复现已结项")).toBeInTheDocument();
+    expect(within(panel).getByText("核心指标对比 (Smoke Test 实测)")).toBeInTheDocument();
+    expect(within(panel).getByText("H100 架构优化洞察")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Word 报告已排版落盘，请前往该绝对路径获取：")
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText("runtime/workspaces/7/PhotoDoodle_Final_Repro_Report.docx")
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("资源监控核对")).toBeInTheDocument();
+    expect(within(panel).getByText("PSNR")).toBeInTheDocument();
+    expect(within(panel).getByText("27.9")).toBeInTheDocument();
+    expect(within(panel).getByText("显存占用 (VRAM)")).toBeInTheDocument();
+    expect(within(panel).getByText("18.2GB")).toBeInTheDocument();
+    expect(within(panel).getByText(/编译结果：已完成/)).toBeInTheDocument();
+    expect(within(panel).getByText(/实测指标：PSNR=27.9, SSIM=0.89/)).toBeInTheDocument();
+    expect(within(panel).getByText(/VRAM：18.2GB/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Word 文件路径：runtime\/workspaces\/7\/PhotoDoodle_Final_Repro_Report.docx/)).toBeInTheDocument();
+    expect(within(panel).getAllByText(/关机确认：已释放/).length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText(/运行时长：待记录/).length).toBeGreaterThan(0);
+  });
+
+  it("renders model process markdown as a structured execution record", async () => {
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "workflow_loaded",
+        run_id: "run-structured",
+        workflow: {
+          name: "Lab4AI_Auto_Reproduction_Pipeline",
+          project_name: "motion-guided-flow",
+          current_step_id: "step_4_cpu_env_setup",
+          steps: [
+            {
+              id: "step_4_cpu_env_setup",
+              name: "在 CPU 上拉取代码与智能环境/数据构建",
+              status: "running",
+            },
+          ],
+        },
+        timestamp: "2026-05-20T00:00:01Z",
+      });
+      ws.emit({
+        seq: 2,
+        type: "progress",
+        run_id: "run-structured",
+        stage: "plan",
+        workflow_step_id: "step_4_cpu_env_setup",
+        content:
+          "制定执行计划：用户已确认继续，当前进入 Step 4，我将做 SSH 探活 + 克隆代码 + 读取审计报告。\n\n" +
+          "--- #### 复现流水线实时看板：`motion-guided-flow`\n" +
+          "| 序号 | 执行步骤（对应 YAML Task） | 当前状态 | 核心产出 / 详情 |\n" +
+          "| :--- | :--- | :--- | :--- |\n" +
+          "| 1 | `step_1_audit`: 项目与论文双重审计 | ✅ 完成 | score=60 |\n" +
+          "| 2 | `step_2_condition_check`: 复现可行性熔断判断 | ✅ 通过 | score>=60 |\n" +
+          "| 3 | `step_3_deploy_cpu`: 创建 CPU 实例 | ⏳ 执行中 | 正在申请 2 核 CPU |\n" +
+          "| 4 | `step_4_cpu_env_setup`: SSH 探活 + 克隆代码 + 智能环境构建 | ⏳ 等待中 | - |\n\n" +
+          "模型规划工具调用：现在开始执行 Step 4。先并行做三件事：SSH 探活 + 克隆代码 + 读取审计报告。\n" +
+          "模型规划工具调用：SSH 连接成功，但代码目录已存在。清理后重新克隆，同时读取项目关键文件。",
+        timestamp: "2026-05-20T00:00:02Z",
+      });
+    });
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByRole("heading", { name: "复现流水线实时看板: motion-guided-flow" })).toBeInTheDocument();
+    expect(within(panel).getByText("step_4_cpu_env_setup")).toBeInTheDocument();
+    expect(within(panel).getByText("[执行中]")).toBeInTheDocument();
+    expect(within(panel).getByText(/clone完成：待记录/)).toBeInTheDocument();
+    expect(within(panel).getByText(/依赖安装结果：待记录/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/制定执行计划/)).not.toBeInTheDocument();
+  });
+
+  it("structures markdown records from step progress and execution events", async () => {
+    conversationPayload.status = "running";
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_current_step_id: "step_7_gpu_execution",
+      workflow_results: { repo_name: "PhotoDoodle" },
+      workflow_steps: [
+        {
+          id: "step_7_gpu_execution",
+          name: "CUDA 编译 + 推理/微调测试",
+          status: "running",
+          progress: [
+            "## GPU 执行计划\n\n" +
+              "模型规划工具调用：开始 GPU 复现实验，先 CUDA 编译，再运行推理测试。\n\n" +
+              "| 序号 | 执行步骤（对应 YAML Task） | 当前状态 | 核心产出 / 详情 |\n" +
+              "| :--- | :--- | :--- | :--- |\n" +
+              "| 1 | `step_1_audit`: 项目与论文双重审计 | ✅ 完成 | score=80 |\n" +
+              "| 7 | `step_7_gpu_execution`: CUDA 编译 + 推理/微调测试 | ⏳ 执行中 | 编译与推理待验证 |\n\n" +
+              "- CUDA 编译\n" +
+              "- 运行推理测试",
+          ],
+        },
+      ],
+    };
+
+    renderChat();
+
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBe(1);
+    });
+    const ws = MockWebSocket.instances[0];
+    act(() => {
+      ws.emit({
+        seq: 1,
+        type: "workflow_cleanup_started",
+        run_id: "run-execution-markdown",
+        workflow_step_id: "step_7_gpu_execution",
+        content:
+          "## 工具恢复记录\n\n" +
+          "模型规划工具调用：推理测试失败，准备清理缓存并重新运行推理。\n\n" +
+          "- 清理历史代码目录\n" +
+          "- 运行推理测试",
+        timestamp: "2026-05-20T00:00:03Z",
+      });
+    });
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByRole("heading", { name: "复现流水线实时看板: PhotoDoodle" })).toBeInTheDocument();
+    expect(within(panel).getByText("0/9 完成")).toBeInTheDocument();
+    expect(within(panel).getByText("step_7_gpu_execution")).toBeInTheDocument();
+    expect(within(panel).getByText("[执行中]")).toBeInTheDocument();
+    expect(within(panel).getByText(/编译结果：待记录/)).toBeInTheDocument();
+    expect(within(panel).queryByText(/GPU 执行计划/)).not.toBeInTheDocument();
+  });
+
+  it("renders Agent Runtime workflow instruction checklist from metadata", async () => {
+    conversationPayload.metadata = {
+      runtime: {
+        active_skill: { name: "lab4ai-auto-reproduct" },
+        active_workflow: {
+          name: "Lab4AI_Auto_Reproduction_Pipeline",
+          current_step_id: "step_7_gpu_execution",
+          steps: {
+            step_7_gpu_execution: {
+              id: "step_7_gpu_execution",
+              name: "GPU execution",
+              status: "recovery",
+              instruction_plan_id: "step_7_gpu_execution",
+              validation_failures: ["missing instruction checklist item(s): import_precheck"],
+            },
+          },
+        },
+        instruction_plans: {
+          step_7_gpu_execution: {
+            step_id: "step_7_gpu_execution",
+            items: [
+              {
+                id: "import_precheck",
+                text: "Run import/CUDA environment prechecks and record the result.",
+                status: "pending",
+              },
+              {
+                id: "entrypoint_detection",
+                text: "Inspect README, scripts, examples, demo, or CLI entrypoints.",
+                status: "completed",
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    renderChat();
+
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    expect(within(panel).getByText("step_7_gpu_execution")).toBeInTheDocument();
+    expect(within(panel).getByText("[执行中]")).toBeInTheDocument();
+    expect(within(panel).getByText(/编译结果：待记录/)).toBeInTheDocument();
+    expect(
+      within(panel).queryByText("missing instruction checklist item(s): import_precheck")
+    ).not.toBeInTheDocument();
   });
 
   it("ignores replayed websocket events by seq", async () => {
@@ -1244,7 +1731,7 @@ describe("ChatPage", () => {
     });
 
     expect(await screen.findByText("下一轮内容")).toBeInTheDocument();
-    expect(screen.getAllByText("LOBSTER Agent")).toHaveLength(2);
+    expect(screen.getAllByText("AutoResearch24 Agent")).toHaveLength(2);
   });
 
   it("saves Lab4AI credentials from the workflow step without sending secrets as chat text", async () => {
@@ -1289,14 +1776,14 @@ describe("ChatPage", () => {
 
     renderChat();
 
-    const step = await screen.findByTestId("workflow-step-step_3_deploy_cpu");
-    fireEvent.change(within(step).getByLabelText("手机号/账号"), {
+    const panel = await screen.findByTestId("reproduction-agent-panel");
+    fireEvent.change(within(panel).getByLabelText("手机号/账号"), {
       target: { value: "13800008000" },
     });
-    fireEvent.change(within(step).getByLabelText("密码"), {
+    fireEvent.change(within(panel).getByLabelText("密码"), {
       target: { value: "super-secret-password" },
     });
-    fireEvent.click(within(step).getByRole("button", { name: "保存并继续" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "保存并继续" }));
 
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -1322,5 +1809,70 @@ describe("ChatPage", () => {
       .filter(([path]) => path === "/api/conversations/7/messages")
       .map(([, options]) => String((options as RequestInit).body || ""));
     expect(messageCalls.join("\n")).not.toContain("super-secret-password");
+    expect(await within(panel).findByText("Lab4AI 凭证已安全配置")).toBeInTheDocument();
+    expect(within(panel).getByText("138****8000")).toBeInTheDocument();
+    expect(within(panel).queryByLabelText("密码")).not.toBeInTheDocument();
+  });
+
+  it("uses reproduction markdown styling for reproduce assistant answers", async () => {
+    conversationPayload.status = "completed";
+    conversationPayload.messages.push({
+      id: 2,
+      role: "assistant",
+      content:
+        "#### 复现流水线实时看板 `PhotoDoodle`\n\n" +
+        "| 序号 | 执行步骤 (对应 YAML Task) | 当前状态 | 核心产出 / 详情 |\n" +
+        "| :--- | :--- | :--- | :--- |\n" +
+        "| 1 | `step_1_audit`: 项目与论文双重审计 | [完成] | score=80 |",
+      message_metadata: {},
+      created_at: "2026-05-20T00:00:10Z",
+    });
+
+    renderChat();
+
+    const agentMessage = await screen.findByTestId("agent-message");
+    expect(within(agentMessage).getByTestId("markdown-content")).toHaveClass(
+      "markdown-reproduction"
+    );
+    expect(within(agentMessage).getByTestId("reproduction-status-done")).toHaveTextContent(
+      "[完成]"
+    );
+  });
+
+  it("keeps reproduction markdown tables visible when workflow metadata is present", async () => {
+    conversationPayload.status = "completed";
+    conversationPayload.metadata = {
+      workflow_name: "Lab4AI_Auto_Reproduction_Pipeline",
+      workflow_steps: [
+        {
+          id: "step_1_audit",
+          name: "项目与论文双重审计",
+          status: "completed",
+        },
+      ],
+    };
+    conversationPayload.messages.push({
+      id: 2,
+      role: "assistant",
+      content:
+        "#### 复现流水线实时看板 `PhotoDoodle`\n\n" +
+        "| 序号 | 执行步骤 (对应 YAML Task) | 当前状态 | 核心产出 / 详情 |\n" +
+        "| :--- | :--- | :--- | :--- |\n" +
+        "| 1 | `step_1_audit`: 项目与论文双重审计 | [完成] | score=80 |",
+      message_metadata: {},
+      created_at: "2026-05-20T00:00:10Z",
+    });
+
+    renderChat();
+
+    const agentMessage = await screen.findByTestId("agent-message");
+    expect(
+      within(agentMessage).getByText("复现流水线实时看板", { exact: false })
+    ).toBeInTheDocument();
+    expect(within(agentMessage).getAllByText("step_1_audit")).toHaveLength(1);
+    expect(within(agentMessage).queryByText("Research Reproduction Workbench")).not.toBeInTheDocument();
+    expect(within(agentMessage).getByTestId("reproduction-status-completed")).toHaveTextContent(
+      "[完成]"
+    );
   });
 });

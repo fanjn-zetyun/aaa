@@ -402,7 +402,10 @@ class SkillWorkflowRunner:
                 outputs,
                 False,
             )
-        if handled:
+        if handled and (
+            validate_workflow_step_contract(metadata, step) is None
+            or step.id not in FIXED_EXECUTOR_STEPS
+        ):
             return (
                 mark_workflow_step(
                     metadata,
@@ -413,6 +416,10 @@ class SkillWorkflowRunner:
                 outputs,
                 False,
             )
+
+        if handled:
+            contract_error = validate_workflow_step_contract(metadata, step)
+            outputs.append(f"Model tool-use incomplete; continuing contract executor: {contract_error}")
 
         if step.id == "step_1_audit":
             repo_result, metadata, paused = await self._invoke_step_tool(
@@ -553,25 +560,26 @@ class SkillWorkflowRunner:
 
         if step.id == "step_4_cpu_env_setup":
             server_id = workflow_resource_server_id(metadata, "cpu")
-            clone_result, metadata, paused = await self._invoke_step_tool(
-                metadata,
-                step,
-                "claw_shell_run",
-                {
-                    "server_id": server_id,
-                    "resource_kind": "CPU",
-                    "command": _cpu_clone_command(metadata, repo_name),
-                    "timeout": 600,
-                    "connect_retries": 30,
-                    "connect_retry_interval": 10,
-                },
-            )
-            if paused:
-                return metadata, outputs, True
-            if clone_result:
-                outputs.append(f"{clone_result.name}: {clone_result.content}")
-            if not clone_result or clone_result.ok is False:
-                return metadata, outputs, False
+            if not _step_has_completed_clone(metadata, step.id):
+                clone_result, metadata, paused = await self._invoke_step_tool(
+                    metadata,
+                    step,
+                    "claw_shell_run",
+                    {
+                        "server_id": server_id,
+                        "resource_kind": "CPU",
+                        "command": _cpu_clone_command(metadata, repo_name),
+                        "timeout": 600,
+                        "connect_retries": 30,
+                        "connect_retry_interval": 10,
+                    },
+                )
+                if paused:
+                    return metadata, outputs, True
+                if clone_result:
+                    outputs.append(f"{clone_result.name}: {clone_result.content}")
+                if not clone_result or clone_result.ok is False:
+                    return metadata, outputs, False
 
             prep_result, metadata, paused = await self._invoke_step_tool(
                 metadata,
@@ -789,19 +797,40 @@ class SkillWorkflowRunner:
             if paused:
                 return metadata, outputs, True
             report_path = ""
+            local_report_path = ""
+            markdown_report_path = ""
+            remote_report_path = ""
             if result:
                 outputs.append(f"{result.name}: {result.content}")
-                report_path = str(result.metadata.get("report_path") or report_path)
+                local_report_path = str(result.metadata.get("local_report_path") or "").strip()
+                markdown_report_path = str(result.metadata.get("markdown_report_path") or "").strip()
+                remote_report_path = str(result.metadata.get("remote_report_path") or "").strip()
+                report_path = local_report_path or str(result.metadata.get("report_path") or "").strip()
             if not result or result.ok is False:
                 return metadata, outputs, False
             metadata = ensure_workflow_results(metadata)
             metadata["workflow_results"]["word_report_path"] = report_path
+            if local_report_path:
+                metadata["workflow_results"]["local_report_path"] = local_report_path
+            if markdown_report_path:
+                metadata["workflow_results"]["markdown_report_path"] = markdown_report_path
+            if remote_report_path:
+                metadata["workflow_results"]["remote_report_path"] = remote_report_path
+            evidence = {
+                "report_generated": bool(report_path or remote_report_path),
+                "report_path": report_path or remote_report_path,
+                "completion_source": "skill_contract_executor",
+            }
+            if local_report_path:
+                evidence["local_report_path"] = local_report_path
+            if markdown_report_path:
+                evidence["markdown_report_path"] = markdown_report_path
+            if remote_report_path:
+                evidence["remote_report_path"] = remote_report_path
             metadata = set_workflow_step_evidence(
                 metadata,
                 step,
-                report_generated=bool(report_path),
-                report_path=report_path,
-                completion_source="skill_contract_executor",
+                **evidence,
             )
             for artifact in _artifact_paths(result):
                 metadata = add_workflow_step_artifact(metadata, step, artifact)
@@ -1469,6 +1498,30 @@ def validate_workflow_step_contract(metadata: dict, step: WorkflowStep) -> str |
     return f"Workflow step contract failed for {step.id}: {'; '.join(details)}"
 
 
+def _step_has_completed_clone(metadata: dict, step_id: str) -> bool:
+    step_state = workflow_step_state(metadata, step_id)
+    evidence = step_state.get("evidence") if isinstance(step_state.get("evidence"), dict) else {}
+    if not (
+        evidence.get("clone_completed")
+        and evidence.get("remote_workspace_verified")
+        and evidence.get("git_repo_verified")
+    ):
+        return False
+    return _step_has_completed_contract_tool(metadata, step_id, "ssh_execute")
+
+
+def _step_has_completed_contract_tool(metadata: dict, step_id: str, tool_name: str) -> bool:
+    step_state = workflow_step_state(metadata, step_id)
+    for item in step_state.get("tool_calls") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "completed" or item.get("ok") is False:
+            continue
+        if _contract_tool_name(str(item.get("name") or "")) == tool_name:
+            return True
+    return False
+
+
 def update_workflow_tool_call(
     metadata: dict,
     step_id: str,
@@ -1680,6 +1733,7 @@ def _cpu_clone_command(metadata: dict, repo_name: str) -> str:
         f"mkdir -p {base_dir}/code {base_dir}/data {base_dir}/model; "
         f"cd {base_dir}/code; "
         "if [ ! -d .git ]; then "
+        "find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; "
         f"git clone --recursive {_shell_quote(clone_url)} .; "
         "else git fetch --all --prune; fi; "
         "ln -sfn ../data data; "
