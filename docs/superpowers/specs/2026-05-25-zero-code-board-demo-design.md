@@ -80,12 +80,12 @@ frontend/src/components/ZeroCodeAgentPanel.tsx
 
 - 论文标题：`GeneCLR: A Context-Aware Protein Language Model for Defense System Discovery`
 - 项目名：`geneclr-zero-code`
-- CPU 实例：`serverId=lab4ai-cpu-20260525-083142-a19f`
+- CPU 实例：`serverId：481a8b5e60994cf98ed252ae0518edf0`
 - CPU 规格：`2C CPU / 8GB RAM`
-- CPU SSH：`ssh -p 31247 root@compute.lab4ai.example`
-- GPU 实例：`serverId=lab4ai-gpu-20260525-091806-b72c`
+- CPU SSH：`root@182.242.159.112:30043`
+- GPU 实例：`serverId：7f26d6d2f7a94b93b02fd48b1e4c9a65`
 - GPU 规格：`1x H100 / 80GB VRAM`
-- GPU SSH：`ssh -p 31892 root@gpu.lab4ai.example`
+- GPU SSH：`root@182.242.159.118:31087`
 - 路由结果：`domain=CS_AI + BIOINFO`，`experiment_type=HYBRID`
 - 激活插件：`zero-code-reproduction`, `zero-code-repro-csai`, `zero-code-repro-biodefense`
 - 远程目录：`/workspace/user-data/codelab/geneclr-zero-code/`
@@ -153,6 +153,6 @@ HITL 使用现有 `HumanInputPanel` 的视觉体验。演示页传入的 `pendin
 - `/paper-only` 输入论文地址后进入演示页。
 - 页面看起来像一次真实 Agent 对话，而不是孤立组件展示。
 - HITL 确认卡可点击，点击后看板状态发生变化。
-- 演示数据包含真实形态的 CPU/GPU `serverId`、SSH、路由插件和产出路径。
+- 演示数据包含真实形态的 CPU/GPU `serverId`、`root@ip:port` SSH、路由插件和产出路径。
 - 无任何真实 Lab4AI API 或 conversation 创建请求。
 - `npm run test:run` 和 `npm run build` 通过。
