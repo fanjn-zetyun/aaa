@@ -85,7 +85,7 @@ frontend/src/components/ZeroCodeAgentPanel.tsx
 - CPU SSH：`root@182.242.159.112:30043`
 - GPU 实例：`serverId：7f26d6d2f7a94b93b02fd48b1e4c9a65`
 - GPU 规格：`1x H100 / 80GB VRAM`
-- GPU SSH：`root@182.242.159.118:31087`
+- GPU SSH：`root@182.242.159.118:30817`
 - 路由结果：`domain=CS_AI + BIOINFO`，`experiment_type=HYBRID`
 - 激活插件：`zero-code-reproduction`, `zero-code-repro-csai`, `zero-code-repro-biodefense`
 - 远程目录：`/workspace/user-data/codelab/geneclr-zero-code/`
@@ -153,6 +153,6 @@ HITL 使用现有 `HumanInputPanel` 的视觉体验。演示页传入的 `pendin
 - `/paper-only` 输入论文地址后进入演示页。
 - 页面看起来像一次真实 Agent 对话，而不是孤立组件展示。
 - HITL 确认卡可点击，点击后看板状态发生变化。
-- 演示数据包含真实形态的 CPU/GPU `serverId`、`root@ip:port` SSH、路由插件和产出路径。
+- 演示数据包含真实形态的 CPU/GPU `serverId`、`root@ip:port` SSH、路由插件和产出路径，SSH 端口号取 `3000-31000` 范围内的随机感数值。
 - 无任何真实 Lab4AI API 或 conversation 创建请求。
 - `npm run test:run` 和 `npm run build` 通过。
