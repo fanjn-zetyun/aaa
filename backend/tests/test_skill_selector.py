@@ -37,6 +37,20 @@ def _skills() -> dict[str, SkillDefinition]:
             when_to_use="Use for paper-only analysis.",
             allowed_tools=["analyze_paper"],
         ),
+        "lab4ai-auto-research": SkillDefinition(
+            name="lab4ai-auto-research",
+            description="Automated training experiments",
+            triggers=["自动化实验", "自动调参"],
+            when_to_use="Use for automated experiment pipelines.",
+            workflow_context="WORKFLOW_KIND: autoresearch_pipeline\nname: autoresearch_pipeline",
+        ),
+        "zero-code-reproduction": SkillDefinition(
+            name="zero-code-reproduction",
+            description="Paper-only zero-code reproduction",
+            triggers=["论文复现", "zero-code reproduction"],
+            when_to_use="Use for paper-only reproduction without a GitHub repository.",
+            workflow_context="WORKFLOW_KIND: zero_code_reproduction_pipeline\nname: zero_code_reproduction_pipeline",
+        ),
     }
 
 
@@ -102,6 +116,52 @@ async def test_unconfigured_model_uses_reproduce_fallback(monkeypatch):
         skills=_skills(),
         metadata={"task_type": "reproduce"},
         latest_user="Please reproduce this project",
+    )
+
+    assert result.skill_name == "lab4ai-auto-reproduct"
+    assert result.source == "fallback"
+    assert result.fallback_choice == "lab4ai-auto-reproduct"
+    assert result.error == "llm_not_configured"
+
+
+async def test_paper_only_reproduce_uses_zero_code_fallback(monkeypatch):
+    async def fake_tool_use(config, *, system, messages, tools):
+        raise AssertionError("model should not be called when config is incomplete")
+
+    monkeypatch.setattr("app.services.skill_selector.call_anthropic_compatible_tool_use", fake_tool_use)
+
+    result = await SkillSelector().select(
+        config=_config(api_key=None),
+        skills=_skills(),
+        metadata={
+            "task_type": "reproduce",
+            "paper_url": "https://arxiv.org/pdf/2502.14397",
+            "github_url": None,
+        },
+        latest_user="复现这篇论文，但没有代码仓库。",
+    )
+
+    assert result.skill_name == "zero-code-reproduction"
+    assert result.source == "fallback"
+    assert result.fallback_choice == "zero-code-reproduction"
+    assert result.error == "llm_not_configured"
+
+
+async def test_github_reproduce_still_uses_auto_reproduct_fallback(monkeypatch):
+    async def fake_tool_use(config, *, system, messages, tools):
+        raise AssertionError("model should not be called when config is incomplete")
+
+    monkeypatch.setattr("app.services.skill_selector.call_anthropic_compatible_tool_use", fake_tool_use)
+
+    result = await SkillSelector().select(
+        config=_config(api_key=None),
+        skills=_skills(),
+        metadata={
+            "task_type": "reproduce",
+            "paper_url": "https://arxiv.org/pdf/2502.14397",
+            "github_url": "https://github.com/example/repo",
+        },
+        latest_user="复现这个 GitHub 项目。",
     )
 
     assert result.skill_name == "lab4ai-auto-reproduct"
@@ -215,3 +275,64 @@ async def test_reproduce_fallback_missing_skill_returns_no_selection(monkeypatch
     assert result.error == "llm_not_configured"
     assert result.to_metadata()["selected_skill"] == ""
     assert result.to_metadata()["fallback_choice"] != "general-chat"
+
+
+async def test_experiments_task_uses_auto_research_fallback(monkeypatch):
+    async def fake_tool_use(config, *, system, messages, tools):
+        raise AssertionError("model should not be called when config is incomplete")
+
+    monkeypatch.setattr("app.services.skill_selector.call_anthropic_compatible_tool_use", fake_tool_use)
+
+    result = await SkillSelector().select(
+        config=_config(api_key=None),
+        skills=_skills(),
+        metadata={"task_type": "experiments"},
+        latest_user="自动化实验矩阵，做学习率和 batch size 搜索",
+    )
+
+    assert result.skill_name == "lab4ai-auto-research"
+    assert result.source == "fallback"
+    assert result.fallback_choice == "lab4ai-auto-research"
+    assert result.error == "llm_not_configured"
+
+
+async def test_experiments_task_ignores_model_reproduction_choice(monkeypatch):
+    async def fake_tool_use(config, *, system, messages, tools):
+        raise AssertionError("experiments should use deterministic auto-research selection")
+
+    monkeypatch.setattr("app.services.skill_selector.call_anthropic_compatible_tool_use", fake_tool_use)
+
+    result = await SkillSelector().select(
+        config=_config(),
+        skills=_skills(),
+        metadata={
+            "task_type": "experiments",
+            "github_url": "https://github.com/jingyaogong/minimind",
+        },
+        latest_user="帮我跑下https://github.com/jingyaogong/minimind的自动化训练实验",
+    )
+
+    assert result.skill_name == "lab4ai-auto-research"
+    assert result.source == "fallback"
+    assert result.fallback_choice == "lab4ai-auto-research"
+    assert result.error == "deterministic_task_type"
+
+
+async def test_experiments_model_choice_without_workflow_falls_back(monkeypatch):
+    async def fake_tool_use(config, *, system, messages, tools):
+        raise AssertionError("experiments should use deterministic auto-research selection")
+
+    monkeypatch.setattr("app.services.skill_selector.call_anthropic_compatible_tool_use", fake_tool_use)
+
+    result = await SkillSelector().select(
+        config=_config(),
+        skills=_skills(),
+        metadata={"task_type": "experiments"},
+        latest_user="自动化调参",
+    )
+
+    assert result.skill_name == "lab4ai-auto-research"
+    assert result.source == "fallback"
+    assert result.model_choice is None
+    assert result.fallback_choice == "lab4ai-auto-research"
+    assert result.error == "deterministic_task_type"

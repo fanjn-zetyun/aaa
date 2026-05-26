@@ -304,21 +304,30 @@ async def _run_repro_report(
             metadata={"error_code": "report_generate_failed"},
         )
 
-    report_path = _extract_generated_report_path(str(result_text), repo_name)
-    markdown_path = _workspace_repro_markdown_report_path(runtime, payload, repo_name)
-    if not report_path.exists():
-        fallback_path = _workspace_repro_report_path(runtime, payload, repo_name)
+    generated_report_path = _extract_generated_report_path(str(result_text), repo_name)
+    report_path = _workspace_repro_report_path(runtime, payload, repo_name)
+    generation_source = "lab4ai-repro-report"
+    if generated_report_path.exists():
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            if generated_report_path.resolve() != report_path.resolve():
+                shutil.copyfile(generated_report_path, report_path)
+        except Exception as exc:
+            return SkillRuntimeResult(
+                "generate_repro_report",
+                f"复现报告发布到项目工作区失败：{type(exc).__name__}: {exc}",
+                ok=False,
+                metadata={
+                    "error_code": "report_publish_failed",
+                    "report_path": str(report_path),
+                    "skill_output": str(result_text),
+                },
+            )
+    else:
+        generation_source = "backend_report_fallback"
         try:
             _write_backend_repro_report(
-                fallback_path,
-                repo_name=repo_name,
-                project_profile=project_profile,
-                implementation_steps=implementation_steps,
-                results_comparison=results_comparison,
-                optimization_suggestions=optimization_suggestions,
-            )
-            _write_backend_repro_report_markdown(
-                markdown_path,
+                report_path,
                 repo_name=repo_name,
                 project_profile=project_profile,
                 implementation_steps=implementation_steps,
@@ -332,41 +341,20 @@ async def _run_repro_report(
                 ok=False,
                 metadata={
                     "error_code": "report_artifact_missing",
-                    "report_path": str(report_path),
+                    "report_path": str(generated_report_path),
                     "skill_output": str(result_text),
                     "fallback_error": f"{type(exc).__name__}: {exc}",
                 },
             )
-        return SkillRuntimeResult(
-            "generate_repro_report",
-            f"{result_text}\n已通过后端适配层生成报告 artifact：{fallback_path}",
-            metadata={
-                "repo_name": repo_name,
-                "report_path": str(fallback_path),
-                "markdown_report_path": str(markdown_path),
-                "artifact_paths": [str(fallback_path), str(markdown_path)],
-                "generation_source": "backend_report_fallback",
-                "skill_output": str(result_text),
-                "legacy_report_path": str(report_path),
-            },
-        )
-    _write_backend_repro_report_markdown(
-        markdown_path,
-        repo_name=repo_name,
-        project_profile=project_profile,
-        implementation_steps=implementation_steps,
-        results_comparison=results_comparison,
-        optimization_suggestions=optimization_suggestions,
-    )
     return SkillRuntimeResult(
         "generate_repro_report",
         str(result_text),
         metadata={
             "repo_name": repo_name,
             "report_path": str(report_path),
-            "markdown_report_path": str(markdown_path),
-            "artifact_paths": [str(report_path), str(markdown_path)],
-            "generation_source": "lab4ai-repro-report",
+            "artifact_paths": [str(report_path)],
+            "generation_source": generation_source,
+            "skill_output": str(result_text),
         },
     )
 
@@ -389,14 +377,6 @@ def _workspace_repro_report_path(
     conversation_id = str(payload.get("conversation_id") or "").strip()
     base_dir = runtime.workspace_root / conversation_id / repo_name if conversation_id else runtime.workspace_root / repo_name
     return base_dir / f"{repo_name}_Final_Repro_Report.docx"
-
-
-def _workspace_repro_markdown_report_path(
-    runtime: SkillRuntime,
-    payload: dict[str, Any],
-    repo_name: str,
-) -> Path:
-    return _workspace_repro_report_path(runtime, payload, repo_name).with_suffix(".md")
 
 
 def _write_backend_repro_report(

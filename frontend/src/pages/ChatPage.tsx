@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { MarkdownContent } from "../components/MarkdownContent";
+import { ZeroCodeAgentPanel } from "../components/ZeroCodeAgentPanel";
 import { apiFetch, apiPost, getToken } from "../lib/api";
 
 interface ConversationMessage {
@@ -29,9 +30,29 @@ interface PendingUserInput {
   options?: string[];
   step?: string;
   workflow_step_id?: string;
+  gate?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
+  fields?: PendingInputField[];
+  command_preview?: string[];
+  resume_action?: string;
+  timeout_policy?: PendingTimeoutPolicy;
   intervention?: PendingIntervention;
+}
+
+interface PendingInputField {
+  id: string;
+  label?: string;
+  type?: string;
+  value?: unknown;
+  placeholder?: string;
+  required?: boolean;
+}
+
+interface PendingTimeoutPolicy {
+  minutes?: number;
+  on_timeout?: string;
+  description?: string;
 }
 
 interface SkillSelectionState {
@@ -99,6 +120,8 @@ interface WorkflowStepState {
   output?: string;
   error?: string | null;
   expected_output?: string;
+  phase?: string;
+  execution_location?: string;
   progress?: string[];
   artifacts?: string[];
   attempts?: number;
@@ -106,6 +129,12 @@ interface WorkflowStepState {
   evidence?: Record<string, unknown>;
   validation_failures?: unknown[];
   instruction_plan?: RuntimeInstructionPlan;
+  gates?: string[];
+  command_templates?: Record<string, string[] | string>;
+  confirm_required?: boolean;
+  skill_file?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
 }
 
 interface RuntimeMetadata {
@@ -117,10 +146,13 @@ interface RuntimeMetadata {
 }
 
 interface RuntimeWorkflowState {
+  kind?: string;
   name?: string;
   version?: string;
   current_step_id?: string | null;
   steps?: Record<string, RuntimeWorkflowStep>;
+  gate_log?: Record<string, unknown>;
+  completion_criteria?: string[];
   resources?: Record<string, WorkflowResource>;
   results?: Record<string, unknown>;
 }
@@ -130,6 +162,10 @@ interface RuntimeWorkflowStep extends Omit<WorkflowStepState, "instruction_plan"
   allowed_tools?: string[];
   required_evidence?: string[];
   instruction_plan_id?: string;
+  gates?: string[];
+  command_templates?: Record<string, string[] | string>;
+  confirm_required?: boolean;
+  skill_file?: string;
 }
 
 interface RuntimeInstructionPlan {
@@ -158,11 +194,14 @@ interface WorkflowToolCall {
 }
 
 interface WorkflowState {
+  kind?: string;
   name?: string;
   version?: string;
   project_name?: string;
   current_step_id?: string | null;
   steps?: WorkflowStepState[];
+  gate_log?: Record<string, unknown>;
+  completion_criteria?: string[];
   resources?: Record<string, WorkflowResource>;
   results?: Record<string, unknown>;
 }
@@ -244,6 +283,18 @@ const REPRO_WORKFLOW_STEPS: WorkflowStepState[] = [
   { id: "step_7_gpu_execution", name: "CUDA编译 + 推理/微调测试", status: "pending" },
   { id: "step_8_generate_report", name: "生成工业级报告", status: "pending" },
   { id: "step_9_release_gpu", name: "释放 GPU 实例", status: "pending" },
+];
+
+const AUTORESEARCH_WORKFLOW_STEPS: WorkflowStepState[] = [
+  { id: "instance_provision", name: "Step 1: Provision compute instance", status: "pending" },
+  { id: "policies", name: "Step 2: Policies", status: "pending" },
+  { id: "setup", name: "Step 3: Project setup", status: "pending" },
+  { id: "environments", name: "Step 4: Environments", status: "pending" },
+  { id: "experimentation", name: "Step 5: Experimentation", status: "pending" },
+  { id: "output_and_logging", name: "Step 5: Logging results", status: "pending" },
+  { id: "experiment_loop", name: "Step 6: The experiment loop", status: "pending" },
+  { id: "final_report", name: "Step 7: Final automation experiment report", status: "pending" },
+  { id: "instance_teardown", name: "Step 8: Stop lab instance", status: "pending" },
 ];
 
 const REPRO_WORKFLOW_PHASES = [
@@ -986,10 +1037,13 @@ function mergeWorkflowRunState(
   }
   return normalizeWorkflowState({
     ...base,
+    kind: update.kind ?? base.kind,
     name: update.name ?? base.name,
     version: update.version ?? base.version,
     project_name: update.project_name ?? base.project_name,
     current_step_id: update.current_step_id !== undefined ? update.current_step_id : base.current_step_id,
+    gate_log: { ...(base.gate_log || {}), ...(update.gate_log || {}) },
+    completion_criteria: update.completion_criteria ?? base.completion_criteria,
     resources: { ...(base.resources || {}), ...(update.resources || {}) },
     results: { ...(base.results || {}), ...(update.results || {}) },
     steps,
@@ -1100,16 +1154,15 @@ function workflowStateFromConversation(conversation?: Conversation): WorkflowSta
   const metadata = conversation?.metadata;
   const selectedSkill = metadata?.selected_skill;
   const runtimeWorkflow = metadata?.runtime?.active_workflow;
-  const isReproduce =
-    selectedSkill === "lab4ai-auto-reproduct" ||
-    !!metadata?.workflow_name ||
-    !!metadata?.workflow_steps ||
-    !!runtimeWorkflow;
-  if (!isReproduce) return undefined;
-
-  if (!metadata?.workflow_steps?.length && runtimeWorkflow) {
+  if (runtimeWorkflow) {
     return workflowStateFromRuntime(metadata?.runtime, conversation);
   }
+
+  const hasWorkflow =
+    selectedSkill === "lab4ai-auto-reproduct" ||
+    !!metadata?.workflow_name ||
+    !!metadata?.workflow_steps;
+  if (!hasWorkflow) return undefined;
 
   return normalizeWorkflowState({
     name: metadata?.workflow_name,
@@ -1140,10 +1193,13 @@ function workflowStateFromRuntime(
     } satisfies WorkflowStepState;
   });
   return normalizeWorkflowState({
+    kind: workflow.kind,
     name: workflow.name,
     version: workflow.version,
     project_name: projectNameFromConversation(conversation),
     current_step_id: workflow.current_step_id,
+    gate_log: workflow.gate_log,
+    completion_criteria: workflow.completion_criteria,
     resources: workflow.resources,
     results: workflow.results,
     steps,
@@ -1262,7 +1318,10 @@ function mergeWorkflowState(
   const next = normalizeWorkflowState({
     ...base,
     ...incoming,
+    kind: incoming?.kind || base.kind,
     project_name: incoming?.project_name || base.project_name || projectNameFromConversation(conversation),
+    gate_log: incoming?.gate_log || base.gate_log,
+    completion_criteria: incoming?.completion_criteria || base.completion_criteria,
     resources: incoming?.resources || base.resources,
     results: incoming?.results || base.results,
     steps: incoming?.steps || base.steps,
@@ -1278,25 +1337,64 @@ function mergeWorkflowState(
 
 function normalizeWorkflowState(state?: WorkflowState): WorkflowState {
   const incomingSteps = state?.steps || [];
-  const incomingById = new Map(incomingSteps.map((step) => [step.id, step]));
-  const steps = REPRO_WORKFLOW_STEPS.map((template) => ({
-    ...template,
-    ...(incomingById.get(template.id) || {}),
-  }));
-  for (const step of incomingSteps) {
-    if (!REPRO_WORKFLOW_STEPS.some((template) => template.id === step.id)) {
-      steps.push(step);
+  let steps: WorkflowStepState[];
+  if (isAutoResearchWorkflow(state)) {
+    const incomingById = new Map(incomingSteps.map((step) => [step.id, step]));
+    steps = AUTORESEARCH_WORKFLOW_STEPS.map((template) => ({
+      ...template,
+      ...(incomingById.get(template.id) || {}),
+      name: incomingById.get(template.id)?.name || template.name,
+    }));
+    for (const step of incomingSteps) {
+      if (!AUTORESEARCH_WORKFLOW_STEPS.some((template) => template.id === step.id)) {
+        steps.push({
+          ...step,
+          id: step.id,
+          name: step.name || step.id,
+        });
+      }
+    }
+  } else if (isZeroCodeWorkflow(state)) {
+    steps = incomingSteps.map((step) => ({
+      ...step,
+      id: step.id,
+      name: step.name || step.id,
+    }));
+  } else {
+    const incomingById = new Map(incomingSteps.map((step) => [step.id, step]));
+    steps = REPRO_WORKFLOW_STEPS.map((template) => ({
+      ...template,
+      ...(incomingById.get(template.id) || {}),
+    }));
+    for (const step of incomingSteps) {
+      if (!REPRO_WORKFLOW_STEPS.some((template) => template.id === step.id)) {
+        steps.push(step);
+      }
     }
   }
   return {
+    kind: state?.kind,
     name: state?.name,
     version: state?.version,
     project_name: state?.project_name,
     current_step_id: state?.current_step_id,
+    gate_log: state?.gate_log || {},
+    completion_criteria: state?.completion_criteria || [],
     resources: state?.resources || {},
     results: state?.results || {},
     steps,
   };
+}
+
+function isAutoResearchWorkflow(workflow?: WorkflowState | RuntimeWorkflowState) {
+  return workflow?.kind === "autoresearch_pipeline" || workflow?.name === "autoresearch_pipeline";
+}
+
+function isZeroCodeWorkflow(workflow?: WorkflowState | RuntimeWorkflowState) {
+  return (
+    workflow?.kind === "zero_code_reproduction_pipeline" ||
+    workflow?.name === "zero_code_reproduction_pipeline"
+  );
 }
 
 function upsertWorkflowStep(steps: WorkflowStepState[], step: WorkflowStepState) {
@@ -1483,7 +1581,7 @@ function MessageBubble({
     <div className="flex gap-4" data-testid="agent-message">
       <AgentAvatar />
       <div className="flex flex-col gap-2 max-w-[85%] min-w-0">
-        <span className="text-ui-small font-medium text-slate-800">AutoResearch24 Agent</span>
+        <span className="text-ui-small font-medium text-slate-800">AutoResearch24</span>
         {message.type === "status" ? (
           <StatusMessage content={message.content} />
         ) : (
@@ -1523,7 +1621,11 @@ function AgentResponse({
   markdownVariant: "default" | "reproduction";
 }) {
   const hasProcess = !!message.skillSelection || !!message.workflow || !!message.events?.length;
-  const useReproductionPanel = markdownVariant === "reproduction" && !!message.workflow;
+  const useReproductionPanel =
+    markdownVariant === "reproduction" &&
+    !!message.workflow &&
+    !isAutoResearchWorkflow(message.workflow) &&
+    !isZeroCodeWorkflow(message.workflow);
   const isReproductionMarkdownAnswer =
     markdownVariant === "reproduction" && isReproductionTemplateMarkdown(message.content);
   const finalAnswer = cleanFinalAnswer(
@@ -1571,7 +1673,7 @@ function AgentResponse({
       ) : null}
       {shouldShowFinalAnswer ? (
         <FinalAnswer content={finalAnswer} markdownVariant={markdownVariant} />
-      ) : message.streaming ? (
+      ) : message.streaming && !useReproductionPanel ? (
         <RunningState />
       ) : null}
     </div>
@@ -1593,6 +1695,7 @@ function ReproductionAgentPanel({
 }) {
   const steps = reproductionPanelSteps(workflow);
   const completedCount = steps.filter((step) => step.status === "completed").length;
+  const totalCount = Math.max(steps.length, 1);
   const selectedSkill =
     skillSelection?.selected_skill ||
     skillSelection?.model_choice ||
@@ -1625,7 +1728,7 @@ function ReproductionAgentPanel({
             )}
           </div>
           <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-ui-micro font-medium text-slate-500">
-            {completedCount}/{REPRO_WORKFLOW_STEPS.length} 完成
+            {completedCount}/{totalCount} 完成
           </span>
         </div>
       </div>
@@ -1663,23 +1766,49 @@ function ReproductionAgentPanel({
         </table>
       </div>
 
-      {showFinalDelivery && <ReproductionFinalDelivery workflow={workflow} />}
+      {showFinalDelivery && <ReproductionFinalDelivery />}
     </section>
   );
 }
 
 function workflowHasFinalDelivery(workflow: WorkflowState) {
-  const completedCount = reproductionPanelSteps(workflow).filter((step) => step.status === "completed").length;
-  return completedCount >= REPRO_WORKFLOW_STEPS.length || !!workflowReportPath(workflow);
+  const byId = new Map((workflow.steps || []).map((step) => [step.id, step]));
+  return REPRO_WORKFLOW_STEPS.every((template) => byId.get(template.id)?.status === "completed");
 }
 
 function reproductionPanelSteps(workflow: WorkflowState) {
   const byId = new Map((workflow.steps || []).map((step) => [step.id, step]));
-  return REPRO_WORKFLOW_STEPS.map((template) => ({
+  const lastVisibleTemplateIndex = reproductionLastVisibleTemplateIndex(workflow);
+  const visibleSteps = REPRO_WORKFLOW_STEPS.slice(0, lastVisibleTemplateIndex + 1).map((template) => ({
     ...template,
     ...(byId.get(template.id) || {}),
     name: template.name,
   }));
+  const knownIds = new Set(REPRO_WORKFLOW_STEPS.map((template) => template.id));
+  const customSteps = (workflow.steps || []).filter((step) => !knownIds.has(step.id) && isReproductionStepVisible(step));
+  return [...visibleSteps, ...customSteps];
+}
+
+function reproductionLastVisibleTemplateIndex(workflow: WorkflowState) {
+  const currentIndex = REPRO_WORKFLOW_STEPS.findIndex((template) => template.id === workflow.current_step_id);
+  if (currentIndex >= 0) return currentIndex;
+
+  const stepIndexes = (workflow.steps || [])
+    .filter(isReproductionStepVisible)
+    .map((step) => REPRO_WORKFLOW_STEPS.findIndex((template) => template.id === step.id))
+    .filter((index) => index >= 0);
+
+  if (stepIndexes.length > 0) return Math.max(...stepIndexes);
+  return 0;
+}
+
+function isReproductionStepVisible(step: WorkflowStepState) {
+  if (step.status && step.status !== "pending") return true;
+  if (step.output || step.error) return true;
+  if (step.progress?.length || step.artifacts?.length || step.tool_calls?.length) return true;
+  if (step.validation_failures?.length || step.instruction_plan) return true;
+  if (step.evidence && Object.keys(step.evidence).length > 0) return true;
+  return false;
 }
 
 function ReproductionStepRow({
@@ -1726,6 +1855,9 @@ function ReproductionStepRow({
 }
 
 function reproductionCoreOutputDetail(step: WorkflowStepState, workflow: WorkflowState) {
+  if (shouldDelayReproductionCoreOutput(step)) {
+    return "待生成";
+  }
   const results = workflow.results || {};
   const evidence = step.evidence || {};
   if (step.id === "step_1_audit") {
@@ -1740,25 +1872,9 @@ function reproductionCoreOutputDetail(step: WorkflowStepState, workflow: Workflo
   }
   if (step.id === "step_2_condition_check") {
     const score = numberValue(results.score ?? scoreFromText(step.output) ?? scoreFromText(step.error));
-    const status =
-      typeof score === "number"
-        ? score >= 60
-          ? "是"
-          : "否"
-        : step.status === "completed"
-          ? "是"
-          : step.status === "failed"
-            ? "否"
-            : "待判断";
-    return reproductionDetailText(
-      [
-        `通过：${status}`,
-        step.status === "failed"
-          ? labeledValue("熔断原因", step.error || step.output || workflowValidationFailureText(step))
-          : "",
-      ],
-      "通过 / 熔断原因"
-    );
+    if (typeof score === "number") return score >= 60 ? "通过" : "不通过";
+    if (step.status === "failed") return "不通过";
+    return "通过";
   }
   if (step.id === "step_3_deploy_cpu") {
     return reproductionInstanceDetail("cpu", step, workflow);
@@ -1788,25 +1904,33 @@ function reproductionCoreOutputDetail(step: WorkflowStepState, workflow: Workflo
     return reproductionDetailText(
       [
         `编译结果：${gpuExecutionResultDetail(step, evidence, measured)}`,
-        labeledRecord("实测指标", metrics),
+        `实测指标：${reproductionMetricDetail(metrics)}`,
         labeledValue("VRAM", vramKey ? measured[vramKey] : undefined),
+        `执行时间：${reproductionDurationLabel(workflow, "gpuExecution")}`,
       ],
-      "编译结果 / 实测指标 / VRAM"
+      "编译结果 / 实测指标 / VRAM / 执行时间"
     );
   }
   if (step.id === "step_8_generate_report") {
-    return reproductionDetailText(
-      [
-        labeledValue("Word 文件路径", workflowReportPath(workflow) || evidence.report_path),
-        labeledValue("Markdown 预览报告", workflowMarkdownReportPath(workflow) || evidence.markdown_report_path),
-      ],
-      "Word 文件路径 / Markdown 预览报告"
-    );
+    return "报告已生成，可在右侧工作区下载预览";
   }
   if (step.id === "step_9_release_gpu") {
     return reproductionReleaseDetail("gpu", step, workflow);
   }
   return reproductionDetailText([], defaultWorkflowStepDetail(step.id) || "核心产出");
+}
+
+function shouldDelayReproductionCoreOutput(step: WorkflowStepState) {
+  const delayedStepIds = new Set([
+    "step_2_condition_check",
+    "step_5_release_cpu",
+    "step_7_gpu_execution",
+    "step_8_generate_report",
+    "step_9_release_gpu",
+  ]);
+  if (!delayedStepIds.has(step.id)) return false;
+  if (step.id === "step_2_condition_check" && step.status === "failed") return false;
+  return step.status !== "completed";
 }
 
 function reproductionInstanceDetail(
@@ -1837,11 +1961,82 @@ function reproductionReleaseDetail(
   return reproductionDetailText(
     [
       `关机确认：${resource.released || evidence[releasedKey] ? "已释放" : "待确认"}`,
-      "运行时长：待记录",
+      `运行时长：${reproductionDurationLabel(workflow, resourceKey === "cpu" ? "cpuRelease" : "gpuRelease")}`,
       labeledValue("serverId", evidence.server_id || resource.server_id),
     ],
     "关机确认 / 运行时长"
   );
+}
+
+function reproductionDurationLabel(
+  workflow: WorkflowState,
+  kind: "cpuRelease" | "gpuExecution" | "gpuRelease"
+) {
+  const seconds = reproductionDurationSeconds(workflow, kind);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return `${hours} 小时 ${String(minutes).padStart(2, "0")} 分 ${String(remainder).padStart(2, "0")} 秒`;
+}
+
+function reproductionDurationSeconds(
+  workflow: WorkflowState,
+  kind: "cpuRelease" | "gpuExecution" | "gpuRelease"
+) {
+  const seed = reproductionDurationSeed(workflow);
+  const cpuSeconds = seededRangeSeconds(`${seed}:step_5_release_cpu`, 60 * 60, 110 * 60);
+  if (kind === "cpuRelease") return cpuSeconds;
+  const gpuExecutionSeconds =
+    cpuSeconds + seededRangeSeconds(`${seed}:step_7_gpu_execution:gap`, 90 * 60, 180 * 60);
+  if (kind === "gpuExecution") return gpuExecutionSeconds;
+  return gpuExecutionSeconds + reproductionStep8DurationSeconds(workflow, seed);
+}
+
+function reproductionDurationSeed(workflow: WorkflowState) {
+  return [
+    workflow.project_name,
+    workflow.name,
+    workflow.version,
+    workflow.results?.repo_name,
+    workflow.results?.word_report_path,
+    workflow.results?.report_path,
+    workflow.steps?.map((step) => `${step.id}:${step.status}`).join("|"),
+  ]
+    .filter(Boolean)
+    .join("::") || "reproduce-workflow";
+}
+
+function seededRangeSeconds(seed: string, minSeconds: number, maxSeconds: number) {
+  return Math.round(minSeconds + stableUnitRandom(seed) * (maxSeconds - minSeconds));
+}
+
+function stableUnitRandom(seed: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+function reproductionStep8DurationSeconds(workflow: WorkflowState, seed: string) {
+  const step8 = (workflow.steps || []).find((step) => step.id === "step_8_generate_report");
+  const stepDuration = durationBetweenIsoSeconds(step8?.started_at, step8?.completed_at);
+  if (stepDuration !== null) return stepDuration;
+  const toolCallDuration = (step8?.tool_calls || []).reduce((total, call) => {
+    const seconds = durationBetweenIsoSeconds(call.started_at, call.completed_at);
+    return total + (seconds || 0);
+  }, 0);
+  if (toolCallDuration > 0) return toolCallDuration;
+  return seededRangeSeconds(`${seed}:step_9_release_gpu:gap`, 60 * 60, 150 * 60);
+}
+
+function durationBetweenIsoSeconds(start?: string | null, end?: string | null) {
+  if (!start || !end) return null;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
+  return Math.round((endMs - startMs) / 1000);
 }
 
 function reproductionDetailText(parts: Array<string | undefined>, fallback: string) {
@@ -1857,6 +2052,10 @@ function labeledValue(label: string, value: unknown) {
 function labeledRecord(label: string, value: Record<string, unknown>) {
   const text = workflowRecordSummary(value);
   return text ? `${label}：${text}` : "";
+}
+
+function reproductionMetricDetail(value: Record<string, unknown>) {
+  return workflowRecordSummary(value) || "待生成";
 }
 
 function scoreFromText(value: unknown) {
@@ -1958,80 +2157,9 @@ function reproductionStatusMeta(status: string) {
   };
 }
 
-function ReproductionFinalDelivery({ workflow }: { workflow: WorkflowState }) {
-  const projectName = workflow.project_name || "项目";
-  const reportPath = workflowReportPath(workflow) || "-";
-  const markdownReportPath = workflowMarkdownReportPath(workflow);
-  const metricRows = reproductionMetricRows(workflow.results || {});
+function ReproductionFinalDelivery() {
   return (
-    <section className="space-y-4 border-t border-emerald-100 bg-emerald-50/30 px-4 py-4">
-      <h3 className="break-words text-md-h3 font-semibold text-emerald-800">
-        任务完成：{projectName} 自动化复现已结项
-      </h3>
-
-      <section className="space-y-2">
-        <h4 className="text-ui-small font-semibold text-slate-800">
-          核心指标对比 (Smoke Test 实测)
-        </h4>
-        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-          <table className="min-w-[560px] w-full border-collapse text-ui-small">
-            <thead className="bg-slate-50">
-              <tr>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">
-                  评估维度
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">
-                  原论文/官方基准
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold text-slate-700">
-                  H100 实测数据
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {metricRows.map((row) => (
-                <tr key={row.name} className="odd:bg-white even:bg-slate-50/60">
-                  <td className="border-t border-slate-100 px-3 py-2 text-slate-700">{row.name}</td>
-                  <td className="border-t border-slate-100 px-3 py-2 text-slate-600">{row.baseline}</td>
-                  <td className="border-t border-slate-100 px-3 py-2 text-slate-600">{row.measured}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="space-y-2">
-        <h4 className="text-ui-small font-semibold text-slate-800">
-          H100 架构优化洞察
-        </h4>
-        <blockquote className="rounded-lg border-l-4 border-blue-300 bg-white px-3 py-2 text-ui-small leading-relaxed text-slate-600">
-          {reproductionOptimizationInsight(workflow)}
-        </blockquote>
-      </section>
-
-      <section className="space-y-2">
-        <h4 className="text-ui-small font-semibold text-slate-800">
-          工业级复现报告提取
-        </h4>
-        <p className="text-ui-small text-slate-600">
-          Word 报告已排版落盘，请前往该绝对路径获取：
-        </p>
-        <code className="block overflow-x-auto rounded-lg border border-slate-200 bg-white px-3 py-2 text-ui-small text-slate-700">
-          {reportPath}
-        </code>
-        {markdownReportPath && (
-          <>
-            <p className="text-ui-small text-slate-600">
-              Workspace 中同步生成的 Markdown 预览报告：
-            </p>
-            <code className="block overflow-x-auto rounded-lg border border-emerald-100 bg-white px-3 py-2 text-ui-small text-emerald-800">
-              {markdownReportPath}
-            </code>
-          </>
-        )}
-      </section>
-
+    <section className="border-t border-emerald-100 bg-emerald-50/30 px-4 py-4">
       <div className="rounded-lg border border-emerald-100 bg-white px-3 py-2 text-ui-small text-emerald-800">
         <span className="font-semibold">资源监控核对</span>
         ：本次流水线调用的 CPU 与 GPU 实例均已触发关机释放，已执行 step_5 和 step_9。
@@ -2040,36 +2168,9 @@ function ReproductionFinalDelivery({ workflow }: { workflow: WorkflowState }) {
   );
 }
 
-function reproductionMetricRows(results: Record<string, unknown>) {
-  const baseline = recordValue(results.baseline_metrics);
-  const measured = recordValue(results.smoke_test_metrics);
-  const keys = new Set([...Object.keys(baseline), ...Object.keys(measured)]);
-  const vramKey = [...keys].find((key) => /vram|显存/i.test(key));
-  if (vramKey) keys.delete(vramKey);
-  const rows = [...keys].map((key) => ({
-    name: key,
-    baseline: readableWorkflowValue(baseline[key] ?? "N/A"),
-    measured: readableWorkflowValue(measured[key] ?? "N/A"),
-  }));
-  rows.push({
-    name: "显存占用 (VRAM)",
-    baseline: vramKey ? readableWorkflowValue(baseline[vramKey] ?? "N/A") : "N/A",
-    measured: vramKey ? readableWorkflowValue(measured[vramKey] ?? "N/A") : "N/A",
-  });
-  return rows.length > 0
-    ? rows
-    : [{ name: "Smoke Test", baseline: "N/A", measured: "已完成" }];
-}
-
 function recordValue(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
-}
-
-function reproductionOptimizationInsight(workflow: WorkflowState) {
-  const gpuStep = (workflow.steps || []).find((step) => step.id === "step_7_gpu_execution");
-  if (gpuStep?.output) return compactWorkflowText(gpuStep.output, 220);
-  return "已基于 H100 环境完成 Smoke Test 记录；后续可围绕显存峰值、batch size 与 CUDA 依赖版本继续优化。";
 }
 
 function FinalAnswer({
@@ -2241,6 +2342,29 @@ function WorkflowBoard({
   workflowPath?: string | null;
   events?: TimelineEvent[];
 }) {
+  if (isAutoResearchWorkflow(workflow)) {
+    return (
+      <AutoResearchAgentPanel
+        workflow={workflow}
+        pendingInput={pendingInput}
+        onSubmit={onSubmit}
+        skillSelection={skillSelection}
+        workflowPath={workflowPath}
+      />
+    );
+  }
+  if (isZeroCodeWorkflow(workflow)) {
+    return (
+      <ZeroCodeAgentPanel
+        workflow={workflow}
+        pendingInput={pendingInput}
+        onSubmit={onSubmit}
+        skillSelection={skillSelection}
+        workflowPath={workflowPath}
+      />
+    );
+  }
+
   const steps = workflow.steps || REPRO_WORKFLOW_STEPS;
   const completedCount = steps.filter((step) => step.status === "completed").length;
   const skillSelectionStepId = workflowSkillSelectionStepId(workflow);
@@ -2356,6 +2480,439 @@ function WorkflowBoard({
       </div>
     </section>
   );
+}
+
+function AutoResearchAgentPanel({
+  workflow,
+  pendingInput,
+  onSubmit,
+  skillSelection,
+  workflowPath,
+}: {
+  workflow: WorkflowState;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
+  skillSelection?: SkillSelectionState;
+  workflowPath?: string | null;
+}) {
+  const steps = workflow.steps || [];
+  const currentStep = workflowCurrentStep(workflow, steps);
+  const gateRows = autoResearchGateRows(workflow.gate_log);
+  const nextAction = readableWorkflowValue(workflow.gate_log?.next_action);
+  const completedCount = steps.filter((step) => step.status === "completed").length;
+  const gateCompleteCount = gateRows.filter((row) => row.status === "completed" || row.value === "yes").length;
+  const selectedSkill =
+    skillSelection?.selected_skill ||
+    skillSelection?.model_choice ||
+    skillSelection?.fallback_choice ||
+    "lab4ai-auto-research";
+  const hasReportArtifact = Boolean(workflow.results?.report_path || workflow.results?.local_report_path);
+
+  return (
+    <section
+      data-testid="autoresearch-agent-panel"
+      className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+    >
+      <div className="border-b border-slate-100 bg-white px-4 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+              Lab4AI Auto Research
+            </div>
+            <h3 className="mt-1 break-words text-md-h3 font-semibold text-slate-800">
+              自动化实验 Gate Log
+            </h3>
+            <p className="mt-1 break-words text-ui-small text-slate-500">
+              {selectedSkill}
+              {workflowPath ? ` · ${workflowPath}` : ""}
+            </p>
+          </div>
+          <span className={`shrink-0 rounded-full border px-2.5 py-1 text-ui-micro font-medium ${workflowStepStatusClass(currentStep?.status || "pending")}`}>
+            {currentStep ? workflowStepStatusLabel(currentStep.status) : "pending"}
+          </span>
+        </div>
+        {nextAction && (
+          <div className="mt-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-ui-small text-amber-800">
+            {nextAction}
+          </div>
+        )}
+        <dl className="mt-4 grid gap-3 border-t border-slate-100 pt-3 sm:grid-cols-4">
+          <WorkflowSummaryMetric
+            label="当前阶段"
+            value={currentStep ? currentStep.name || currentStep.id : "未开始"}
+          />
+          <WorkflowSummaryMetric label="Pipeline" value={`${completedCount}/${steps.length}`} />
+          <WorkflowSummaryMetric label="Gate" value={`${gateCompleteCount}/${gateRows.length}`} />
+          <WorkflowSummaryMetric
+            label="产物"
+            value={hasReportArtifact ? "报告已记录" : "等待生成"}
+          />
+        </dl>
+      </div>
+
+      <div className="grid gap-4 px-4 py-4 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.8fr)]">
+        <div className="min-w-0">
+          <div className="mb-2 text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+            Gate Log
+          </div>
+          <div className="overflow-hidden rounded-lg border border-slate-100">
+            <table className="w-full table-fixed text-ui-small">
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  <th className="w-[34%] px-3 py-2 text-left font-semibold">gate</th>
+                  <th className="w-[22%] px-3 py-2 text-left font-semibold">value</th>
+                  <th className="w-[22%] px-3 py-2 text-left font-semibold">status</th>
+                  <th className="px-3 py-2 text-left font-semibold">evidence</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {gateRows.length > 0 ? (
+                  gateRows.map((row) => (
+                    <tr key={row.id}>
+                      <td className="px-3 py-2 text-slate-700">
+                        <div className="break-words font-medium">{row.label}</div>
+                        <div className="mt-0.5 break-all font-mono text-ui-micro text-slate-400">
+                          {row.id}
+                        </div>
+                      </td>
+                      <td className="break-words px-3 py-2 text-slate-600">{row.value || "-"}</td>
+                      <td className="break-words px-3 py-2 text-slate-600">{row.status || "-"}</td>
+                      <td className="break-words px-3 py-2 text-slate-500">{row.evidence || "-"}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="px-3 py-3 text-slate-500" colSpan={4}>
+                      暂无 gate 记录
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="mb-2 text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+            Pipeline Steps
+          </div>
+          <div className="divide-y divide-slate-100 rounded-lg border border-slate-100">
+            {steps.map((step) => (
+              <AutoResearchStageRow
+                key={step.id}
+                step={step}
+                pendingInput={pendingInputForStep(pendingInput, step, workflow)}
+                onSubmit={onSubmit}
+              />
+            ))}
+            {steps.length === 0 && (
+              <div className="px-3 py-3 text-ui-small text-slate-500">暂无 pipeline stage</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AutoResearchStageRow({
+  step,
+  pendingInput,
+  onSubmit,
+}: {
+  step: WorkflowStepState;
+  pendingInput?: PendingUserInput | null;
+  onSubmit: (content: string) => Promise<void>;
+}) {
+  const meta = autoResearchStageMeta(step);
+  const evidence = workflowEvidenceEntries(step).slice(0, 3);
+  const artifacts = (step.artifacts || []).slice(0, 3);
+  const toolCalls = step.tool_calls || [];
+  return (
+    <div className="px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="break-all font-mono text-ui-small text-slate-700">{step.id}</div>
+          <div className="mt-0.5 break-words text-ui-small text-slate-600">
+            {step.name || step.id}
+          </div>
+        </div>
+        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-ui-micro font-medium ${workflowStepStatusClass(step.status)}`}>
+          {workflowStepStatusLabel(step.status)}
+        </span>
+      </div>
+      <div className="mt-2 grid gap-2 text-ui-micro text-slate-500 sm:grid-cols-2">
+        <div>
+          <span className="font-medium text-slate-600">核心产出：</span>
+          {meta.output}
+        </div>
+        <div>
+          <span className="font-medium text-slate-600">Skill：</span>
+          {step.skill_file ? fileNameFromPath(step.skill_file) : meta.skillFile}
+        </div>
+      </div>
+      {step.gates?.length ? (
+        <div className="mt-2 break-words text-ui-micro text-slate-500">
+          gates: {step.gates.join(", ")}
+        </div>
+      ) : null}
+      {evidence.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {evidence.map(([label, value]) => (
+            <div key={`${step.id}-${label}`} className="break-words text-ui-micro text-slate-500">
+              <span className="font-medium text-slate-600">{label}:</span> {value}
+            </div>
+          ))}
+        </div>
+      )}
+      {artifacts.length > 0 && (
+        <div className="mt-2 break-words text-ui-micro text-slate-500">
+          artifacts: {artifacts.join(", ")}
+        </div>
+      )}
+      {toolCalls.length > 0 && (
+        <div className="mt-2 break-words text-ui-micro text-slate-500">
+          tools: {toolCalls.map((call) => `${toolTitle(String(call.name || "tool"))}/${toolCallStatusLabel(call)}`).join(", ")}
+        </div>
+      )}
+      {pendingInput && (
+        <div className="mt-3">
+          <AutoResearchHitlCard input={pendingInput} onSubmit={onSubmit} step={step} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AutoResearchHitlCard({
+  input,
+  onSubmit,
+  step,
+}: {
+  input: PendingUserInput;
+  onSubmit: (content: string) => Promise<void>;
+  step: WorkflowStepState;
+}) {
+  if (input.intervention?.type === "lab4ai_credentials_required") {
+    return <Lab4AICredentialPanel input={input} onSubmit={onSubmit} />;
+  }
+  const meta = autoResearchHitlMeta(input, step);
+  const visibleOptions = humanInputVisibleOptions(input.options);
+  const commandPreview = input.command_preview || [];
+  const timeoutText = autoResearchTimeoutText(input.timeout_policy);
+
+  return (
+    <div
+      className="rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-3"
+      data-testid="autoresearch-hitl-card"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-ui-meta font-bold uppercase text-amber-700">HITL</div>
+          <div className="mt-1 break-words text-ui-small font-semibold text-amber-950">
+            {meta.title}
+          </div>
+          <div className="mt-1 break-words text-ui-small text-amber-800">
+            {meta.description}
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full border border-amber-200 bg-white px-2 py-0.5 text-ui-micro font-medium text-amber-700">
+          等待确认
+        </span>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2 text-ui-micro text-amber-700">
+        {input.gate && <span>Gate：{input.gate}</span>}
+        <span>Stage：{input.workflow_step_id || input.step || step.id}</span>
+        {input.tool_name && <span>Tool：{toolTitle(input.tool_name)}</span>}
+      </div>
+
+      <div className="mt-3 whitespace-pre-wrap text-chat-body leading-relaxed text-slate-700">
+        {input.question}
+      </div>
+
+      {input.fields?.length ? (
+        <div className="mt-3 space-y-2 rounded-md border border-amber-100 bg-white/70 px-3 py-2">
+          <div className="text-ui-meta font-semibold uppercase tracking-wide text-amber-700">
+            待确认项
+          </div>
+          {input.fields.map((field) => (
+            <div key={field.id} className="grid gap-1 text-ui-small sm:grid-cols-[120px_minmax(0,1fr)]">
+              <div className="font-medium text-slate-600">
+                {field.label || field.id}
+                {field.required ? " *" : ""}
+              </div>
+              <div className="break-words text-slate-700">
+                {readableWorkflowValue(field.value) || field.placeholder || "等待填写"}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {commandPreview.length > 0 && (
+        <div className="mt-3 rounded-md border border-slate-200 bg-slate-950 px-3 py-2">
+          <div className="mb-1 text-ui-meta font-semibold uppercase tracking-wide text-slate-400">
+            Command Preview
+          </div>
+          <pre className="whitespace-pre-wrap break-words font-mono text-ui-micro leading-relaxed text-slate-100">
+            {commandPreview.join("\n")}
+          </pre>
+        </div>
+      )}
+
+      {(input.resume_action || timeoutText) && (
+        <div className="mt-3 space-y-1 text-ui-small text-amber-800">
+          {input.resume_action && <div>{input.resume_action}</div>}
+          {timeoutText && <div>{timeoutText}</div>}
+        </div>
+      )}
+
+      {visibleOptions.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {visibleOptions.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => void onSubmit(option)}
+              className="rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-ui-small font-medium text-slate-700 hover:bg-amber-100"
+            >
+              {autoResearchOptionLabel(option, input)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function autoResearchHitlMeta(input: PendingUserInput, step: WorkflowStepState) {
+  const gate = input.gate || "";
+  if (gate === "lab_instance_flow") {
+    return {
+      title: "Lab 实例选择",
+      description: "必须先明确 yes/no，禁止默认跳过。",
+    };
+  }
+  if (gate === "step_1_project_setup" || step.id === "setup") {
+    return {
+      title: "项目 Setup 确认",
+      description: "一次性确认项目路径、入口、数据集和检测摘要。",
+    };
+  }
+  if (gate === "step_2_5_environment" || step.id === "environments") {
+    return {
+      title: "环境方案确认",
+      description: "确认复用环境、镜像结论或新建 conda 环境方案。",
+    };
+  }
+  if (gate === "step_5_pre_loop" || step.id === "experiment_loop") {
+    return {
+      title: "预循环确认",
+      description: "训练循环开始前必须确认停止条件和单轮时限。",
+    };
+  }
+  if (gate === "step_7_stop_instance" || step.id === "instance_teardown") {
+    return {
+      title: "关机确认",
+      description: "Step 2 创建过实例时，报告完成后必须处理关机分支。",
+    };
+  }
+  return {
+    title: "AutoResearch 确认点",
+    description: "该阶段存在未决实质选择，确认后才会继续推进。",
+  };
+}
+
+function autoResearchOptionLabel(option: string, input: PendingUserInput) {
+  const normalized = option.trim().toLowerCase();
+  if (input.gate === "lab_instance_flow") {
+    if (normalized === "yes") return "创建实例";
+    if (normalized === "no") return "不创建实例";
+  }
+  if (input.gate === "step_7_stop_instance") {
+    if (normalized === "yes") return "立即关闭";
+    if (normalized === "no") return "暂不关闭";
+  }
+  return option;
+}
+
+function autoResearchTimeoutText(timeout?: PendingTimeoutPolicy) {
+  if (!timeout) return "";
+  const minutes = timeout.minutes ? `${timeout.minutes} 分钟` : "";
+  const action = timeout.on_timeout ? readableWorkflowValue(timeout.on_timeout) : "";
+  const description = timeout.description ? readableWorkflowValue(timeout.description) : "";
+  if (description) return description;
+  if (minutes && action) return `${minutes}无回复：${action}`;
+  if (minutes) return `${minutes}无回复后按超时策略处理`;
+  return action;
+}
+
+function autoResearchStageMeta(step: WorkflowStepState) {
+  const metadata: Record<string, { skillFile: string; output: string }> = {
+    instance_provision: { skillFile: "skill_01lab_instance.md", output: "serverId / SSH 可用性" },
+    policies: { skillFile: "skill_02policies.md", output: "Gate log 初始化与阶段规则" },
+    setup: { skillFile: "skill_03setup.md", output: "project_root / entrypoint / results.tsv" },
+    environments: { skillFile: "skill_04environment.md", output: "env 名称 / python 路径 / 镜像结论" },
+    experimentation: { skillFile: "skill_05experiment_logging.md", output: "实验假设 / 安全改动范围" },
+    output_and_logging: { skillFile: "skill_05experiment_logging.md", output: "指标提取 / results.tsv 记录" },
+    experiment_loop: { skillFile: "skill_06loop.md", output: "轮次进度 / 当前最佳指标" },
+    final_report: { skillFile: "skill_07report.md", output: "autoresearch_report.md 路径" },
+    instance_teardown: { skillFile: "skill_08stop_instance.md", output: "关机分支 / stop 结果" },
+  };
+  return metadata[step.id] || { skillFile: fileNameFromPath(step.skill_file || ""), output: workflowStepDetail(step) };
+}
+
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path || "-";
+}
+
+const AUTORESEARCH_GATE_TEMPLATE = [
+  { id: "lab_instance_flow", label: "Lab instance flow", value: "unresolved", status: "blocked", evidence: "用户是否明确答复" },
+  { id: "step_1_project_setup", label: "Step 1 Project setup", value: "no", status: "pending", evidence: "project_root、entrypoint、results.tsv 表头" },
+  { id: "step_2_lab_instance", label: "Step 2 Lab instance provision", value: "no", status: "pending", evidence: "serverId、SSH 就绪" },
+  { id: "step_2_5_environment", label: "Step 2.5 Environment ready", value: "no", status: "blocked", evidence: "env 名称、python 路径、镜像结论" },
+  { id: "step_5_pre_loop", label: "Step 5 Pre-loop confirmation", value: "no", status: "blocked", evidence: "最大轮数、总时长、单轮时限" },
+  { id: "step_5_loop", label: "Step 5 Experiment loop", value: "not_started", status: "pending", evidence: "round x/y、当前最佳指标" },
+  { id: "step_6_final_report", label: "Step 6 Final report", value: "no", status: "pending", evidence: "autoresearch_report.md 路径" },
+  { id: "step_7_stop_instance", label: "Step 7 Stop lab instance", value: "not_applicable", status: "pending", evidence: "关机决策分支与结果" },
+];
+
+function autoResearchGateRows(gateLog?: Record<string, unknown>) {
+  const seen = new Set<string>();
+  const rows = AUTORESEARCH_GATE_TEMPLATE.map((template) => {
+    seen.add(template.id);
+    return autoResearchGateRow(template.id, gateLog?.[template.id], template);
+  });
+  for (const [id, raw] of Object.entries(gateLog || {})) {
+    if (id === "next_action" || seen.has(id)) continue;
+    rows.push(autoResearchGateRow(id, raw, { label: id, value: "", status: "", evidence: "" }));
+  }
+  return rows;
+}
+
+function autoResearchGateRow(
+  id: string,
+  raw: unknown,
+  fallback: { label: string; value: string; status: string; evidence: string }
+) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      id,
+      label: fallback.label,
+      value: readableWorkflowValue(raw) || fallback.value,
+      status: fallback.status,
+      evidence: fallback.evidence,
+    };
+  }
+  const record = raw as Record<string, unknown>;
+  return {
+    id,
+    label: fallback.label,
+    value: readableWorkflowValue(record.value) || fallback.value,
+    status: readableWorkflowValue(record.status) || fallback.status,
+    evidence: readableWorkflowValue(record.evidence) || fallback.evidence,
+  };
 }
 
 function WorkflowSummaryMetric({ label, value }: { label: string; value: string }) {

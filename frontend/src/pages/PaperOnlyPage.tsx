@@ -12,6 +12,7 @@ export default function PaperOnlyPage() {
       ]}
       requireGithubUrl={false}
       basePath="/paper-only"
+      demoSubmitPath="/paper-only/demo/zero-code-board"
     />
   );
 }

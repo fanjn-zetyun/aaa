@@ -344,7 +344,7 @@ async def test_repro_report_maps_final_path_to_remote_codelab(
     ]
 
 
-async def test_repro_report_returns_workspace_markdown_report_artifact(
+async def test_repro_report_does_not_return_workspace_markdown_report_artifact(
     monkeypatch,
     tmp_path,
     test_user,
@@ -352,9 +352,7 @@ async def test_repro_report_returns_workspace_markdown_report_artifact(
 ):
     registry = ToolRegistry()
     local_report = tmp_path / "demo_Final_Repro_Report.docx"
-    markdown_report = tmp_path / "demo_Final_Repro_Report.md"
     local_report.write_bytes(b"docx")
-    markdown_report.write_text("# demo 自动化复现报告", encoding="utf-8")
 
     async def fake_skill_invoke(name, payload):
         assert name == "generate_repro_report"
@@ -363,8 +361,7 @@ async def test_repro_report_returns_workspace_markdown_report_artifact(
             f"报告生成成功：`{local_report}`",
             metadata={
                 "report_path": str(local_report),
-                "markdown_report_path": str(markdown_report),
-                "artifact_paths": [str(local_report), str(markdown_report)],
+                "artifact_paths": [str(local_report)],
             },
         )
 
@@ -395,13 +392,12 @@ async def test_repro_report_returns_workspace_markdown_report_artifact(
     )
 
     assert result.ok is True
-    assert result.metadata["markdown_report_path"] == str(markdown_report)
+    assert "markdown_report_path" not in result.metadata
     assert result.metadata["artifact_paths"] == [
         "/workspace/user-data/codelab/demo/demo_Final_Repro_Report.docx",
         str(local_report),
-        str(markdown_report),
     ]
-    assert result.metadata["report_path_mapping"]["markdown_report_path"] == str(markdown_report)
+    assert "markdown_report_path" not in result.metadata["report_path_mapping"]
 
 
 async def test_unadapted_skill_tool_returns_structured_failure():

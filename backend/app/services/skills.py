@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 
 @dataclass(slots=True)
@@ -75,6 +76,10 @@ class SkillLoader:
             workflow_file = base_dir / "project_reproduce.yaml"
             if workflow_file.exists():
                 workflow_context = workflow_file.read_text(encoding="utf-8")
+        elif name == "lab4ai-auto-research":
+            workflow_context = _load_autoresearch_workflow_context(base_dir)
+        elif name == "zero-code-reproduction":
+            workflow_context = _load_zero_code_workflow_context(base_dir)
 
         return SkillDefinition(
             name=name,
@@ -89,6 +94,14 @@ class SkillLoader:
 
 
 def fallback_skill_name(metadata: dict) -> str:
+    if metadata.get("task_type") == "experiments":
+        return "lab4ai-auto-research"
+    if (
+        metadata.get("task_type") == "reproduce"
+        and metadata.get("paper_url")
+        and not metadata.get("github_url")
+    ):
+        return "zero-code-reproduction"
     if metadata.get("task_type") == "reproduce" or metadata.get("github_url"):
         return "lab4ai-auto-reproduct"
     return "general-chat"
@@ -163,3 +176,92 @@ def _as_list(value: object) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _load_autoresearch_workflow_context(base_dir: Path) -> str:
+    pipeline_file = base_dir / "pipeline.yml"
+    if not pipeline_file.exists():
+        return ""
+
+    pipeline_raw = pipeline_file.read_text(encoding="utf-8")
+    parts = [
+        "WORKFLOW_KIND: autoresearch_pipeline",
+        "",
+        "## pipeline.yml",
+        "```yaml",
+        pipeline_raw.strip(),
+        "```",
+    ]
+    for relative_path in _autoresearch_context_files(pipeline_raw):
+        file_path = base_dir / relative_path
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        parts.extend(
+            [
+                "",
+                f"## {relative_path.as_posix()}",
+                file_path.read_text(encoding="utf-8").strip(),
+            ]
+        )
+    return "\n".join(parts).strip()
+
+
+def _autoresearch_context_files(pipeline_raw: str) -> list[Path]:
+    paths: list[Path] = []
+    for pattern in (
+        r"(?m)^\s*policies_skill\s*:\s*['\"]?([^'\"\n#]+)",
+        r"(?m)^\s*skill_file\s*:\s*['\"]?([^'\"\n#]+)",
+    ):
+        for match in re.finditer(pattern, pipeline_raw):
+            raw_path = match.group(1).strip()
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if path.is_absolute() or ".." in path.parts:
+                continue
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _load_zero_code_workflow_context(base_dir: Path) -> str:
+    skills_dir = base_dir.parent
+    skill_dirs = [
+        base_dir,
+        skills_dir / "zero-code-repro-csai",
+        skills_dir / "zero-code-repro-biodefense",
+    ]
+    parts = [
+        "WORKFLOW_KIND: zero_code_reproduction_pipeline",
+        "",
+        "## zero-code workflow contract",
+        (
+            "Paper-only reproduction must start at Step 0 by creating a remote CPU instance. "
+            "GitHub repository reproduction remains handled by lab4ai-auto-reproduct."
+        ),
+    ]
+    for skill_dir in skill_dirs:
+        if not skill_dir.exists():
+            continue
+        for file_path in _zero_code_context_files(skill_dir):
+            relative = file_path.relative_to(skill_dir)
+            parts.extend(
+                [
+                    "",
+                    f"## {skill_dir.name}/{relative.as_posix()}",
+                    file_path.read_text(encoding="utf-8").strip(),
+                ]
+            )
+    return "\n".join(parts).strip()
+
+
+def _zero_code_context_files(skill_dir: Path) -> list[Path]:
+    candidates = [skill_dir / "SKILL.md"]
+    for folder_name in ("templates", "scripts"):
+        folder = skill_dir / folder_name
+        if folder.exists():
+            candidates.extend(path for path in sorted(folder.rglob("*")) if path.is_file())
+    references = skill_dir / "references"
+    if references.exists():
+        candidates.extend(path for path in sorted(references.rglob("*")) if path.is_file())
+    return [path for path in candidates if path.exists() and path.is_file()]

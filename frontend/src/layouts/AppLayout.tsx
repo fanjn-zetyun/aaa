@@ -22,7 +22,7 @@ const RESIZE_STEP_PERCENT = 1;
 
 export default function AppLayout() {
   const location = useLocation();
-  const isTaskView = /\/(reproduce|search|paper-only|experiments|polish)\/task\/\d+/.test(location.pathname);
+  const isTaskView = /\/(reproduce|search|paper-only|experiments|auto-research|polish)\/task\/\d+/.test(location.pathname);
   const [panelOpen, setPanelOpen] = useState(false);
   const [resizing, setResizing] = useState<ResizeTarget | null>(null);
   const [sidebarPercent, setSidebarPercent] = useState(() =>

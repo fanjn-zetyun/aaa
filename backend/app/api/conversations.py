@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from fastapi.responses import FileResponse
 from starlette.websockets import WebSocketState
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import func, select
@@ -55,7 +56,7 @@ async def create_conversation(
         if part
     )
     display_seed = (payload.original_input or "").strip() or structured_seed
-    task_type = ConversationTaskType(infer_task_type(structured_seed, payload.task_type.value))
+    task_type = _resolve_task_type(payload.task_type, structured_seed)
     title = payload.title or _build_title(task_type, payload.github_url, payload.user_prompt)
     metadata = {
         "task_type": task_type.value,
@@ -268,6 +269,23 @@ async def get_workspace_file_content(
     )
 
 
+@router.get("/{conversation_id}/workspace-files/download")
+async def download_workspace_file(
+    conversation_id: int, path: str, user: CurrentUser, session: DbSession
+) -> FileResponse:
+    await _get_owned_conversation(conversation_id, user.id, session)
+    settings = get_settings()
+    root = settings.workspace_root_path / str(conversation_id)
+    target = _resolve_workspace_file(root, path)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件路径不在工作区内")
+    if not _is_project_directory_file(root, target):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅支持下载项目目录下的文件")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文件不存在")
+    return FileResponse(target, filename=target.name)
+
+
 @router.websocket("/{conversation_id}/stream")
 async def ws_conversation_stream(websocket: WebSocket, conversation_id: int) -> None:
     user = await authenticate_ws(websocket)
@@ -321,6 +339,14 @@ def _build_title(
     if user_prompt:
         return user_prompt[:80]
     return task_type.value
+
+
+def _resolve_task_type(
+    requested_type: ConversationTaskType, structured_seed: str
+) -> ConversationTaskType:
+    if requested_type == ConversationTaskType.EXPERIMENTS:
+        return ConversationTaskType.EXPERIMENTS
+    return ConversationTaskType(infer_task_type(structured_seed, requested_type.value))
 
 
 def _list_workspace_files(root: Path) -> list[WorkspaceFileResponse]:
@@ -405,6 +431,14 @@ def _resolve_workspace_file(root: Path, path: str) -> Path | None:
         return target
     except (OSError, ValueError):
         return None
+
+
+def _is_project_directory_file(root: Path, target: Path) -> bool:
+    try:
+        relative_parts = target.resolve().relative_to(root.resolve()).parts
+    except (OSError, ValueError):
+        return False
+    return len(relative_parts) >= 2
 
 
 def _display_workspace_root(root: Path, project_root: Path) -> str:

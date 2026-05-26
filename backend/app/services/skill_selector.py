@@ -41,6 +41,14 @@ class SkillSelector:
         metadata: dict,
         latest_user: str,
     ) -> SkillSelectionResult:
+        if config.configured and metadata.get("task_type") == "experiments":
+            return self._fallback(
+                skills,
+                metadata,
+                reason="Task type `experiments` maps deterministically to auto research skill.",
+                error="deterministic_task_type",
+            )
+
         if not config.configured:
             return self._fallback(
                 skills,
@@ -217,4 +225,6 @@ def _extract_json_object(text: str) -> dict[str, object] | None:
 
 
 def _requires_workflow(metadata: dict) -> bool:
-    return metadata.get("task_type") == "reproduce" or bool(metadata.get("github_url"))
+    return metadata.get("task_type") in {"experiments", "reproduce"} or bool(
+        metadata.get("github_url")
+    )

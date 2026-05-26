@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import WelcomePage, { parseTaskInput } from "../components/WelcomePage";
+import AutoResearchPage from "../pages/AutoResearchPage";
 
 const mockNavigate = vi.fn();
 vi.mock("react-router-dom", async () => {
@@ -80,6 +81,37 @@ describe("WelcomePage", () => {
     });
   });
 
+  it("uses explicit task type for auto-research entry", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 44 }),
+    });
+    globalThis.fetch = fetchMock;
+
+    renderWelcome({
+      basePath: "/auto-research",
+      taskType: "experiments",
+      requireGithubUrl: true,
+    });
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox"),
+      "帮我跑下https://github.com/jingyaogong/minimind的自动化训练实验"
+    );
+    await user.click(screen.getAllByRole("button")[0]);
+
+    await vi.waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith("/auto-research/task/44");
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      task_type: "experiments",
+      github_url: "https://github.com/jingyaogong/minimind",
+      user_prompt: "帮我跑下的自动化训练实验",
+      original_input: "帮我跑下https://github.com/jingyaogong/minimind的自动化训练实验",
+    });
+  });
+
   it("does not require github url when requireGithubUrl is false", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -97,6 +129,54 @@ describe("WelcomePage", () => {
     await vi.waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith("/reproduce/task/10");
     });
+  });
+
+  it("navigates to demo route without creating a conversation when demoSubmitPath is provided", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+
+    renderWelcome({
+      requireGithubUrl: false,
+      basePath: "/paper-only",
+      demoSubmitPath: "/paper-only/demo/zero-code-board",
+    });
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox"),
+      "https://arxiv.org/abs/2301.12345 复现这篇论文"
+    );
+    await user.click(screen.getAllByRole("button")[0]);
+
+    await vi.waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith(
+        "/paper-only/demo/zero-code-board?paper_url=https%3A%2F%2Farxiv.org%2Fabs%2F2301.12345&prompt=%E5%A4%8D%E7%8E%B0%E8%BF%99%E7%AF%87%E8%AE%BA%E6%96%87&original_input=https%3A%2F%2Farxiv.org%2Fabs%2F2301.12345+%E5%A4%8D%E7%8E%B0%E8%BF%99%E7%AF%87%E8%AE%BA%E6%96%87"
+      );
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("routes the auto-research minimind request into the mock run page", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+
+    render(
+      <MemoryRouter>
+        <AutoResearchPage />
+      </MemoryRouter>
+    );
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox"),
+      "帮我跑下https://github.com/jingyaogong/minimind的自动化训练实验"
+    );
+    await user.click(screen.getAllByRole("button")[0]);
+
+    await vi.waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith(
+        "/auto-research/demo/mock-run?github_url=https%3A%2F%2Fgithub.com%2Fjingyaogong%2Fminimind&prompt=%E5%B8%AE%E6%88%91%E8%B7%91%E4%B8%8B%E7%9A%84%E8%87%AA%E5%8A%A8%E5%8C%96%E8%AE%AD%E7%BB%83%E5%AE%9E%E9%AA%8C&original_input=%E5%B8%AE%E6%88%91%E8%B7%91%E4%B8%8Bhttps%3A%2F%2Fgithub.com%2Fjingyaogong%2Fminimind%E7%9A%84%E8%87%AA%E5%8A%A8%E5%8C%96%E8%AE%AD%E7%BB%83%E5%AE%9E%E9%AA%8C"
+      );
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("extracts URLs without swallowing adjacent Chinese text", () => {

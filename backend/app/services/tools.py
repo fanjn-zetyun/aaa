@@ -1026,7 +1026,6 @@ class ToolRegistry:
         metadata = {**payload, **result.metadata}
         if result.ok and context:
             local_report_path = str(result.metadata.get("report_path") or "")
-            markdown_report_path = str(result.metadata.get("markdown_report_path") or "").strip()
             remote_report_path = str(
                 payload.get("remote_report_path") or _remote_codelab_report_path(repo_name)
             )
@@ -1046,17 +1045,15 @@ class ToolRegistry:
             metadata = {
                 **metadata,
                 "local_report_path": local_report_path,
-                "markdown_report_path": markdown_report_path,
                 "remote_report_path": remote_report_path,
                 "report_path": remote_report_path,
                 "artifact_paths": [
                     path
-                    for path in [remote_report_path, local_report_path, markdown_report_path]
+                    for path in [remote_report_path, local_report_path]
                     if path
                 ],
                 "report_path_mapping": {
                     "skill_output_path": local_report_path,
-                    "markdown_report_path": markdown_report_path,
                     "codelab_output_path": remote_report_path,
                 },
             }

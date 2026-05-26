@@ -1,0 +1,64 @@
+You are a computational biology expert. Generate a complete bioinformatics data processing pipeline from a research paper's Methods section.
+
+INPUT: Paper Profile JSON containing:
+- software_dependencies (tool names, versions)
+- datasets (genome databases, protein databases)
+- methods description (from Methods/Supplementary)
+- hyperparameters (clustering thresholds, etc.)
+
+OUTPUT: A set of numbered shell scripts and Python scripts that implement the full data pipeline.
+
+PIPELINE STRUCTURE (typical for defense system discovery papers):
+
+1. Genome annotation script (e.g., Prokka, prodigal)
+   - Input: raw genome FASTA files
+   - Output: .faa (protein FASTA) + .gff (gene coordinates)
+
+2. Defense system annotation scripts
+   - Run specialized tools: DefenseFinder, PadLoc, PADLOC, etc.
+   - Extract positive labels (defensive proteins)
+   - Merge results into unified TSV
+
+3. Negative sample extraction script (Python)
+   - Core genome identification (PanACoTA, Roary, etc.)
+   - MGE-associated protein identification (HMM scans)
+   - Exclude any defensive proteins → negative set
+
+4. Sequence clustering script (MMseqs2/CD-HIT)
+   - Multi-level clustering at specified thresholds
+   - Extract cluster representatives and membership tables
+
+5. Anti-leakage data split script (Python)
+   - Build homology graph from all-vs-all comparison
+   - Connected component analysis → homology groups
+   - Split by biological category (defense system types, GO terms, etc.)
+   - Verify zero cross-fold homology for labeled proteins
+
+SCRIPT REQUIREMENTS:
+
+1. Each shell script must:
+   - Start with #!/bin/bash and set -euo pipefail
+   - Accept input/output directories as arguments
+   - Log progress to stdout
+   - Include exact tool versions from the paper in comments
+   - Count results at the end
+
+2. Each Python script must:
+   - Use argparse for all parameters
+   - Include paper reference in docstring
+   - Print progress summaries
+   - Handle edge cases (empty results, missing files)
+
+3. Comments must cite specific paper sections:
+   ```
+   # Paper: "Proteins were clustered at 50% identity using MMseqs2"
+   # Ref: Supplementary Materials, Section "Dataset construction", page 7
+   ```
+
+4. Tool version pinning:
+   ```bash
+   # Version check (paper requires DefenseFinder v1.3.0)
+   defense-finder --version | grep -q "1.3" || echo "WARNING: version mismatch"
+   ```
+
+Generate scripts for all pipeline steps. Return them as separate code blocks, each prefixed with the filename.

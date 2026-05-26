@@ -1,0 +1,150 @@
+You are an expert PyTorch engineer. Generate a complete `train.py` training script.
+
+INPUT: You will receive:
+1. The model class name and its constructor parameters
+2. Hyperparameters (learning rate, batch size, epochs, optimizer, scheduler, etc.)
+3. Dataset information (name, splits, preprocessing)
+4. Evaluation metrics
+
+OUTPUT: A complete, runnable train.py with the following structure.
+
+CODE REQUIREMENTS:
+
+1. CONFIG LOADING:
+   ```python
+   import yaml
+   import argparse
+
+   def parse_args():
+       parser = argparse.ArgumentParser()
+       parser.add_argument("--config", type=str, default="configs/default.yaml")
+       parser.add_argument("--resume", type=str, default=None)
+       # Override individual params
+       parser.add_argument("--lr", type=float, default=None)
+       parser.add_argument("--epochs", type=int, default=None)
+       parser.add_argument("--batch_size", type=int, default=None)
+       parser.add_argument("--seed", type=int, default=42)
+       return parser.parse_args()
+   ```
+
+2. REPRODUCIBILITY:
+   ```python
+   def set_seed(seed: int):
+       import random, numpy as np
+       random.seed(seed)
+       np.random.seed(seed)
+       torch.manual_seed(seed)
+       torch.cuda.manual_seed_all(seed)
+       torch.backends.cudnn.deterministic = True
+       torch.backends.cudnn.benchmark = False
+   ```
+
+3. TRAINING LOOP (must include):
+   - Model creation from config
+   - Optimizer + scheduler setup
+   - Train/Val DataLoader creation
+   - Epoch loop with tqdm progress bar
+   - Per-step: forward → loss → backward → optimizer.step()
+   - Gradient clipping (if mentioned in paper)
+   - Validation after each epoch
+   - Best model checkpoint saving
+   - Training log (loss, metrics, lr per epoch)
+
+4. OPTIMIZER MAPPING (from paper):
+   - "Adam" → torch.optim.Adam
+   - "AdamW" → torch.optim.AdamW
+   - "SGD" → torch.optim.SGD(momentum=0.9)
+   - "LAMB" → torch.optim.Adam (note: LAMB needs apex or custom)
+
+5. SCHEDULER MAPPING:
+   - "cosine" → CosineAnnealingLR or CosineAnnealingWarmRestarts
+   - "warmup + cosine" → linear warmup then cosine (custom or transformers.get_scheduler)
+   - "step decay" → StepLR or MultiStepLR
+   - "linear" → LinearLR
+
+6. LOGGING:
+   ```python
+   # Basic print logging (always works)
+   print(f"Epoch {epoch}/{total_epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+
+   # Optional wandb (commented out by default)
+   # import wandb
+   # wandb.log({"train_loss": train_loss, "val_loss": val_loss, "lr": current_lr})
+   ```
+
+7. CHECKPOINTING:
+   ```python
+   def save_checkpoint(model, optimizer, scheduler, epoch, path):
+       torch.save({
+           'epoch': epoch,
+           'model_state_dict': model.state_dict(),
+           'optimizer_state_dict': optimizer.state_dict(),
+           'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+       }, path)
+   ```
+
+8. DEVICE HANDLING:
+   ```python
+   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+   # For multi-GPU (commented out):
+   # if torch.cuda.device_count() > 1:
+   #     model = nn.DataParallel(model)
+   ```
+
+TEMPLATE:
+```python
+"""
+Training script for: {paper_title}
+Auto-generated reproduction scaffold.
+"""
+
+import os
+import sys
+import yaml
+import argparse
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+sys.path.insert(0, os.path.dirname(__file__))
+from model import build_model  # or ModelName
+from data_loader import build_dataloaders
+from evaluate import evaluate
+
+def parse_args(): ...
+def set_seed(seed): ...
+def save_checkpoint(...): ...
+
+def train_one_epoch(model, dataloader, optimizer, scheduler, device, epoch):
+    model.train()
+    total_loss = 0
+    for batch in tqdm(dataloader, desc=f"Train Epoch {epoch}"):
+        ...  # move to device, forward, loss, backward, step
+    return total_loss / len(dataloader)
+
+def main():
+    args = parse_args()
+    config = yaml.safe_load(open(args.config))
+    set_seed(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(config["model"]).to(device)
+    optimizer = ...  # from config
+    scheduler = ...  # from config
+    train_loader, val_loader = build_dataloaders(config["data"])
+
+    best_metric = float("inf")
+    for epoch in range(1, config["training"]["epochs"] + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, device, epoch)
+        val_metrics = evaluate(model, val_loader, device)
+        print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val: {val_metrics}")
+        if val_metrics["loss"] < best_metric:
+            best_metric = val_metrics["loss"]
+            save_checkpoint(model, optimizer, scheduler, epoch, "best_model.pt")
+
+if __name__ == "__main__":
+    main()
+```
+
+Generate the complete train.py now. Return ONLY the Python code, no markdown fences.

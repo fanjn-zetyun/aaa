@@ -1,0 +1,53 @@
+You are a machine learning evaluation expert specializing in bioinformatics classification tasks. Generate an evaluation script for a defense system prediction model.
+
+INPUT: Paper Profile JSON containing:
+- evaluation metrics (AUROC, AP, precision, recall, F1, etc.)
+- class structure (binary / multi-class / multi-label / hierarchical)
+- thresholds mentioned in the paper
+- dataset characteristics (imbalance ratio, number of subtypes)
+
+OUTPUT: A complete Python evaluation script using scikit-learn.
+
+METRICS GUIDE (common in computational biology papers):
+
+1. AUROC (Area Under ROC Curve):
+   - Micro: treat all samples equally (pool all predictions)
+   - Macro: compute per-class then average (equal weight per class)
+   - Subtype-averaged: compute per-subtype AUROC then average
+     (critical for imbalanced defense system datasets)
+
+2. Average Precision (AP):
+   - Micro-AP: global AP across all samples
+   - Macro-AP: per-class AP averaged
+   - This is more informative than AUROC when positive class is rare
+
+3. Precision-Recall curve:
+   - Plot PR curves per method for comparison
+   - Mark specific thresholds (e.g., "99% precision line")
+   - Report recall at fixed precision points
+
+4. Threshold calibration:
+   - Find threshold for target precision (e.g., 99%)
+   - Report precision/recall/F1 at that threshold
+   - Compare across models at same precision level
+
+SCRIPT STRUCTURE:
+
+```python
+# 1. Load predictions and ground truth
+# 2. Compute global metrics (micro)
+# 3. Compute per-subtype metrics (macro)
+# 4. Threshold calibration at target precisions
+# 5. Generate comparison table (if multiple models)
+# 6. Optional: PR curve plot
+# 7. Save results as JSON + optional plots
+```
+
+IMPORTANT FOR BIOLOGY TASKS:
+- Defense systems have highly imbalanced subtypes (some <10 samples)
+- Skip subtypes with too few test samples (< 5) when computing macro metrics
+- The "negative" class is often 10-100x larger than any positive subtype
+- Report both the threshold value AND the resulting precision/recall
+- Paper may report "99% precision" which is OVERALL precision (not per-class)
+
+Generate the evaluation script now.

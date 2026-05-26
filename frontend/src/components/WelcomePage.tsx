@@ -8,9 +8,19 @@ interface WelcomePageProps {
   suggestions: string[];
   requireGithubUrl?: boolean;
   basePath?: string;
+  demoSubmitPath?: string;
+  taskType?: "reproduce" | "search" | "paper_only" | "experiments" | "polish" | "general";
 }
 
-export default function WelcomePage({ title, placeholder, suggestions, requireGithubUrl = true, basePath = "/reproduce" }: WelcomePageProps) {
+export default function WelcomePage({
+  title,
+  placeholder,
+  suggestions,
+  requireGithubUrl = true,
+  basePath = "/reproduce",
+  demoSubmitPath,
+  taskType,
+}: WelcomePageProps) {
   const [input, setInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -31,16 +41,18 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
     }
 
     try {
+      if (demoSubmitPath) {
+        const params = new URLSearchParams();
+        if (githubUrl) params.set("github_url", githubUrl);
+        if (paperUrl) params.set("paper_url", paperUrl);
+        params.set("prompt", userPrompt || input.trim());
+        params.set("original_input", input.trim());
+        navigate(`${demoSubmitPath}?${params.toString()}`);
+        return;
+      }
+
       const inst = await apiPost<{ id: number }>("/api/conversations", {
-        task_type: basePath.includes("search")
-          ? "search"
-          : basePath.includes("paper-only")
-            ? "paper_only"
-            : basePath.includes("experiments")
-              ? "experiments"
-              : basePath.includes("polish")
-                ? "polish"
-                : "reproduce",
+        task_type: taskType || taskTypeFromBasePath(basePath),
         github_url: githubUrl || null,
         paper_url: paperUrl || null,
         user_prompt: userPrompt || null,
@@ -116,6 +128,14 @@ export default function WelcomePage({ title, placeholder, suggestions, requireGi
       </div>
     </div>
   );
+}
+
+function taskTypeFromBasePath(basePath: string) {
+  if (basePath.includes("paper-only")) return "paper_only";
+  if (basePath.includes("experiments")) return "experiments";
+  if (basePath.includes("polish")) return "polish";
+  if (basePath.includes("search")) return "search";
+  return "reproduce";
 }
 
 export function parseTaskInput(input: string) {

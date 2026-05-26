@@ -10,8 +10,10 @@ from app.agent_runtime.events import EventSink, ListEventSink
 from app.agent_runtime.llm import LLMAdapter, ModelRequest
 from app.agent_runtime.messages import MessageStore
 from app.agent_runtime.recovery import RecoveryPolicy
-from app.agent_runtime.state import RuntimeState, save_runtime_state
+from app.agent_runtime.state import RuntimeState, load_runtime_state, save_runtime_state
 from app.agent_runtime.tool_executor import ToolExecutor
+from app.agent_runtime.workflows.autoresearch import apply_autoresearch_user_reply
+from app.agent_runtime.workflows.zero_code_reproduction import apply_zero_code_user_reply
 from app.agent_runtime.workflows.contract import WorkflowContractRuntime
 from app.models import Conversation, ConversationStatus
 from app.services.tools import ToolRegistry, ToolResult
@@ -56,7 +58,35 @@ class AgentRuntime:
         if conversation is None:
             raise RuntimeError(f"Conversation not found: {conversation_id}")
 
-        state = RuntimeState.new(conversation_id=conversation_id, model=model)
+        state = load_runtime_state(conversation.metadata_ or {}, conversation_id=conversation_id)
+        if not state.model:
+            state.model = model
+        if _should_resume_workflow_user_reply(state):
+            latest_user = await _latest_user_message(MessageStore(self.session), conversation_id)
+            resumed = apply_zero_code_user_reply(
+                apply_autoresearch_user_reply(state, latest_user),
+                latest_user,
+            )
+            if resumed is not state:
+                state = resumed
+                conversation.metadata_ = save_runtime_state(conversation.metadata_ or {}, state)
+                conversation.status = ConversationStatus.ACTIVE
+                await self.session.commit()
+                await self.event_sink.publish(
+                    {
+                        "type": "workflow_step_updated",
+                        "run_id": state.run_id,
+                        "workflow_step_id": (state.active_workflow or {}).get("current_step_id"),
+                        "workflow": _workflow_event_payload(state),
+                    }
+                )
+                return RuntimeRunResult(
+                    status=state.status,
+                    final_text="",
+                    metadata=conversation.metadata_,
+                )
+        else:
+            state = RuntimeState.new(conversation_id=conversation_id, model=model)
         conversation.metadata_ = save_runtime_state(conversation.metadata_ or {}, state)
         conversation.status = ConversationStatus.RUNNING
         await self.session.commit()
@@ -424,6 +454,25 @@ def _mark_workflow_recovery_waiting(state: RuntimeState, reason: str) -> Runtime
             "reason": reason,
         },
     )
+
+
+def _should_resume_workflow_user_reply(state: RuntimeState) -> bool:
+    workflow = state.active_workflow or {}
+    pending = state.pending_user_input or {}
+    if state.status != "waiting_for_user":
+        return False
+    return (workflow.get("kind"), pending.get("gate")) in (
+        ("autoresearch_pipeline", "lab_instance_flow"),
+        ("zero_code_reproduction_pipeline", "zero_code_step_0_cpu_instance"),
+    )
+
+
+async def _latest_user_message(store: MessageStore, conversation_id: int) -> str:
+    messages = await store.list_messages(conversation_id)
+    for message in reversed(messages):
+        if message.role.value == "user":
+            return message.content
+    return ""
 
 
 def _raw_assistant_content(raw: dict[str, Any]) -> list[dict[str, Any]] | None:

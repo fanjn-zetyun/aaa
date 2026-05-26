@@ -5,6 +5,14 @@ from typing import Any
 from app.agent_runtime.instruction_evaluator import evaluate_instruction_plan
 from app.agent_runtime.instructions import compile_step_instruction
 from app.agent_runtime.state import RuntimeState
+from app.agent_runtime.workflows.autoresearch import (
+    activate_autoresearch_workflow,
+    is_autoresearch_workflow,
+)
+from app.agent_runtime.workflows.zero_code_reproduction import (
+    activate_zero_code_workflow,
+    is_zero_code_workflow,
+)
 from app.agent_runtime.workflows.postconditions import evaluate_step_postconditions
 from app.agent_runtime.workflows.tool_mapping import normalize_allowed_tools, normalize_tool_name
 from app.services.workflow import STEP_ALLOWED_TOOLS, STEP_COMPLETION_CONTRACTS, parse_workflow
@@ -13,6 +21,11 @@ from app.services.tools import ToolResult
 
 class WorkflowContractRuntime:
     def activate(self, raw_workflow: str, *, state: RuntimeState) -> RuntimeState:
+        if is_autoresearch_workflow(raw_workflow):
+            return activate_autoresearch_workflow(raw_workflow, state=state)
+        if is_zero_code_workflow(raw_workflow):
+            return activate_zero_code_workflow(raw_workflow, state=state)
+
         workflow = parse_workflow(raw_workflow)
         steps: dict[str, dict[str, Any]] = {}
         instruction_plans: dict[str, dict[str, Any]] = {}

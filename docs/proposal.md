@@ -209,6 +209,18 @@ User message
 - 任何生产态 Tool 不允许返回伪造成功。功能尚未实现、依赖缺失、网络不可达或远程命令失败时，必须返回 `ok=false`、结构化 `error_code` 和可恢复建议，由 WorkflowRunner 决定重试、HITL 或失败收敛。
 - 发生失败、中断或用户停止时，仍必须进入 `stopping -> cleanup -> stopped` 语义，资源释放逻辑优先于模型继续规划。
 
+### Zero-Code Paper-Only Reproduction
+
+纯论文无代码复现任务采用 `zero-code-reproduction` 作为主 skill，适用条件是 `task_type=reproduce` 且提供 `paper_url`、未提供 `github_url`。GitHub 项目复现仍走 `lab4ai-auto-reproduct`，避免两类复现工作流互相覆盖。
+
+`zero-code-reproduction` 的运行时标记为 `WORKFLOW_KIND: zero_code_reproduction_pipeline`。后端只负责加载并执行 skill 契约，不修改 `skills/` 目录内容。运行上下文必须包含主 skill 以及当前已接入的垂直插件：
+
+- `zero-code-reproduction`：12 步通用流水线、远程 CPU/GPU 生命周期、Paper Profile、交付物和页面看板规范。
+- `zero-code-repro-csai`：CS/AI 论文的 PyTorch 脚手架生成契约。
+- `zero-code-repro-biodefense`：计算生物/HYBRID 论文的数据管道、模型、训练和评估契约。
+
+运行态由 AgentRuntime adapter 激活，初始必须停在 Step 0「远程实例初始化」的人机确认，确认后才允许调用 `lab4ai_create_instance`。后续 step 的工具权限按阶段收敛，页面展示独立的“零代码复现流水线”看板，不复用 GitHub 复现实验工作台。
+
 Agent 自主排错闭环是 Agent Loop 的一等能力，不是外部脚本或固定 if/else 补丁。其目标是让模型看到真实工具错误、诊断根因、调用受控工具修复、再通过 workflow 验收继续执行。
 
 ```text
@@ -348,7 +360,7 @@ allowed_tools:
 3. 读取 `SKILL.md` 正文，并由后端固定加载同目录的 `project_reproduce.yaml` 等 workflow 文件；workflow 是否存在由 `SkillLoader` registry 中的 `SkillDefinition` 记录。
 4. 把只含 `name / description / when_to_use / triggers / allowed_tools / has_workflow` 的 skill 摘要注入模型选择上下文；正文、workflow 原文和其他实现细节不进入选择摘要。
 5. 本轮改造完成后，目标 skill 选择链路采用模型优先、规则兜底：模型只能基于用户输入、前端 intent hint、`triggers` / `when_to_use` 返回候选 `skill_name`；后端只接受 `SkillLoader` registry 中实际存在的 `skill_name`，并由后端生成选择原因与 metadata。
-6. 当目标链路中的模型不可用、返回未知 skill、候选 skill 缺少必需 workflow，或不满足当前任务最低执行条件时，后端使用显式规则 fallback 并记录 fallback 原因：带 GitHub URL 或 `task_type=reproduce` 的任务回退到 `lab4ai-auto-reproduct`，其他任务回退到 `general-chat`；如果 fallback skill 不在 registry 中，则不强行构造虚假 skill。
+6. 当目标链路中的模型不可用、返回未知 skill、候选 skill 缺少必需 workflow，或不满足当前任务最低执行条件时，后端使用显式规则 fallback 并记录 fallback 原因：`task_type=experiments` 的任务确定性选择 `lab4ai-auto-research`；带 GitHub URL 或 `task_type=reproduce` 的任务回退到 `lab4ai-auto-reproduct`，其他任务回退到 `general-chat`；如果 fallback skill 不在 registry 中，则不强行构造虚假 skill。
 7. 将选中 skill 的正文、workflow、工具声明和 `allowed_tools` 交给 Skill Workflow Runtime，生成可追踪的 step 状态机和当前 step 的 Tool 白名单。
 8. Agent Loop 在当前 step 内调用模型时，只允许模型补充决策、组装参数或请求 allowlist 内 Tool；最终 Tool 调用仍需由 runtime 渲染、适配、校验后执行。
 
@@ -394,7 +406,7 @@ Skill 执行链路：
 | `lab4ai-project-analysis` | `tools.yaml` | `analyze_repo` / `repo_audit` | 调用 `scripts/main.py:audit_repo`，真实 clone 或读取仓库，输出依赖、启动命令、风险、评分和 audit artifact |
 | `lab4ai-paper-analysis` | `tools.yaml` | `analyze_paper` / `paper_analyze` | 补齐 `scripts/analyze_paper.py:analyze_paper_tool`，复用现有解析逻辑，返回方法、数据集、指标、超参、baseline 和 markdown artifact |
 | `lab4ai-project-prep` | `manifest.yaml` | `remote_project_prep` | 调用 `prep_runner.py:run_remote_prep` 或等价后端服务，通过 `ssh_execute` / SFTP 上传和执行脚本，不直接依赖 `sshpass` |
-| `lab4ai-repro-report` | `manifest.yaml` | `repro_report` | 调用 `report_generator.py:generate_report`，生成真实 `.docx`，并在任务 workspace 同步生成同名 Markdown 预览报告，两个路径都记录为 artifact |
+| `lab4ai-repro-report` | `manifest.yaml` | `repro_report` | 调用 `report_generator.py:generate_report`，只生成一份真实 `.docx` 报告，并记录为 artifact |
 | `lab4ai-image-manage` | `manifest.yaml` | `lab4ai_image_*` | 查询、筛选和确认镜像时返回结构化候选，不让模型猜镜像名称 |
 | `lab4ai-instance-manage` | `manifest.yaml` | `lab4ai_create_instance` / `lab4ai_stop_instance` / `lab4ai_list_instances` | 以当前后端 Lab4AI API Tool 为权威实现，skill 脚本只能作为适配层或测试参考 |
 
@@ -436,7 +448,7 @@ Skill 执行链路：
   -> WorkflowRunner 按 step 状态机推进
   -> ToolRegistry 执行每一步需要的后端 Tool
   -> WebSocket 推送 workflow_step_* / tool_* / ask_user 事件
-  -> 前端以结构化 9 步看板展示执行过程
+  -> 前端以结构化 9 步看板展示执行过程；主对话区只展示已执行到的步骤前缀，执行到第 N 步就显示第 1-N 步，隐藏后续未到达步骤
 ```
 
 状态存储在 `Conversation.metadata` 中，建议结构：
@@ -525,7 +537,7 @@ Step 自主排错与修复循环：
 - `claw-shell`、`ssh-essentials`、包含 SSH wrapper 的 instruction 映射为受控 `ssh_execute`。Runtime 提取远程要执行的命令内容，连接信息由 `CloudInstance` 解析，不由模型或 skill 文本直接提供。
 - `file-system` 映射为受控 workspace 读写能力；不得读取或写入 `skills/`、系统目录或其他用户目录。
 - `lab4ai-project-prep` 映射为 `remote_project_prep` 或等价后端适配器，参数来自渲染上下文和模型组装结果，执行仍通过后端 SSH/SFTP 管线。
-- `lab4ai-repro-report` 映射为 `repro_report`，报告内容来自前序 step 的结构化结果、artifact 和日志。
+- `lab4ai-repro-report` 映射为 `repro_report`，报告内容来自前序 step 的结构化结果、artifact 和日志；Word 与 Markdown 报告产物必须发布到 `runtime/workspaces/<conversation_id>/<repo_name>/` 项目目录下，不兼容旧的 workspace 根目录报告位置。
 
 复现 workflow 的真实执行要求：
 
@@ -533,7 +545,7 @@ Step 自主排错与修复循环：
 - `step_3_deploy_cpu` 和 `step_6_deploy_gpu` 必须把 Lab4AI 返回的 `server_id / ssh_host / ssh_port / ssh_user` 写入 `CloudInstance` 与 `workflow_resources`。`ssh_pass` 等敏感字段只能保存在后端加密存储或受控 secret 字段，不能进入模型上下文和前端事件。
 - `step_4_cpu_env_setup` 必须通过 `remote_project_prep` 或 `ssh_execute` 的结构化输入执行。后端负责渲染 `repo_url / repo_name / workspace / proxy` 等变量；如果命令中仍包含 `{{step_...}}`，必须失败并提示模板未渲染。
 - `step_7_reproduce_on_gpu` 必须基于真实 GPU 实例执行训练、推理或最小 smoke test，并记录远程日志、退出码和结果 artifact。
-- `step_8_generate_report` 必须调用 `repro_report` 生成真实 `.docx` 或同等报告 artifact，报告内容来自前序 step 的结构化结果和日志，不由模型凭空补写；同时必须在本地任务 workspace 输出同名 `.md` 报告副本，并通过 `markdown_report_path` 记录，供右侧工作区 Markdown 预览使用。
+- `step_8_generate_report` 必须调用 `repro_report` 生成真实 `.docx` 报告 artifact，报告内容来自前序 step 的结构化结果和日志，不由模型凭空补写；报告必须放在本地任务 workspace 的项目名称目录下，只生成这一份 `.docx`，不再同步生成同名 Markdown 报告副本。
 - step 是否完成只能依据 `ToolResult.ok`、退出码和 artifact 记录判断，不能依据模型自然语言“看起来完成了”判断。
 
 Workflow step 状态：
@@ -847,9 +859,11 @@ CloudInstance
 
 - 登录 / 注册。
 - WelcomePage：创建科研任务入口。
-- ChatPage：多轮对话、Agent 回复 Markdown 渲染、每条消息的时间与复制按钮、停止按钮、结果回看。Agent 输出必须分层展示：模型思考过程只展示可审计的计划/进度摘要，执行过程展示 workflow/tool 事件。思考过程和执行过程在对话区以可折叠事件卡片展示；workflow 看板独立渲染为 step 级表格区，按 `workflow_step_started / workflow_step_progress / workflow_step_completed / workflow_step_failed / workflow_step_waiting` 实时更新每一行，展示序号、执行步骤、当前状态、最近执行过程、工具调用、成功产出、失败原因或等待用户确认原因。某一步失败时应明确暴露原因；如果失败原因需要 human 确认或补充信息，则该 step 进入 `waiting_for_user`，看板显示“等待确认”，对话区展示 HITL 确认卡，用户确认后从当前 step 继续。最终回答单独渲染为干净答案区，只保留结论、问题和下一步操作，不把工具日志、workflow 表格或中间过程塞进最终回答。对于 `reproduce` 任务，Agent 展示面板必须以前端 workflow metadata 为主数据源，严格按 `skills/lab4ai-auto-reproduct/SKILL.md` 的“页面展示规范”生成：展示 `复现流水线实时看板: [项目名]`、固定 9 个 YAML task 行、`序号 / 执行步骤 (对应 YAML Task) / 当前状态 / 核心产出 / 详情` 四列、`[等待中...] / [执行中] / [完成] / [中止]` 状态文案；`核心产出 / 详情` 列必须按 skill 模板中的 9 个槽位含义填充对应真实信息，例如评分、论文 Baseline、超参数、serverId、SSH、clone 状态、依赖安装结果、实测指标、VRAM、Word 报告路径和释放确认，缺失数据时显示待生成或待记录提示；复现面板必须在 Agent 气泡宽度内自动换行，不在气泡底部产生横向滚动条；复现面板下方不显示 skill 选择证据折叠区，普通 HITL 确认卡不显示“修改方案”按钮；以及结项后的 `任务完成`、核心指标对比、H100 架构优化洞察、Word 报告路径和资源监控核对区。Agent 原始 Markdown 可作为普通回答补充，但不再作为复现面板是否完整展示的前置条件。
+- ChatPage：多轮对话、Agent 回复 Markdown 渲染、每条消息的时间与复制按钮、停止按钮、结果回看。Agent 输出必须分层展示：模型思考过程只展示可审计的计划/进度摘要，执行过程展示 workflow/tool 事件。思考过程和执行过程在对话区以可折叠事件卡片展示；workflow 看板独立渲染为 step 级表格区，按 `workflow_step_started / workflow_step_progress / workflow_step_completed / workflow_step_failed / workflow_step_waiting` 实时更新每一行，展示序号、执行步骤、当前状态、最近执行过程、工具调用、成功产出、失败原因或等待用户确认原因。某一步失败时应明确暴露原因；如果失败原因需要 human 确认或补充信息，则该 step 进入 `waiting_for_user`，看板显示“等待确认”，对话区展示 HITL 确认卡，用户确认后从当前 step 继续。最终回答单独渲染为干净答案区，只保留结论、问题和下一步操作，不把工具日志、workflow 表格或中间过程塞进最终回答。对话气泡中的 Agent 名称显示为 `AutoResearch24`。对于 `reproduce` 任务，Agent 展示面板必须以前端 workflow metadata 为主数据源，严格按 `skills/lab4ai-auto-reproduct/SKILL.md` 的“页面展示规范”生成：展示 `复现流水线实时看板: [项目名]`、固定 9 个 YAML task 行、`序号 / 执行步骤 (对应 YAML Task) / 当前状态 / 核心产出 / 详情` 四列、`[等待中...] / [执行中] / [完成] / [中止]` 状态文案；`核心产出 / 详情` 列必须按 skill 模板中的 9 个槽位含义填充对应真实信息，例如评分、论文 Baseline、超参数、serverId、SSH、clone 状态、依赖安装结果、实测指标、VRAM、报告状态和释放确认，缺失数据时显示待生成；其中第 2、5、7、8、9 步只有在对应 step 完成后才显示完成态核心产出，未完成时统一显示 `待生成`；第 2 步完成或失败后只显示 `通过` 或 `不通过`，第 8 步完成后核心产出显示 `报告已生成，可在右侧工作区下载预览`，第 5 步和第 9 步完成后显示运行时长，第 7 步完成后显示执行时间，时间统一使用 `N 小时 MM 分 SS 秒` 格式；第 9 步运行时长必须在第 7 步执行时间基础上叠加第 8 步真实执行耗时（优先读取 step 起止时间，其次汇总 step8 tool call 起止时间），缺失真实耗时时才使用前端生成的兜底间隔，页面不暴露 mock 或模拟说明；复现面板必须在 Agent 气泡宽度内自动换行，不在气泡底部产生横向滚动条；复现面板下方不显示 skill 选择证据折叠区，普通 HITL 确认卡不显示“修改方案”按钮；所有 9 个 step 全部完成后，仅在看板下方输出 `资源监控核对`，不再展示 `任务完成` 标题、核心指标对比、H100 架构优化洞察或 Word 报告路径结项区。Agent 原始 Markdown 可作为普通回答补充，但不再作为复现面板是否完整展示的前置条件。
+- 对于 `experiments` 任务，前端提供独立 `/auto-research` 入口，页面样式复用 Reproduce 的输入页，但提交时显式保留 `task_type=experiments`，即使输入中包含 GitHub URL 也不能被后端自动改写为 `reproduce`。ChatPage 遇到 `WORKFLOW_KIND: autoresearch_pipeline` 或 `lab4ai-auto-research` 时展示专用流水线看板：看板格式复用纯论文（无代码）demo 的 Pipeline Steps 表格，以 step 行为主展示实例申请、规则加载、项目 setup、环境配置、实验方案、指标记录、实验循环、最终报告和实例释放；不再把 Gate Log 渲染为独立左右分栏表格。Gate 只作为 HITL 上下文使用，嵌入当前 step 行内，以 `pending_user_input.workflow_step_id` / `gate` 定位，展示 `question`、`options`、`fields`、`command_preview`、`resume_action` 和 `timeout_policy`；不同 gate 使用专用卡片文案，例如 Lab 实例选择、项目 Setup 确认、环境方案确认、预循环确认和关机确认，按钮可展示中文动作，但提交给后端的内容保持原始 option 值。看板核心产出必须对应 `skills/lab4ai-auto-research/SKILL.md` 拆分出的 `skill_01lab_instance.md` 到 `skill_08stop_instance.md`，用于直接暴露 serverId/SSH、project_root/entrypoint/results.tsv、环境路径、实验轮次、`autoresearch_report.md` 和关机结果。
+- 在真实 Lab4AI 自动化实验完全联调前，`/auto-research` 可进入 `/auto-research/demo/mock-run` 页面，专门用于 minimind 等 GitHub 自动化训练实验的前端交互验收。该页面内部只使用前端状态机展示完整 Pipeline Steps + HITL 交互，不创建后端 conversation、不调用真实 Lab4AI、不执行训练命令；但面向用户的 UI 文案、状态、命令预览、连接信息和工作区内容不得暴露 `mock`、`模拟`、`演示` 等说明性标记，避免把实现方式展示给用户。页面布局参考纯论文（无代码）demo，左侧保留单条对话和 Pipeline Steps 主看板，右侧保留「权限与环境配置」和工作区文件浏览；默认未登录 Lab4AI 账号，必须先展示账号/密码登录卡，右上角 Lab4AI 凭证块在登录前显示未配置，登录后使用同款展示结构：`Lab4AI 登录凭证`、平台统一账号说明、已配置状态、脱敏账号和安全保存密码提示。登录提交后不得立即跳出完整看板，必须先用约 2 秒流式效果逐条展示凭证脱敏、上下文写入和 workflow 加载过程，再进入实例确认。右上角 SSH 命令必须展示随机 IP 地址和端口，不能使用 `lab4ai-instance` 等占位域名。对话内容显示逻辑必须与纯论文（无代码）demo 保持一致：同一条 Agent 回复先显示读取/判断状态，再展示 Agent Routing，最后在同一回复内展开 Pipeline Steps + HITL，看板后续状态原地更新；Pipeline Steps 的行展示也必须复用纯论文（无代码）demo 的前缀式可见逻辑，只显示已推进到的 step，隐藏尚未到达的后续 step；`running` 状态必须明确显示“执行中”，不得与等待确认或未开始状态共用“等待中”文案。自动推进节奏为每个 step 之间间隔 15 秒，step7 实验循环到 step8 最终报告间隔 60 秒；step5 实验方案和 step7 实验训练必须使用对话式参数配置：Agent 先询问要选择哪个方案或是否自定义参数，参数配置卡片必须展示在对应 Pipeline Steps 看板下方，用户在底部对话框输入后，Agent 回显已收到并把输入写入对应 step 产出，同时以新的 Agent 回复追加新的 Pipeline Steps 看板，从确认后的运行态继续推进；旧看板停留在发起参数确认的 step，不再被后续状态覆盖，且参数配置卡片在用户提交后不再显示，step7 训练参数交互同样采用该方式；step9 实例释放在用户确认关闭后先进入“执行中/关闭中”状态，再直接切换到完成状态并显示最终完成结果和 `instance_stop.json`，页面不展示倒计时或“10 秒后完成”文案。相关产出必须在工作区按 step 顺序逐步出现，例如 `lab_instance.json`、`ssh_connection.txt`、`project_summary.md`、`results.tsv`、`environment.md`、round 日志、`autoresearch_report.md` 和 `instance_stop.json`；未到达或未完成对应 step 时不得提前显示后续文件，未匹配的中间状态默认显示工作区待创建/待生成；工作区内 Markdown 文件既可预览也必须显示下载选项，便于验证页面交互。
 - Sidebar：历史对话、配额展示、任务类型导航。
-- RightPanel：右上角「权限与环境配置」展示平台统一 Lab4AI 登录凭证的已配置状态、脱敏账号，以及当前任务 Lab4AI 实例的用户名、密码和 SSH 连接信息；平台登录密码不在前端返回或展示；流程看板、Tool Events、任务 metadata 不再放在该区域。下方保留工作区文件浏览，Markdown 文件可点击进入只读预览，使用站内 Markdown 渲染组件展示内容，并可返回文件列表；最终报告 Markdown artifact 需要高亮为“最终报告”，预览页提供返回、刷新、文件路径和报告式正文阅读区域。
+- RightPanel：右上角「权限与环境配置」展示平台统一 Lab4AI 登录凭证的已配置状态、脱敏账号，以及当前任务 Lab4AI 实例的用户名、密码和 SSH 连接信息；平台登录密码不在前端返回或展示；流程看板、Tool Events、任务 metadata 不再放在该区域。下方保留工作区文件浏览，Markdown 文件可点击进入只读预览，使用站内 Markdown 渲染组件展示内容，并可返回文件列表；最终报告只生成 `.docx` 并位于项目名称目录下，按目录树原始顺序普通展示，不置顶、不高亮为“最终报告”；项目名称目录下的所有文件行都展示“下载”选项，workspace 根目录文件不展示下载选项。
 - ModelSettings：用户模型配置和连通性测试。
 - Admin 页面：用户管理、云实例总览、Lab4AI 凭证、用量报表。
 
@@ -858,7 +872,7 @@ CloudInstance
 - `reproduce`：项目/论文复现。
 - `search`：论文/资料检索。
 - `paper_only`：仅论文分析。
-- `experiments`：实验设计、消融、调参。
+- `experiments`：实验设计、消融、调参；自动化训练实验入口使用 `/auto-research` 并确定性加载 `lab4ai-auto-research`。
 - `polish`：论文润色和表达优化。
 - `general`：通用科研问答。
 

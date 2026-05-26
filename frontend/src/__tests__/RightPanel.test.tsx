@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import RightPanel from "../components/RightPanel";
 
@@ -73,10 +73,26 @@ describe("RightPanel", () => {
               root: "runtime/workspaces/7",
               files: [
                 {
-                  path: "PhotoDoodle/PhotoDoodle_Final_Repro_Report.md",
-                  name: "PhotoDoodle_Final_Repro_Report.md",
+                  path: "PhotoDoodle",
+                  name: "PhotoDoodle",
+                  kind: "directory",
+                  size: null,
+                  modified_at: "2026-05-20T01:00:00Z",
+                  depth: 0,
+                },
+                {
+                  path: "PhotoDoodle/notes.txt",
+                  name: "notes.txt",
                   kind: "file",
-                  size: 2048,
+                  size: 12,
+                  modified_at: "2026-05-20T01:00:00Z",
+                  depth: 1,
+                },
+                {
+                  path: "PhotoDoodle/PhotoDoodle_Final_Repro_Report.docx",
+                  name: "PhotoDoodle_Final_Repro_Report.docx",
+                  kind: "file",
+                  size: 4096,
                   modified_at: "2026-05-20T01:00:00Z",
                   depth: 1,
                 },
@@ -96,8 +112,25 @@ describe("RightPanel", () => {
                   modified_at: "2026-05-20T00:00:00Z",
                   depth: 1,
                 },
+                {
+                  path: "root-report.txt",
+                  name: "root-report.txt",
+                  kind: "file",
+                  size: 12,
+                  modified_at: "2026-05-20T00:00:00Z",
+                  depth: 0,
+                },
               ],
             }),
+        } as Response);
+      }
+      if (url === "/api/conversations/7/workspace-files/download?path=PhotoDoodle%2Fnotes.txt") {
+        return Promise.resolve({
+          ok: true,
+          blob: () => Promise.resolve(new Blob(["download me"], { type: "text/plain" })),
+          headers: new Headers({
+            "content-disposition": 'attachment; filename="notes.txt"',
+          }),
         } as Response);
       }
       if (url === "/api/conversations/7/workspace-files/content?path=reports%2Fresult.md") {
@@ -112,22 +145,6 @@ describe("RightPanel", () => {
             }),
         } as Response);
       }
-      if (
-        url ===
-        "/api/conversations/7/workspace-files/content?path=PhotoDoodle%2FPhotoDoodle_Final_Repro_Report.md"
-      ) {
-        return Promise.resolve({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              path: "PhotoDoodle/PhotoDoodle_Final_Repro_Report.md",
-              name: "PhotoDoodle_Final_Repro_Report.md",
-              kind: "markdown",
-              content:
-                "# PhotoDoodle 自动化复现报告\n\n## 结果对比\n\n| 指标 | 数值 |\n|---|---|\n| PSNR | 28.4 |\n",
-            }),
-        } as Response);
-      }
       return Promise.reject(new Error(`Unexpected request: ${url}`));
     });
   });
@@ -135,6 +152,28 @@ describe("RightPanel", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     localStorage.clear();
+  });
+
+  it("keeps the right panel fixed while credentials and workspace scroll independently", async () => {
+    renderRightPanel();
+
+    const credentialTitle = await screen.findByText("权限与环境配置");
+    const rightPanel = credentialTitle.closest("aside");
+    expect(rightPanel).toHaveClass("h-full");
+    expect(rightPanel).toHaveClass("overflow-hidden");
+    expect(rightPanel).not.toHaveClass("overflow-y-auto");
+
+    const sections = rightPanel?.querySelectorAll("section");
+    expect(sections).toHaveLength(2);
+    sections?.forEach((section) => {
+      expect(section).toHaveClass("flex-1");
+      expect(section).toHaveClass("basis-0");
+      expect(section).toHaveClass("min-h-0");
+      expect(section).not.toHaveClass("shrink-0");
+    });
+    expect(sections?.[0]).not.toHaveClass("h-[44%]");
+    expect(sections?.[0].querySelector(".overflow-y-auto")).toBeTruthy();
+    expect(sections?.[1].querySelector(".overflow-y-auto")).toBeTruthy();
   });
 
   it("shows masked Lab4AI login credentials above task instances", async () => {
@@ -168,21 +207,61 @@ describe("RightPanel", () => {
     expect(screen.queryByTestId("workspace-markdown-preview")).not.toBeInTheDocument();
   });
 
-  it("highlights and previews the final markdown report from the workspace", async () => {
+  it("renders the docx report in the normal project directory tree without priority styling", async () => {
     renderRightPanel();
 
-    const reportButton = await screen.findByRole("button", {
-      name: "预览最终报告 PhotoDoodle_Final_Repro_Report.md",
+    const rows = await screen.findAllByTestId(/workspace-file-row-/);
+    expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual([
+      "workspace-file-row-PhotoDoodle",
+      "workspace-file-row-PhotoDoodle/notes.txt",
+      "workspace-file-row-PhotoDoodle/PhotoDoodle_Final_Repro_Report.docx",
+      "workspace-file-row-reports/result.md",
+      "workspace-file-row-logs/run.txt",
+      "workspace-file-row-root-report.txt",
+    ]);
+    const reportRow = within(screen.getByTestId("workspace-file-row-PhotoDoodle/PhotoDoodle_Final_Repro_Report.docx"));
+    expect(reportRow.getByText("PhotoDoodle_Final_Repro_Report.docx")).toBeInTheDocument();
+    expect(reportRow.queryByText("最终报告")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /预览最终报告/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("PhotoDoodle_Final_Repro_Report.md")).not.toBeInTheDocument();
+  });
+
+  it("downloads files under the project directory and hides download outside it", async () => {
+    const objectUrl = "blob:download-url";
+    const createObjectURL = vi.fn(() => objectUrl);
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL,
     });
-    expect(within(reportButton).getByText("最终报告")).toBeInTheDocument();
+    const clickedDownloads: string[] = [];
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const element = originalCreateElement(tagName);
+      if (tagName.toLowerCase() === "a") {
+        vi.spyOn(element, "click").mockImplementation(() => {
+          clickedDownloads.push((element as HTMLAnchorElement).download);
+        });
+      }
+      return element;
+    });
 
-    fireEvent.click(reportButton);
+    renderRightPanel();
 
-    const preview = await screen.findByTestId("workspace-markdown-preview");
-    expect(within(preview).getByText("Markdown 预览")).toBeInTheDocument();
-    expect(within(preview).getByText("PhotoDoodle/PhotoDoodle_Final_Repro_Report.md")).toBeInTheDocument();
-    expect(within(preview).getByRole("button", { name: "刷新预览" })).toBeInTheDocument();
-    expect(await within(preview).findByRole("heading", { name: "PhotoDoodle 自动化复现报告" })).toBeInTheDocument();
-    expect(await within(preview).findByRole("heading", { name: "结果对比" })).toBeInTheDocument();
+    const projectFileRow = await screen.findByTestId("workspace-file-row-PhotoDoodle/notes.txt");
+    const rootFileRow = await screen.findByTestId("workspace-file-row-root-report.txt");
+    expect(within(projectFileRow).getByRole("button", { name: "下载 notes.txt" })).toBeInTheDocument();
+    expect(within(rootFileRow).queryByRole("button", { name: "下载 root-report.txt" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(projectFileRow).getByRole("button", { name: "下载 notes.txt" }));
+
+    const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((call) => String(call[0]).includes("/workspace-files/download?path=PhotoDoodle%2Fnotes.txt"))).toBe(true);
+    await waitFor(() => {
+      expect(clickedDownloads).toContain("notes.txt");
+    });
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl);
   });
 });

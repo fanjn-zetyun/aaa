@@ -187,12 +187,60 @@ async def test_repro_report_falls_back_to_workspace_docx_when_skill_returns_lega
     )
 
     report_path = tmp_path / "workspaces" / "123" / "PhotoDoodle" / "PhotoDoodle_Final_Repro_Report.docx"
-    markdown_path = tmp_path / "workspaces" / "123" / "PhotoDoodle" / "PhotoDoodle_Final_Repro_Report.md"
     assert result.ok is True
     assert result.metadata["report_path"] == str(report_path)
-    assert result.metadata["markdown_report_path"] == str(markdown_path)
+    assert "markdown_report_path" not in result.metadata
     assert result.metadata["generation_source"] == "backend_report_fallback"
     assert report_path.exists()
-    assert markdown_path.exists()
-    assert "# PhotoDoodle 自动化复现报告" in markdown_path.read_text(encoding="utf-8")
-    assert str(markdown_path) in result.metadata["artifact_paths"]
+    assert not report_path.with_suffix(".md").exists()
+    assert result.metadata["artifact_paths"] == [str(report_path)]
+
+
+@pytest.mark.asyncio
+async def test_repro_report_publishes_existing_skill_docx_to_project_workspace(
+    monkeypatch,
+    tmp_path,
+):
+    runtime = SkillRuntime(tmp_path / "skills", tmp_path / "workspaces")
+    spec = SkillToolSpec(
+        name="generate_repro_report",
+        description="report",
+        entry_point="report_generator.py:generate_report",
+        input_schema={},
+        skill_name="lab4ai-repro-report",
+        base_dir=tmp_path,
+    )
+    legacy_dir = tmp_path / "legacy-output"
+    legacy_dir.mkdir()
+    legacy_report = legacy_dir / "PhotoDoodle_Final_Repro_Report.docx"
+    legacy_report.write_bytes(b"legacy docx bytes")
+
+    def fake_load_entrypoint(base_dir, entry_point):
+        def generate_report(**kwargs):
+            return f"报告生成成功：`{legacy_report}`"
+
+        return generate_report
+
+    monkeypatch.setattr("app.services.skill_runtime._load_entrypoint", fake_load_entrypoint)
+
+    result = await _run_repro_report(
+        runtime,
+        spec,
+        {
+            "conversation_id": 123,
+            "repo_name": "PhotoDoodle",
+            "project_profile": "PhotoDoodle project",
+            "implementation_steps": {"code_fetch": "cloned"},
+            "results_comparison": [],
+            "optimization_suggestions": "none",
+        },
+    )
+
+    report_path = tmp_path / "workspaces" / "123" / "PhotoDoodle" / "PhotoDoodle_Final_Repro_Report.docx"
+    assert result.ok is True
+    assert result.metadata["report_path"] == str(report_path)
+    assert "markdown_report_path" not in result.metadata
+    assert result.metadata["artifact_paths"] == [str(report_path)]
+    assert "legacy_report_path" not in result.metadata
+    assert report_path.read_bytes() == b"legacy docx bytes"
+    assert not report_path.with_suffix(".md").exists()

@@ -1,0 +1,40 @@
+0 verbose cli D:\nvm\nodejs\node.exe D:\nvm\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.6.2
+2 info using node@v22.20.0
+3 silly config load:file:D:\nvm\v22.20.0\node_modules\npm\npmrc
+4 silly config load:file:D:\codexP\aaa\frontend\.npmrc
+5 silly config load:file:C:\Users\Administrator\.npmrc
+6 silly config load:file:D:\codexP\aaa\frontend\etc\npmrc
+7 verbose title npm ci
+8 verbose argv "--prefix" "frontend" "ci" "--package-lock-only" "--cache" "D:\\codexP\\aaa\\.npm-cache"
+9 verbose logfile logs-max:10 dir:D:\codexP\aaa\.npm-cache\_logs\2026-05-25T03_16_31_950Z-
+10 verbose logfile D:\codexP\aaa\.npm-cache\_logs\2026-05-25T03_16_31_950Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4345298944 maxSize:1086324736 maxEntrySize:543162368
+13 silly idealTree buildDeps
+14 verbose stack Error: EPERM: operation not permitted, unlink 'D:\codexP\aaa\frontend\node_modules\lightningcss-win32-x64-msvc\lightningcss.win32-x64-msvc.node'
+15 error code EPERM
+16 error syscall unlink
+17 error path D:\codexP\aaa\frontend\node_modules\lightningcss-win32-x64-msvc\lightningcss.win32-x64-msvc.node
+18 error errno -4048
+19 error [Error: EPERM: operation not permitted, unlink 'D:\codexP\aaa\frontend\node_modules\lightningcss-win32-x64-msvc\lightningcss.win32-x64-msvc.node'] {
+19 error   errno: -4048,
+19 error   code: 'EPERM',
+19 error   syscall: 'unlink',
+19 error   path: 'D:\\codexP\\aaa\\frontend\\node_modules\\lightningcss-win32-x64-msvc\\lightningcss.win32-x64-msvc.node'
+19 error }
+20 error
+20 error The operation was rejected by your operating system.
+20 error It's possible that the file was already in use (by a text editor or antivirus),
+20 error or that you lack permissions to access it.
+20 error
+20 error If you believe this might be a permissions issue, please double-check the
+20 error permissions of the file and its containing directories, or try running
+20 error the command again as root/Administrator.
+21 verbose cwd D:\codexP\aaa
+22 verbose os Windows_NT 10.0.22631
+23 verbose node v22.20.0
+24 verbose npm  v11.6.2
+25 verbose exit -4048
+26 verbose code -4048
+27 error A complete log of this run can be found in: D:\codexP\aaa\.npm-cache\_logs\2026-05-25T03_16_31_950Z-debug-0.log

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { apiFetch } from "../lib/api";
+import { apiFetch, getToken } from "../lib/api";
 import { MarkdownContent } from "./MarkdownContent";
 
 interface Conversation {
@@ -112,12 +112,12 @@ export default function RightPanel() {
 
   return (
     <aside className="h-full w-full min-h-0 bg-white flex flex-col z-10 overflow-hidden">
-      <section className="h-[44%] min-h-[280px] shrink-0 flex flex-col border-b border-slate-200">
+      <section className="flex-1 basis-0 min-h-0 flex flex-col border-b border-slate-200">
         <PanelHeader title="权限与环境配置" subtitle={statusLabel(conversation?.status)} />
         <RuntimeCredentialsSection data={runtimeCredentials} loading={credentialsLoading} />
       </section>
 
-      <section className="flex-1 min-h-0 flex flex-col">
+      <section className="flex-1 basis-0 min-h-0 flex flex-col">
         <PanelHeader
           title="工作区文件"
           subtitle={workspaceFiles?.exists ? workspaceFiles.root : "未创建"}
@@ -136,6 +136,9 @@ export default function RightPanel() {
             data={workspaceFiles}
             loading={filesLoading}
             onPreview={(file) => setPreviewPath(file.path)}
+            onDownload={(file) => {
+              if (id) void downloadWorkspaceFile(id, file);
+            }}
           />
         )}
       </section>
@@ -253,10 +256,12 @@ function WorkspaceFileList({
   data,
   loading,
   onPreview,
+  onDownload,
 }: {
   data?: WorkspaceFilesResponse;
   loading: boolean;
   onPreview: (file: WorkspaceFile) => void;
+  onDownload: (file: WorkspaceFile) => void;
 }) {
   if (loading) {
     return <EmptyState text="正在读取工作区文件..." />;
@@ -277,7 +282,7 @@ function WorkspaceFileList({
           <div>
             <div className="text-ui-small font-semibold text-slate-800">Workspace Artifacts</div>
             <div className="mt-0.5 text-ui-micro text-slate-400">
-              Markdown 文件可直接预览，最终报告会优先展示。
+              Markdown 文件可直接预览，项目目录下的文件可下载。
             </div>
           </div>
           <span className="shrink-0 rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-ui-micro font-medium text-slate-500">
@@ -286,8 +291,8 @@ function WorkspaceFileList({
         </div>
       </div>
       <div className="py-2">
-        {sortWorkspaceFiles(data.files).map((file) => (
-          <FileRow key={file.path} file={file} onPreview={onPreview} />
+        {data.files.map((file) => (
+          <FileRow key={file.path} file={file} onPreview={onPreview} onDownload={onDownload} />
         ))}
       </div>
     </div>
@@ -381,26 +386,22 @@ function WorkspaceMarkdownPreview({
 function FileRow({
   file,
   onPreview,
+  onDownload,
 }: {
   file: WorkspaceFile;
   onPreview: (file: WorkspaceFile) => void;
+  onDownload: (file: WorkspaceFile) => void;
 }) {
   const isMarkdown = file.kind === "file" && isMarkdownFile(file.name);
-  const isFinalReport = isFinalMarkdownReport(file.path);
-  const rowClass = `group flex w-full items-center gap-2 px-4 py-2.5 text-left text-ui-meta ${
-    isFinalReport ? "bg-emerald-50/70 hover:bg-emerald-50" : "hover:bg-slate-50"
-  }`;
+  const canDownload = file.kind === "file" && isProjectDirectoryFile(file.path);
+  const rowClass = "group flex w-full items-center gap-2 px-4 py-2.5 text-left text-ui-meta hover:bg-slate-50";
   const content = (
     <>
-      <FileIcon kind={file.kind} markdown={isMarkdown} finalReport={isFinalReport} />
+      <FileIcon kind={file.kind} markdown={isMarkdown} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <div className="truncate font-medium text-slate-700">{file.name}</div>
-          {isFinalReport ? (
-            <span className="shrink-0 rounded-md border border-emerald-100 bg-white px-1.5 py-0.5 text-ui-micro font-semibold text-emerald-700">
-              最终报告
-            </span>
-          ) : isMarkdown ? (
+          {isMarkdown ? (
             <span className="shrink-0 rounded-md border border-blue-100 bg-blue-50 px-1.5 py-0.5 text-ui-micro font-semibold text-blue-700">
               MD
             </span>
@@ -413,6 +414,19 @@ function FileRow({
           </div>
         )}
       </div>
+      {canDownload && (
+        <button
+          type="button"
+          aria-label={`下载 ${file.name}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDownload(file);
+          }}
+          className="shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-ui-micro font-medium text-slate-600 hover:bg-slate-50"
+        >
+          下载
+        </button>
+      )}
     </>
   );
 
@@ -420,9 +434,10 @@ function FileRow({
     return (
       <button
         type="button"
-        aria-label={isFinalReport ? `预览最终报告 ${file.name}` : file.name}
+        aria-label={file.name}
         onClick={() => onPreview(file)}
         className={rowClass}
+        data-testid={`workspace-file-row-${file.path}`}
         title={file.path}
         style={{ paddingLeft: `${16 + file.depth * 14}px` }}
       >
@@ -434,6 +449,7 @@ function FileRow({
   return (
     <div
       className={rowClass}
+      data-testid={`workspace-file-row-${file.path}`}
       title={file.path}
       style={{ paddingLeft: `${16 + file.depth * 14}px` }}
     >
@@ -468,8 +484,10 @@ function CredentialRow({ label, value }: { label: string; value: string }) {
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="flex-1 min-h-0 flex items-center justify-center px-6 text-center">
-      <p className="text-ui-small leading-relaxed text-slate-400">{text}</p>
+    <div className="flex-1 min-h-0 overflow-y-auto px-6 text-center">
+      <div className="flex min-h-full items-center justify-center py-6">
+        <p className="text-ui-small leading-relaxed text-slate-400">{text}</p>
+      </div>
     </div>
   );
 }
@@ -477,11 +495,9 @@ function EmptyState({ text }: { text: string }) {
 function FileIcon({
   kind,
   markdown = false,
-  finalReport = false,
 }: {
   kind: WorkspaceFile["kind"];
   markdown?: boolean;
-  finalReport?: boolean;
 }) {
   if (kind === "directory") {
     return (
@@ -495,15 +511,6 @@ function FileIcon({
       <svg className="h-4 w-4 shrink-0 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M10 13a5 5 0 0 0 7.07 0l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15" />
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M14 11a5 5 0 0 0-7.07 0l-2 2A5 5 0 0 0 12 20.07l1.15-1.15" />
-      </svg>
-    );
-  }
-  if (finalReport) {
-    return (
-      <svg className="h-4 w-4 shrink-0 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M7 3h7l5 5v13H7V3Z" />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M14 3v5h5" />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 14h6M9 17h4" />
       </svg>
     );
   }
@@ -596,15 +603,30 @@ function isFinalMarkdownReport(path: string) {
   return isMarkdownFile(lower) && lower.includes("final_repro_report");
 }
 
-function sortWorkspaceFiles(files: WorkspaceFile[]) {
-  return [...files].sort((a, b) => {
-    const aFinal = isFinalMarkdownReport(a.path);
-    const bFinal = isFinalMarkdownReport(b.path);
-    if (aFinal !== bFinal) return aFinal ? -1 : 1;
-    return 0;
-  });
+function isProjectDirectoryFile(path: string) {
+  return path.split("/").filter(Boolean).length >= 2;
 }
 
 function fileNameFromPath(path: string) {
   return path.split("/").pop() || path;
+}
+
+async function downloadWorkspaceFile(conversationId: string, file: WorkspaceFile) {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(
+    `/api/conversations/${conversationId}/workspace-files/download?path=${encodeURIComponent(file.path)}`,
+    { headers }
+  );
+  if (!response.ok) return;
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = file.name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }

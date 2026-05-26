@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch, clearToken } from "../lib/api";
 
@@ -9,6 +9,12 @@ interface Conversation {
   title: string;
   metadata: { github_url?: string };
   created_at: string;
+}
+
+interface DemoHistoryItem {
+  title: string;
+  status: string;
+  href: string;
 }
 
 interface QuotaInfo {
@@ -46,12 +52,21 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+  // {
+  //   path: "/experiments",
+  //   label: "自动化实验矩阵",
+  //   icon: (
+  //     <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+  //       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+  //     </svg>
+  //   ),
+  // },
   {
-    path: "/experiments",
+    path: "/auto-research",
     label: "自动化实验矩阵",
     icon: (
       <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 19h16M6 17V9m6 8V5m6 12v-6M5 9h2m4-4h2m4 6h2" />
       </svg>
     ),
   },
@@ -76,10 +91,13 @@ const NAV_ITEMS = [
   },
 ];
 
+const ZERO_CODE_DEMO_HISTORY_KEY = "zero_code_demo_history";
+
 export default function Sidebar() {
   const location = useLocation();
   const navigate = useNavigate();
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [demoHistory, setDemoHistory] = useState<DemoHistoryItem | null>(() => readDemoHistory());
 
   const { data: conversations } = useQuery({
     queryKey: ["conversations"],
@@ -92,6 +110,18 @@ export default function Sidebar() {
     queryFn: () => apiFetch<QuotaInfo>("/api/cloud-instances/quota"),
     refetchInterval: 30000,
   });
+
+  useEffect(() => {
+    function syncDemoHistory() {
+      setDemoHistory(readDemoHistory());
+    }
+    window.addEventListener("storage", syncDemoHistory);
+    window.addEventListener("zero-code-demo-history", syncDemoHistory);
+    return () => {
+      window.removeEventListener("storage", syncDemoHistory);
+      window.removeEventListener("zero-code-demo-history", syncDemoHistory);
+    };
+  }, []);
 
   function logout() {
     clearToken();
@@ -159,6 +189,15 @@ export default function Sidebar() {
 
         {historyOpen && (
           <div className="px-4 pb-3 max-h-[200px] overflow-y-auto space-y-0.5">
+            {demoHistory && (
+              <Link
+                to={demoHistory.href}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-ui-meta text-slate-500 hover:bg-slate-50 transition-colors"
+              >
+                <StatusDot status={demoHistory.status} />
+                <span className="truncate">{demoHistory.title}</span>
+              </Link>
+            )}
             {conversations?.map((inst) => (
               <Link
                 key={inst.id}
@@ -169,7 +208,7 @@ export default function Sidebar() {
                 <span className="truncate">{inst.title || extractRepoName(inst.metadata.github_url)}</span>
               </Link>
             ))}
-            {(!conversations || conversations.length === 0) && (
+            {!demoHistory && (!conversations || conversations.length === 0) && (
               <p className="text-ui-meta text-slate-400 px-3 py-2">暂无历史任务</p>
             )}
           </div>
@@ -209,6 +248,22 @@ export default function Sidebar() {
       </div>
     </aside>
   );
+}
+
+function readDemoHistory(): DemoHistoryItem | null {
+  try {
+    const raw = localStorage.getItem(ZERO_CODE_DEMO_HISTORY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DemoHistoryItem>;
+    if (!parsed.title || !parsed.href) return null;
+    return {
+      title: parsed.title,
+      href: parsed.href,
+      status: parsed.status || "running",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function StatusDot({ status }: { status: string }) {

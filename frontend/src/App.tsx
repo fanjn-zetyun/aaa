@@ -6,8 +6,11 @@ import ReproducePage from "./pages/ReproducePage";
 import SearchPage from "./pages/SearchPage";
 import PaperOnlyPage from "./pages/PaperOnlyPage";
 import ExperimentsPage from "./pages/ExperimentsPage";
+import AutoResearchPage from "./pages/AutoResearchPage";
+import AutoResearchMockRunPage from "./pages/AutoResearchMockRunPage";
 import PolishPage from "./pages/PolishPage";
 import ChatPage from "./pages/ChatPage";
+import ZeroCodeBoardDemoPage from "./pages/ZeroCodeBoardDemoPage";
 import ModelSettingsPage from "./pages/ModelSettingsPage";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -31,9 +34,13 @@ export default function App() {
         <Route path="/search" element={<SearchPage />} />
         <Route path="/search/task/:taskId" element={<ChatPage />} />
         <Route path="/paper-only" element={<PaperOnlyPage />} />
+        <Route path="/paper-only/demo/zero-code-board" element={<ZeroCodeBoardDemoPage />} />
         <Route path="/paper-only/task/:taskId" element={<ChatPage />} />
         <Route path="/experiments" element={<ExperimentsPage />} />
         <Route path="/experiments/task/:taskId" element={<ChatPage />} />
+        <Route path="/auto-research" element={<AutoResearchPage />} />
+        <Route path="/auto-research/demo/mock-run" element={<AutoResearchMockRunPage />} />
+        <Route path="/auto-research/task/:taskId" element={<ChatPage />} />
         <Route path="/polish" element={<PolishPage />} />
         <Route path="/polish/task/:taskId" element={<ChatPage />} />
         <Route path="/model-settings" element={<ModelSettingsPage />} />

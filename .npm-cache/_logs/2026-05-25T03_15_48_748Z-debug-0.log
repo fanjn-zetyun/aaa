@@ -1,0 +1,19 @@
+0 verbose cli D:\nvm\nodejs\node.exe D:\nvm\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.6.2
+2 info using node@v22.20.0
+3 silly config load:file:D:\nvm\v22.20.0\node_modules\npm\npmrc
+4 silly config load:file:D:\codexP\aaa\.npmrc
+5 silly config load:file:C:\Users\Administrator\.npmrc
+6 silly config load:file:D:\nvm\nodejs\etc\npmrc
+7 verbose title npm view @emnapi/core@1.10.0 version dist.integrity dist.resolved dependencies license
+8 verbose argv "view" "@emnapi/core@1.10.0" "version" "dist.integrity" "dist.resolved" "dependencies" "license" "--json" "--cache" "D:\\codexP\\aaa\\.npm-cache"
+9 verbose logfile logs-max:10 dir:D:\codexP\aaa\.npm-cache\_logs\2026-05-25T03_15_48_748Z-
+10 verbose logfile D:\codexP\aaa\.npm-cache\_logs\2026-05-25T03_15_48_748Z-debug-0.log
+11 silly logfile done cleaning log files
+12 http fetch GET 200 https://registry.npmmirror.com/@emnapi%2fcore 172ms (cache revalidated)
+13 verbose cwd D:\codexP\aaa
+14 verbose os Windows_NT 10.0.22631
+15 verbose node v22.20.0
+16 verbose npm  v11.6.2
+17 verbose exit 0
+18 info ok
